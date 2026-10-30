@@ -313,9 +313,10 @@ static void codegen_expr(AstNode *expr) {
     codegen_normalize(expr->type);
     break;
   }
-  case AST_CONVERT:
+  case AST_CAST:
     codegen_expr(expr->d.unary.operand);
-    if (is_integer(expr->type) &&
+    if ((is_integer(expr->type) || expr->type->kind == TYPE_PTR) &&
+        is_integer(expr->d.unary.operand->type) &&
         expr->type->size > expr->d.unary.operand->type->size)
       codegen_normalize(expr->d.unary.operand->type);
     codegen_normalize(expr->type);
@@ -772,6 +773,10 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
 
 static void codegen_address_constant(AddressConstant *address) {
   AstNode *base = address->base;
+  if (!base) {
+    fprintf(out, "\t.quad %" PRIu64 "\n", (uint64_t)address->offset);
+    return;
+  }
   if (base->kind == AST_STRING_LITERAL) {
     int seq = codegen_string_literal(base);
     fprintf(out, "\t.quad .L.string.%d", seq);
@@ -806,7 +811,8 @@ static void codegen_global_variable(Variable *var) {
         if (string->d.string_literal.val[i])
           nonzero = true;
     } else if (var->type->kind == TYPE_PTR) {
-      nonzero = var->initializer.address.base != NULL;
+      nonzero = var->initializer.address.base != NULL ||
+                var->initializer.address.offset != 0;
     } else {
       nonzero = var->initializer.value != 0;
     }

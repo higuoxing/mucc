@@ -151,6 +151,99 @@ function check_error() {
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
+# Explicit casts share AST_CAST with implicit conversions.
+check 1 'int main(void) { return (char)255 == -1; }' cast-signed-char
+check 1 'int main(void) { return (unsigned char)511 == 255; }' cast-unsigned-char
+check 1 'int main(void) { return (short)65535 == -1; }' cast-signed-short
+check 1 'int main(void) { return (unsigned short)-1 == 65535; }' cast-unsigned-short
+check 1 'int main(void) { return (int)4294967295U == -1; }' cast-signed-int
+check 1 'int main(void) { return (unsigned)-1 == 4294967295U; }' cast-unsigned-int
+check 1 'int main(void) { return (long)-1 == -1L; }' cast-signed-long
+check 1 'int main(void) { return (unsigned long)-1 == 18446744073709551615UL; }' cast-unsigned-long
+check 1 'int main(void) { return (long long)-1 == -1LL; }' cast-signed-long-long
+check 1 'int main(void) { return (unsigned long long)-1 == 18446744073709551615ULL; }' cast-unsigned-long-long
+check 1 'int main(void) { return (long)(int)4294967295U == -1L; }' cast-signed-widening
+check 1 'int main(void) { return (unsigned long)(unsigned)-1 == 4294967295UL; }' cast-unsigned-widening
+check 1 'int main(void) { return (unsigned long)(char)255 == 18446744073709551615UL; }' cast-signed-byte-widening
+check 1 'int main(void) { return (long long)(short)65535 == -1LL; }' cast-signed-short-widening
+check 1 'int main(void) { return (char)(unsigned char)511 == -1; }' cast-nested-right-association
+check 1 'int main(void) { return -(char)255 == 1; }' cast-unary-negation
+check 1 'int main(void) { return ~(unsigned char)0 == -1; }' cast-unary-complement
+check 1 'int main(void) { return !(int *)0 == 1; }' cast-unary-not
+check 1 'int main(void) { return 3 * (unsigned char)257 == 3; }' cast-multiplication-precedence
+check 1 'int main(void) { return (int)257 / (char)2 == 128; }' cast-division-precedence
+check 1 'int main(void) { return (char)(255 + 2) == 1; }' cast-parenthesized-operand
+check 1 'int main(void) { return (int)(1 ? 42 : 0) == 42; }' cast-conditional-operand
+check 1 'int main(void) { return sizeof((unsigned char)1000) == 1 && sizeof((long)1) == 8; }' cast-sizeof-result-type
+check 42 'typedef unsigned long U; int main(void) { U n = (U)42; return n; }' cast-typedef-name
+check 42 'typedef int T; int main(void) { int T = 42; return (T) + 0; }' cast-shadowed-typedef-grouping
+check 42 'enum E { A = 42 }; int main(void) { enum E e = (enum E)42; return (int)e; }' cast-enum-type
+check 42 'int main(void) { int x = 42; void *p = &x; return *(int *)p; }' cast-dereference-cast
+check 42 'typedef int *P; int main(void) { int x = 42; void *p = &x; return *((P)p); }' cast-pointer-typedef
+check 1 'int main(void) { int x = 42; char *p = (char *)&x; return (int *)p == &x; }' cast-unrelated-pointer-types
+check 1 'int main(void) { int x = 42; unsigned long n = (unsigned long)&x; int *p = (int *)n; return p == &x && *p == 42; }' cast-pointer-integer-roundtrip
+check 1 'int main(void) { return (unsigned long)(int *)-1 == 18446744073709551615UL; }' cast-signed-int-to-pointer
+check 1 'int main(void) { return (unsigned long)(int *)4294967295U == 4294967295UL; }' cast-unsigned-int-to-pointer
+check 1 'int main(void) { return (unsigned long)(void *)(char)255 == 18446744073709551615UL; }' cast-signed-char-to-pointer
+check 1 'int main(void) { return (unsigned long)(void *)(unsigned char)511 == 255UL; }' cast-unsigned-char-to-pointer
+check 1 'int main(void) { return (int)(void *)4294967338UL == 42; }' cast-pointer-to-int-truncation
+check 1 'int main(void) { return (unsigned char)(void *)511 == 255; }' cast-pointer-to-byte
+check 42 'int main(void) { int a[2]; int *p = (int *)a; p[1] = 42; return a[1]; }' cast-array-decay
+check 120 'int main(void) { int x = 305419896; return *(unsigned char *)&x; }' cast-object-representation
+check 98 'int main(void) { return ((char *)"abc")[1]; }' cast-string-decay
+check 42 'int main(void) { struct S { int x; }; struct S s; void *p = &s; ((struct S *)p)->x = 42; return s.x; }' cast-struct-pointer
+check 42 'int main(void) { typedef void V; int x = 0; (V)(x = 42); return x; }' cast-void-typedef
+check 42 'int main(void) { int x = 41; (void)x++; return x; }' cast-void-side-effect
+check 42 'int x; void f(void) { x = 42; } int main(void) { (void)f(); return x; }' cast-void-call
+check 42 'int main(void) { (void)(void)0; return 42; }' cast-void-to-void
+check 42 'int main(void) { struct S { int x; }; struct S s; s.x = 42; (void)s; return 42; }' cast-discard-struct
+check 42 'int main(void) { char s[] = "abc"; (void)s; return 42; }' cast-discard-array
+check 42 'int main(void) { int n = 0; for ((void)(n = 42); 0; (void)n++) {} return n; }' cast-void-for-expression
+check 1 'int main(void) { int x = 42; return *(1 ? &x : (void *)0) == 42 && *(0 ? (void *)0 : &x) == 42; }' cast-void-null-conditional-type
+check 42 'int f(int *p) { return *p; } int main(void) { int x = 42; return f((int *)(void *)&x); }' cast-cast-argument
+check 42 'int *f(void *p) { return (int *)p; } int main(void) { int x = 42; return *f(&x); }' cast-cast-return
+check 1 'unsigned long x = (unsigned long)(int)-1; int main(void) { return x == 18446744073709551615UL; }' cast-global-integer
+check 1 'unsigned char x = (unsigned char)511; int main(void) { return x == 255; }' cast-global-narrowing
+check 1 'int *p = (int *)16; int main(void) { return (unsigned long)p == 16; }' cast-global-numeric-pointer
+check 1 'void *p = (void *)18446744073709551615ULL; int main(void) { return (unsigned long)p == 18446744073709551615UL; }' cast-global-high-pointer-bits
+check 1 'int *p = (int *)-1; int main(void) { return (unsigned long)p == 18446744073709551615UL; }' cast-global-signed-pointer
+check 1 'int *p = (int *)4294967295U; int main(void) { return (unsigned long)p == 4294967295UL; }' cast-global-unsigned-pointer
+check 1 'int *p = (int *)(char)255; int main(void) { return (unsigned long)p == 18446744073709551615UL; }' cast-global-signed-byte-pointer
+check 1 'int *p = (void *)0; int main(void) { return p == 0; }' cast-global-void-null
+check 1 'int *p = (void *)(1-1); int main(void) { return p == 0; }' cast-global-void-constant-null
+check 42 'int x = 42; char *p = (char *)&x; int main(void) { return *(int *)p; }' cast-global-pointer-reinterpretation
+check 1 'int a[3]; char *p = (char *)a + 4; int main(void) { return (int *)p == &a[1]; }' cast-global-byte-offset
+check 1 'struct S { char c; long n; }; struct S s; char *p = (char *)&s.n; int main(void) { return (long *)p == &s.n; }' cast-global-member-address
+check 65 'unsigned char *p = (unsigned char *)"A"; int main(void) { return *p; }' cast-global-string-pointer
+check 16 'int main(void) { int a[(unsigned char)260]; return sizeof(a); }' cast-array-bound
+check 255 'enum { N = (unsigned char)511 }; int main(void) { return N; }' cast-enum-initializer
+check 42 'int main(void) { switch (255) { case (unsigned char)511: return 42; } return 0; }' cast-case-label
+check 1 'int main(void) { int x = 0; return (int)(x = 1) == 1 && x == 1; }' cast-operand-evaluated-once
+check_error cast-struct-target 'struct S { int x; }; int main(void) { struct S s; (struct S)s; }' "1:51: error: cast target must be a scalar type or void"
+check_error cast-array-target 'int main(void) { (int[3])0; }' "1:18: error: cast target must be a scalar type or void"
+check_error cast-typedef-array-target 'typedef int A[3]; int main(void) { (A)0; }' "1:36: error: cast target must be a scalar type or void"
+check_error cast-struct-operand 'struct S { int x; }; int main(void) { struct S s; (int)s; }' "1:56: error: cast operand must have scalar type"
+check_error cast-void-operand 'void f(void); int main(void) { return (int)f(); }' "1:44: error: cast operand must have scalar type"
+check_error cast-same-type-assignment 'int main(void) { int x; (int)x = 1; }' "1:32: error: invalid assignment target"
+check_error cast-same-type-address 'int main(void) { int x; &(int)x; }' "1:25: error: invalid address-of target"
+check_error cast-same-type-increment 'int main(void) { int x; ((int)x)++; }' "1:33: error: invalid increment target"
+check_error cast-pointer-assignment 'int main(void) { int *p; ((int *)p) = 0; }' "1:37: error: invalid assignment target"
+check_error cast-void-value 'int main(void) { return (void)42; }' "1:25: error: void expression used as a value"
+check_error cast-void-condition 'int main(void) { if ((void)42) return 1; return 0; }' "1:22: error: void expression used as a value"
+check_error cast-void-initializer 'int main(void) { int x = (void)42; }' "1:26: error: void expression used as a value"
+check_error cast-void-sizeof 'int main(void) { return sizeof((void)42); }' "1:25: error: sizeof cannot be applied to void"
+check_error cast-missing-operand 'int main(void) { return (int); }' "1:30: error: expect expr"
+check_error cast-missing-close 'int main(void) { return (int 42; }' "1:30: error: expect ')'"
+check_error cast-named-type 'int main(void) { return (int x)42; }' "1:30: error: type name cannot contain an identifier"
+check_error cast-typedef-storage 'int main(void) { return (typedef int)42; }' "1:26: error: typedef is not allowed here"
+check_error cast-implicit-pointer-still-invalid 'int main(void) { int *p = 1; }' "1:23: error: incompatible initializer type"
+check_error cast-global-pointer-variable 'int n; int *p = (int *)n;' "1:17: error: global initializer is not a constant expression"
+check_error cast-global-integer-from-pointer 'int x; unsigned long n = (unsigned long)&x;' "1:26: error: global initializer is not a constant expression"
+check_error cast-global-integer-pointer-roundtrip 'long n = (long)(void *)1;' "1:10: error: global initializer is not a constant expression"
+check_error cast-pointer-cast-array-bound 'int a[(int)(void *)1];' "1:21: error: not an integer constant expression"
+check_error cast-pointer-cast-enumerator 'enum { A = (int)(void *)1 };' "1:27: error: not an integer constant expression"
+check_error cast-pointer-cast-case 'int main(void) { switch (1) { case (int)(void *)1: return 0; } }' "1:50: error: not an integer constant expression"
+
 # Stack layout visits declarations after parsing each complete function.
 check 42 'int main(void) { { char s[] = "abc"; long n = 42; return s[3] + n; } }' stack-layout-nested-block
 check 42 'int main(void) { int n = 0; if (n) { char a[] = "a"; n = a[0]; } else { char b[] = "b"; long x = 42; n = x + b[1]; } return n; }' stack-layout-if-and-else

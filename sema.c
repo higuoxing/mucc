@@ -321,7 +321,7 @@ static AstNode *convert_to_value(Parser *p, AstNode *expr) {
   type = pointer_to(expr->type->base);
   if (!type)
     error_at(p, expr->loc, "out of memory");
-  node = new_expr(p, AST_CONVERT, type, expr->loc);
+  node = new_expr(p, AST_CAST, type, expr->loc);
   node->d.unary.operand = expr;
   return node;
 }
@@ -343,7 +343,7 @@ static AstNode *integer_promotion(Parser *p, AstNode *expr) {
   Type *type = integer_promotion_type(expr->type);
   if (type == expr->type)
     return expr;
-  node = new_expr(p, AST_CONVERT, type, expr->loc);
+  node = new_expr(p, AST_CAST, type, expr->loc);
   node->d.unary.operand = expr;
   return node;
 }
@@ -437,7 +437,7 @@ static bool constant_integer_tree(Parser *p, AstNode *expr) {
   switch (expr->kind) {
   case AST_INT_LITERAL:
     return true;
-  case AST_CONVERT:
+  case AST_CAST:
     return constant_integer_tree(p, expr->d.unary.operand);
   case AST_CONDITIONAL:
     if (!constant_integer_tree(p, expr->d.conditional.cond))
@@ -484,6 +484,9 @@ static bool constant_integer_tree(Parser *p, AstNode *expr) {
 }
 
 static bool null_pointer_constant(Parser *p, AstNode *expr) {
+  if (expr->kind == AST_CAST && expr->type->kind == TYPE_PTR &&
+      expr->type->base->kind == TYPE_VOID)
+    expr = expr->d.unary.operand;
   return constant_integer_tree(p, expr) && eval_const_expr(p, expr) == 0;
 }
 
@@ -513,7 +516,8 @@ static bool eval_lvalue_address(Parser *p, AstNode *expr,
     address->offset = 0;
     return true;
   case AST_MEMBER:
-    if (!eval_lvalue_address(p, expr->d.member.base, address) || !address->base)
+    if (!eval_lvalue_address(p, expr->d.member.base, address) ||
+        (!address->base && address->offset == 0))
       return false;
     add_address_offset(p, address, expr->d.member.member->offset, expr->loc);
     return true;
@@ -532,16 +536,17 @@ static bool eval_lvalue_address(Parser *p, AstNode *expr,
 static bool eval_address_constant(Parser *p, AstNode *expr,
                                   AddressConstant *address) {
   switch (expr->kind) {
-  case AST_CONVERT: {
+  case AST_CAST: {
     AstNode *operand = expr->d.unary.operand;
     if (operand->type->kind == TYPE_ARRAY)
-      return eval_lvalue_address(p, operand, address) && address->base;
+      return eval_lvalue_address(p, operand, address) &&
+             (address->base || address->offset != 0);
     if (operand->type->kind == TYPE_PTR)
       return eval_address_constant(p, operand, address);
-    if (!null_pointer_constant(p, operand))
+    if (!constant_integer_tree(p, operand))
       return false;
     address->base = NULL;
-    address->offset = 0;
+    address->offset = eval_const_expr(p, operand);
     return true;
   }
   case AST_ADDR:
@@ -560,7 +565,8 @@ static bool eval_address_constant(Parser *p, AstNode *expr,
     int size = type_size(expr->d.binary.lhs->type->base);
     int64_t offset;
     if (!eval_address_constant(p, expr->d.binary.lhs, address) ||
-        !address->base || !constant_integer_tree(p, index))
+        (!address->base && address->offset == 0) ||
+        !constant_integer_tree(p, index))
       return false;
     offset = eval_const_expr(p, index);
     if (index->type->is_unsigned && (uint64_t)offset > INT64_MAX)
@@ -591,7 +597,28 @@ AstNode *sema_convert_expr(Parser *p, Type *target, AstNode *expr, Token loc,
       !compatible_pointers(target, expr->type) &&
       !(target->kind == TYPE_PTR && null_pointer_constant(p, expr)))
     error_at(p, loc, "incompatible %s type", context);
-  node = new_expr(p, AST_CONVERT, target, expr->loc);
+  node = new_expr(p, AST_CAST, target, expr->loc);
+  node->d.unary.operand = expr;
+  return node;
+}
+
+/*
+ * Explicit casts permit scalar conversions beyond assignment compatibility.
+ * Keep a node even for an unchanged type, since a cast never yields an lvalue.
+ * Casting to void preserves the operand's side effects while discarding it.
+ */
+AstNode *sema_cast(Parser *p, Type *target, AstNode *expr, Token loc) {
+  AstNode *node;
+  if (target->kind != TYPE_VOID) {
+    if (!is_integer(target) && target->kind != TYPE_PTR)
+      error_at(p, loc, "cast target must be a scalar type or void");
+    if (!is_integer(expr->type) && expr->type->kind != TYPE_PTR &&
+        expr->type->kind != TYPE_ARRAY)
+      error_at(p, expr->loc, "cast operand must have scalar type");
+  }
+  if (expr->type->kind != TYPE_STRUCT)
+    expr = convert_to_value(p, expr);
+  node = new_expr(p, AST_CAST, target, loc);
   node->d.unary.operand = expr;
   return node;
 }
@@ -1045,14 +1072,14 @@ AstNode *sema_conditional(Parser *p, AstNode *cond, AstNode *then_expr,
   if (is_integer(type) && is_integer(else_expr->type)) {
     type = common_integer_type(type, else_expr->type);
   } else if (!same_type(type, else_expr->type)) {
-    if (compatible_pointers(type, else_expr->type)) {
-      if (else_expr->type->base->kind == TYPE_VOID)
-        type = else_expr->type;
-    } else if (type->kind == TYPE_PTR && null_pointer_constant(p, else_expr)) {
+    if (type->kind == TYPE_PTR && null_pointer_constant(p, else_expr)) {
       /* The pointer branch determines the result type. */
     } else if (else_expr->type->kind == TYPE_PTR &&
                null_pointer_constant(p, then_expr)) {
       type = else_expr->type;
+    } else if (compatible_pointers(type, else_expr->type)) {
+      if (else_expr->type->base->kind == TYPE_VOID)
+        type = else_expr->type;
     } else {
       error_at(p, loc, "incompatible conditional operand types");
     }
@@ -1100,9 +1127,11 @@ int64_t eval_const_expr(Parser *p, AstNode *expr) {
   switch (expr->kind) {
   case AST_INT_LITERAL:
     return integer_from_bits(expr->d.int_literal.val);
-  case AST_CONVERT: {
+  case AST_CAST: {
+    if (!is_integer(expr->type) || !is_integer(expr->d.unary.operand->type))
+      parse_error(p, "not an integer constant expression");
     int64_t val = eval_const_expr(p, expr->d.unary.operand);
-    if (is_integer(expr->type) && expr->type->size < 8) {
+    if (expr->type->size < 8) {
       int64_t modulus = INT64_C(1) << width;
       val = (uint64_t)val & (uint64_t)(modulus - 1);
       return expr->type->is_unsigned || val < modulus / 2 ? val : val - modulus;

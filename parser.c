@@ -36,6 +36,7 @@ static AstNode *parse_assignment(Parser *p);
 static AstNode *parse_expression(Parser *p);
 static AstNode *parse_condition(Parser *p);
 static AstNode *parse_conditional(Parser *p);
+static AstNode *parse_cast(Parser *p);
 static AstNode *parse_unary(Parser *p);
 static AstNode *parse_call_expr(Parser *p, Function *func);
 static AstNode *parse_postfix(Parser *p);
@@ -192,10 +193,31 @@ static void parse_semicolon(Parser *p) {
 }
 
 /*
+ * cast-expression:
+ *   unary-expression
+ *   '(' type-name ')' cast-expression
+ * (C11 6.5.4)
+ *
+ * A visible typedef name distinguishes a type name from a grouped expression.
+ */
+static AstNode *parse_cast(Parser *p) {
+  if (p->current.kind == TOKEN_LPAREN && (p->lookahead.kind == TOKEN_TYPEDEF ||
+                                          is_type_specifier(p, p->lookahead))) {
+    Token loc = p->current;
+    Type *type;
+    parser_advance(p);
+    type = parse_type_name(p);
+    parse_expect(p, TOKEN_RPAREN, "expect ')'");
+    return sema_cast(p, type, parse_cast(p), loc);
+  }
+  return parse_unary(p);
+}
+
+/*
  * unary-expression:
- *   '-' unary-expression | '~' unary-expression | '!' unary-expression
+ *   '-' cast-expression | '~' cast-expression | '!' cast-expression
  *   '++' unary-expression | '--' unary-expression
- *   '&' unary-expression | '*' unary-expression
+ *   '&' cast-expression | '*' cast-expression
  *   'sizeof' unary-expression | 'sizeof' '(' type-name ')'
  *   postfix-expression
  */
@@ -253,7 +275,9 @@ static AstNode *parse_unary(Parser *p) {
     /* Consume '-' or '~' or '!' or '++' or '--' or '&' or '*' */
     op_tok = p->current;
     parser_advance(p);
-    operand = parse_unary(p);
+    operand = op == AST_PRE_INCREMENT || op == AST_PRE_DECREMENT
+                  ? parse_unary(p)
+                  : parse_cast(p);
 
     return sema_unary(p, op, operand, op_tok);
   }
@@ -973,16 +997,16 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
 
 /*
  * multiplicative-expression:
- *   unary-expression
- *   multiplicative-expression '*' unary-expression
- *   multiplicative-expression '/' unary-expression
- *   multiplicative-expression '%' unary-expression
+ *   cast-expression
+ *   multiplicative-expression '*' cast-expression
+ *   multiplicative-expression '/' cast-expression
+ *   multiplicative-expression '%' cast-expression
  * (C11 6.5.5)
  */
 static AstNode *parse_multiplicative(Parser *p) {
   AstNode *left;
 
-  left = parse_unary(p);
+  left = parse_cast(p);
 
   while (p->current.kind == TOKEN_STAR || p->current.kind == TOKEN_SLASH ||
          p->current.kind == TOKEN_PERCENT) {
@@ -995,7 +1019,7 @@ static AstNode *parse_multiplicative(Parser *p) {
     /* Consume '*' or '/' or '%' */
     parser_advance(p);
 
-    right = parse_unary(p);
+    right = parse_cast(p);
     node = sema_binary(
         p, op == TOKEN_STAR ? AST_MUL : (op == TOKEN_SLASH ? AST_DIV : AST_MOD),
         left, right, op_tok);

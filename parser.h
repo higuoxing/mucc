@@ -26,7 +26,7 @@ typedef struct AstNode AstNode;
 
 /*
  * An address constant names a global object or string literal plus a byte
- * offset. A null pointer has no base and an offset of zero.
+ * offset. Without a base, offset holds absolute pointer bits (zero for null).
  */
 typedef struct {
   AstNode *base;
@@ -175,11 +175,11 @@ typedef enum {
   AST_BREAK,
   AST_CALL,
   AST_CASE,
+  AST_CAST,
   AST_COMMA,
   AST_COMPOUND_ASSIGN,
   AST_CONDITIONAL,
   AST_CONTINUE,
-  AST_CONVERT,
   AST_DECL,
   AST_DEREF,
   AST_DIV,

@@ -63,6 +63,7 @@ extern AstNode *sema_member(Parser *p, AstNode *base, Token op, Token name);
 extern void sema_check_nonvoid_expr(Parser *p, AstNode *expr);
 extern AstNode *sema_convert_expr(Parser *p, Type *target, AstNode *expr,
                                   Token loc, const char *context);
+extern AstNode *sema_cast(Parser *p, Type *target, AstNode *expr, Token loc);
 extern void sema_check_call(Parser *p, Function *func, AstNode *call, int nargs);
 extern void sema_check_return(Parser *p, AstNode *stmt);
 
