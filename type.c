@@ -51,6 +51,7 @@ bool is_integer(const Type *type) {
  * Other types remain unchanged.
  */
 Type *integer_promotion_type(Type *type) {
+  type = unqualified_type(type);
   if (type->kind == TYPE_BOOL || type->kind == TYPE_CHAR ||
       type->kind == TYPE_SHORT || type->kind == TYPE_ENUM)
     return &builtin_type_int;
@@ -88,6 +89,12 @@ Type *common_integer_type(const Type *a, const Type *b) {
  * A void pointer is convertible, not identical, to another object pointer.
  */
 bool same_type(const Type *a, const Type *b) {
+  if (a->is_const != b->is_const)
+    return false;
+  if (a->unqualified)
+    a = a->unqualified;
+  if (b->unqualified)
+    b = b->unqualified;
   if (a->kind == TYPE_ENUM && b->kind != TYPE_ENUM)
     return same_type(a->base, b);
   if (b->kind == TYPE_ENUM && a->kind != TYPE_ENUM)
@@ -105,17 +112,47 @@ bool same_type(const Type *a, const Type *b) {
 
 bool compatible_pointers(const Type *a, const Type *b) {
   return a->kind == TYPE_PTR && b->kind == TYPE_PTR &&
-         (same_type(a, b) || a->base->kind == TYPE_VOID ||
-          b->base->kind == TYPE_VOID);
+         (same_type(unqualified_type(a->base), unqualified_type(b->base)) ||
+          a->base->kind == TYPE_VOID || b->base->kind == TYPE_VOID);
+}
+
+Type *unqualified_type(Type *type) {
+  return type->unqualified ? type->unqualified : type;
+}
+
+/*
+ * Qualifying a typedef must not change its original type. In C11, qualifying
+ * an array qualifies its elements. Struct copies share the original tag so
+ * later completion and type identity remain visible through the qualifier.
+ */
+Type *const_type(Type *type) {
+  Type *qualified;
+  if (type->kind == TYPE_ARRAY) {
+    Type *base = const_type(type->base);
+    return base ? array_of(base, type->array_len) : NULL;
+  }
+  if (type->is_const)
+    return type;
+  qualified = malloc(sizeof(Type));
+  if (!qualified)
+    return NULL;
+  *qualified = *type;
+  qualified->is_const = true;
+  qualified->unqualified = type;
+  return qualified;
 }
 
 /*
  * Sizes are stored in Type: an array's or struct's size is data, not
  * derivable from its kind. Void must never reach this.
  */
-int type_size(const Type *type) { return type->size; }
+int type_size(const Type *type) {
+  return type->unqualified ? type->unqualified->size : type->size;
+}
 
 int type_alignment(const Type *type) {
+  if (type->unqualified)
+    type = type->unqualified;
   if (type->kind == TYPE_STRUCT)
     return type->alignment;
   return type->kind == TYPE_ARRAY ? type_alignment(type->base) : type->size;
@@ -154,7 +191,7 @@ Type *array_of(Type *base, int length) {
   type->kind = TYPE_ARRAY;
   type->base = base;
   type->array_len = length;
-  type->size = length < 0 ? -1 : base->size * length;
+  type->size = length < 0 ? -1 : type_size(base) * length;
   return type;
 }
 

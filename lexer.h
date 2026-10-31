@@ -41,6 +41,7 @@ typedef enum {
   TOKEN_CHAR,       /* 'char' */
   TOKEN_COLON,      /* ':' */
   TOKEN_COMMA,      /* ',' */
+  TOKEN_CONST,      /* 'const' */
   TOKEN_CONTINUE,   /* 'continue' */
   TOKEN_DEFAULT,    /* 'default' */
   TOKEN_DO,         /* 'do' */

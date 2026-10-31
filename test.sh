@@ -151,6 +151,164 @@ function check_error() {
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
+# Const qualification applies independently to objects and pointed-to types.
+check 42 'int main(void) { const int x = 42; return x; }' const-local-int
+check 42 'int main(void) { int const x = 42; return x; }' const-specifier-order
+check 42 'int main(void) { const const int const x = 42; return x; }' const-repeated-qualifier
+check 1 'int main(void) { unsigned const long const x = 1UL << 40; return x == (1UL << 40); }' const-mixed-specifiers
+check 1 'int main(void) { const char a = -1; const short b = -2; const _Bool c = 256; return a == -1 && b == -2 && c == 1; }' const-small-integers
+check 42 'const int x = 42; const int x; int main(void) { return x; }' const-global-definition
+check 0 'const int x; int main(void) { return x; }' const-global-zero
+check 1 'const char a = -1; const unsigned long b = 18446744073709551615UL; int main(void) { return a == -1 && b == 18446744073709551615UL; }' const-global-widths
+check 42 'const int c = 1; int main(void) { int x = 1; x = 42; return x; }' const-builtin-not-mutated
+check 42 'typedef int I; const I c = 1; int main(void) { I x = 1; x = 42; return x; }' const-typedef-not-mutated
+check 42 'typedef const int I; typedef const int I; int main(void) { I x = 42; return x; }' const-typedef-const
+check 42 'typedef int I; typedef const I CI; typedef CI const CI; int main(void) { CI x = 42; return x; }' const-typedef-repeated-const
+check 42 'typedef const int T; int main(void) { T const T = 42; return T; }' const-typedef-name-as-identifier
+check 42 'int main(void) { int x = 42; const int *p = &x; return *p; }' const-pointer-to-const
+check 42 'int main(void) { int x = 1; int *const p = &x; *p = 42; return x; }' const-const-pointer
+check 42 'int main(void) { int x = 42; const int *const p = &x; return *p; }' const-const-pointer-to-const
+check 42 'int main(void) { int x = 1; int * const const p = &x; *p = 42; return x; }' const-repeated-pointer-qualifier
+check 1 'typedef int *P; int main(void) { int x; P p = &x; const P q = p; p = 0; return q == &x && p == 0; }' const-pointer-typedef-not-mutated
+check 42 'int main(void) { int x = 1; const int *p = &x; *(int *)p = 42; return x; }' const-explicit-cast-removes-const
+check 42 'int main(void) { int x = 42; void *v = &x; const int *p = v; return *p; }' const-void-pointer-add-qualifier
+check 42 'int main(void) { int x = 42; const void *v = &x; const int *p = v; return *p; }' const-const-void-pointer
+check 1 'int main(void) { const int *p = 0; const void *q = 0; return p == 0 && q == 0; }' const-null-pointer
+check 42 'int main(void) { int x = 1; int *p = &x; int *const *q = &p; **q = 42; return x; }' const-add-inner-pointer-const
+check 42 'int main(void) { int x = 42; const int *p = &x; const int *const *q = &p; return **q; }' const-nested-compatible-pointer
+check 1 'int main(void) { int x = 42; const int *p; p = &x; return *p == 42; }' const-mutable-pointer-assignment
+check 42 'int f(const int x) { return x; } int main(void) { return f(42); }' const-const-parameter
+check 42 'int f(const int); int f(int x) { x += 1; return x; } int main(void) { return f(41); }' const-parameter-qualifier-compatibility
+check 42 'int f(int); int f(const int x) { return x; } int main(void) { return f(42); }' const-parameter-qualifier-reversed
+check 42 'int f(int *); int f(int *const p) { *p = 42; return *p; } int main(void) { int x; return f(&x); }' const-pointer-parameter-top-qualifier
+check 42 'int f(const int *p) { return *p; } int main(void) { int x = 42; return f(&x); }' const-argument-add-qualifier
+check 42 'int x = 42; const int *f(void) { return &x; } int main(void) { return *f(); }' const-return-add-qualifier
+check 42 'const int f(void) { return 42; } int main(void) { return f(); }' const-qualified-return-value
+check 42 'int f(); int f(const int x) { return x; } int main(void) { return f(42); }' const-prototype-promotion-compatibility
+check 42 'int f(); int main(void) { const char c = 41; return f(c); } int f(int x) { return x + 1; }' const-default-argument-promotion
+check 1 'int main(void) { const int x = 1; const unsigned y = 2; return -x == -1 && ~x == -2 && x+y == 3 && x << 3 == 8; }' const-scalar-promotion
+check 42 'int main(void) { const int x = 1; switch(x) { case 1: return 42; default: return 0; } }' const-switch-promotion
+check 42 'int main(void) { const int x = 1; if (x) return 42; return 0; }' const-condition
+check 1 'int main(void) { const int x = 1; int y = 2; return (1 ? x : y) == 1 && (0 ? x : y) == 2; }' const-conditional-scalar
+check 42 'int main(void) { int x = 42; int *p = &x; const int *q = p; const int *r = 1 ? p : q; return *r; }' const-conditional-add-qualifier
+check 42 'int main(void) { int x = 42; int *p = &x; const int *q = p; const int *r = 1 ? q : p; return *r; }' const-conditional-add-qualifier-reversed
+check 42 'int main(void) { int x = 42; const int *p = &x; void *q = &x; const void *r = 1 ? p : q; return *(const int *)r; }' const-conditional-const-void
+check 42 'int main(void) { int x = 42; const int *p = &x; void *q = &x; const void *r = 1 ? q : p; return *(const int *)r; }' const-conditional-const-void-reversed
+check 42 'int main(void) { const int a[2]; int b[2]; b[1] = 42; const int *p = b; return p[1]; }' const-array-element-qualification
+check 1 'typedef int A[2]; const A a; int main(void) { A b; b[0] = 42; return sizeof(a) == 8 && b[0] == 42; }' const-array-typedef-not-mutated
+check 42 'int f(const int a[]) { return a[1]; } int main(void) { int a[2]; a[1] = 42; return f(a); }' const-array-parameter
+check 98 'int main(void) { const char a[] = "abc"; const char *p = a; return p[1]; }' const-local-string-array
+check 98 'const char a[] = "abc"; int main(void) { return a[1]; }' const-global-string-array
+check 98 'int main(void) { const char *p = "abc"; return p[1]; }' const-string-pointer
+check 1 'int main(void) { int a[3]; const int *p = a; p++; ++p; p--; --p; return p == a && p - a == 0 && a + 2 - p == 2; }' const-pointer-arithmetic
+check 1 'enum E { A = 42 }; int main(void) { const enum E e = A; return e == 42 && sizeof(e) == 4; }' const-enum-qualification
+check 42 'struct S { int x; }; int main(void) { struct S s; s.x = 42; const struct S *p = &s; return p->x; }' const-struct-pointer
+check 0 'struct S { int x; }; const struct S s; int main(void) { return s.x; }' const-global-const-struct
+check 42 'struct S { int *p; }; int main(void) { int x; struct S s; s.p = &x; const struct S *p = &s; *p->p = 42; return x; }' const-const-struct-pointer-member
+check 42 'struct N { int x; struct N *next; }; int main(void) { struct N a; struct N b; a.next = &b; const struct N *p = &a; p->next->x = 42; return b.x; }' const-const-not-transitive-through-pointer
+check 1 'struct S { int x; }; int main(void) { struct S s; const struct S *p = &s; return p - &s == 0; }' const-qualified-struct-identity
+check 42 'typedef struct { int x; } S; int main(void) { S s; s.x = 42; const S *p = &s; return p->x; }' const-anonymous-struct-identity
+check 42 'struct S; const struct S *p; struct S { int x; }; int main(void) { struct S s; s.x = 42; p = &s; return p->x; }' const-forward-qualified-struct
+check 1 'struct S; typedef const struct S CS; struct S { long x; }; int main(void) { CS a[2]; const struct S *p = a; p++; --p; return sizeof(a) == 16 && p+1-p == 1; }' const-forward-struct-size-and-step
+check 0 'struct S; const struct S s; struct S { int x; }; int main(void) { return s.x; }' const-forward-global-qualified-object
+check 1 'int main(void) { return sizeof(const int) == 4 && sizeof(int *const) == 8 && sizeof(const int[2]) == 8; }' const-sizeof-qualified-types
+check 42 'int main(void) { return (const int)42; }' const-qualified-cast
+check 42 'int main(void) { int constancy = 20; int const_ = 22; return constancy + const_; }' const-keyword-boundaries
+check_error const-assign-object 'int main(void) { const int x = 1; x = 2; return x; }' \
+            '1:37: error: invalid assignment target'
+check_error const-compound-object 'int main(void) { const int x = 1; x += 2; return x; }' \
+            '1:37: error: invalid assignment target'
+check_error const-increment-object 'int main(void) { const int x = 1; ++x; return x; }' \
+            '1:35: error: invalid increment target'
+check_error const-decrement-object 'int main(void) { const int x = 1; x--; return x; }' \
+            '1:36: error: invalid decrement target'
+check_error const-assign-through-pointer 'int main(void) { int x; const int *p = &x; *p = 1; return 0; }' \
+            '1:47: error: invalid assignment target'
+check_error const-increment-through-pointer 'int main(void) { int x; const int *p = &x; (*p)++; return 0; }' \
+            '1:48: error: invalid increment target'
+check_error const-assign-pointer 'int main(void) { int x; int *const p = &x; p = 0; return 0; }' \
+            '1:46: error: invalid assignment target'
+check_error const-increment-pointer 'int main(void) { int x; int *const p = &x; p++; return 0; }' \
+            '1:45: error: invalid increment target'
+check_error const-assign-array-element 'int main(void) { const int a[2]; a[0] = 1; return 0; }' \
+            '1:39: error: invalid assignment target'
+check_error const-assign-array-typedef 'typedef int A[2]; int main(void) { const A a; a[0] = 1; return 0; }' \
+            '1:52: error: invalid assignment target'
+check_error const-assign-string-array 'int main(void) { const char a[] = "abc"; a[0] = 1; return 0; }' \
+            '1:47: error: invalid assignment target'
+check_error const-assign-parameter 'int f(const int x) { x = 1; return x; }' \
+            '1:24: error: invalid assignment target'
+check_error const-assign-pointer-parameter 'int f(int *const p) { p = 0; return 0; }' \
+            '1:25: error: invalid assignment target'
+check_error const-assign-array-parameter 'int f(const int a[]) { a[0] = 1; return 0; }' \
+            '1:29: error: invalid assignment target'
+check_error const-assign-struct-member 'struct S { int x; }; int main(void) { const struct S s; s.x = 1; return 0; }' \
+            '1:61: error: invalid assignment target'
+check_error const-assign-arrow-member 'struct S { int x; }; int main(void) { struct S s; const struct S *p = &s; p->x = 1; return 0; }' \
+            '1:80: error: invalid assignment target'
+check_error const-assign-nested-member 'struct I { int x; }; struct O { struct I i; }; int main(void) { const struct O o; o.i.x = 1; return 0; }' \
+            '1:89: error: invalid assignment target'
+check_error const-assign-member-array 'struct S { int a[2]; }; int main(void) { const struct S s; s.a[0] = 1; return 0; }' \
+            '1:67: error: invalid assignment target'
+check_error const-assign-member-pointer 'struct S { int *p; }; int main(void) { const struct S s; s.p = 0; return 0; }' \
+            '1:62: error: invalid assignment target'
+check_error const-assign-explicit-const-member 'struct S { const int x; }; int main(void) { struct S s; s.x = 1; return 0; }' \
+            '1:61: error: invalid assignment target'
+check_error const-discard-pointer-initializer 'int main(void) { const int x = 1; int *p = &x; return 0; }' \
+            '1:40: error: incompatible initializer type'
+check_error const-discard-pointer-assignment 'int main(void) { int *p; const int *q = 0; p = q; return 0; }' \
+            '1:46: error: incompatible assignment type'
+check_error const-discard-pointer-argument 'int f(int *p); int main(void) { const int x = 1; return f(&x); }' \
+            '1:59: error: incompatible argument type'
+check_error const-discard-pointer-return 'const int x = 1; int *f(void) { return &x; }' \
+            '1:33: error: incompatible return type'
+check_error const-discard-void-initializer 'int main(void) { const void *p = 0; int *q = p; return 0; }' \
+            '1:42: error: incompatible initializer type'
+check_error const-discard-to-void 'int main(void) { const int *p = 0; void *q = p; return 0; }' \
+            '1:42: error: incompatible initializer type'
+check_error const-discard-member-address 'struct S { int x; }; int main(void) { const struct S s; int *p = &s.x; return 0; }' \
+            '1:62: error: incompatible initializer type'
+check_error const-discard-array-typedef 'typedef int A[2]; int main(void) { const A a; int *p = a; return 0; }' \
+            '1:52: error: incompatible initializer type'
+check_error const-discard-conditional 'int main(void) { int *p = 0; const int *q = 0; int *r = 1 ? p : q; return 0; }' \
+            '1:53: error: incompatible initializer type'
+check_error const-discard-conditional-reversed 'int main(void) { int *p = 0; const int *q = 0; int *r = 1 ? q : p; return 0; }' \
+            '1:53: error: incompatible initializer type'
+check_error const-discard-qualified-void-null 'int main(void) { int x; int *p = 1 ? &x : (const void *)0; return 0; }' \
+            '1:30: error: incompatible initializer type'
+check_error const-unsafe-nested-pointer 'int main(void) { int **p = 0; const int **q = p; return 0; }' \
+            '1:43: error: incompatible initializer type'
+check_error const-unsafe-nested-pointer-with-const 'int main(void) { int **p = 0; const int *const *q = p; return 0; }' \
+            '1:49: error: incompatible initializer type'
+check_error const-discard-inner-pointer-const 'int main(void) { int x; int *const p = &x; int **q = &p; return 0; }' \
+            '1:50: error: incompatible initializer type'
+check_error const-parameter-pointee-conflict 'int f(int *p); int f(const int *p);' \
+            "1:20: error: conflicting declaration of function 'f'"
+check_error const-global-qualifier-conflict 'const int x; int x;' \
+            "1:18: error: conflicting declaration of variable 'x'"
+check_error const-typedef-qualifier-conflict 'typedef int T; typedef const int T;' \
+            "1:34: error: conflicting typedef for 'T'"
+check_error const-typedef-pointer-qualifier-conflict 'typedef int *T; typedef int *const T;' \
+            "1:36: error: conflicting typedef for 'T'"
+check_error const-qualified-void-parameter 'int f(const void);' \
+            '1:17: error: parameter has void type'
+check_error const-qualifier-without-type 'int main(void) { const x; return 0; }' \
+            '1:24: error: expect type specifier'
+check_error const-incomplete-qualified-sizeof 'struct S; int main(void) { return sizeof(const struct S); }' \
+            '1:35: error: sizeof cannot be applied to an incomplete type'
+check_error const-incomplete-qualified-step 'struct S; int main(void) { const struct S *p = 0; p++; return 0; }' \
+            '1:52: error: pointer arithmetic on incomplete type'
+check_error const-const-object-not-integer-constant 'const int n = 2; int a[n];' \
+            '1:25: error: not an integer constant expression'
+check_error const-const-object-not-static-initializer 'const int n = 2; int m = n;' \
+            '1:26: error: global initializer is not a constant expression'
+check_error const-conditional-unsafe-nested-pointer 'int main(void) { int **p = 0; const int **q = 0; return sizeof(1 ? p : q); }' \
+            '1:66: error: incompatible conditional operand types'
+check_error const-forward-qualified-write 'struct S; const struct S *p; struct S { int x; }; int main(void) { p->x = 1; return 0; }' \
+            '1:73: error: invalid assignment target'
+check_error const-reserved-keyword 'int main() { int const; return 0; }' \
+            '1:23: error: expect variable name'
+
 # Recursive scalar initializer evaluation keeps address and integer contexts separate.
 check 1 'int x; int b = (_Bool)&x; int main(void) { return b; }' constant-nested-integer-cast
 check 1 'int x; unsigned char b = (unsigned char)(_Bool)&x; int main(void) { return b; }' constant-nested-narrow-cast
@@ -2379,7 +2537,7 @@ check_error invalid-int-char-specifiers 'int main() { int char; return 0; }' '1:
 for kw in \
     _Alignas _Alignof _Atomic _Complex _Generic _Imaginary \
 	     _Noreturn _Static_assert _Thread_local \
-	     auto break case const continue default do double else extern \
+	     auto break case continue default do double else extern \
 	     float for goto if inline register restrict signed sizeof \
 	     static switch union volatile while; do
     check_error "reserved-kw-$kw" \

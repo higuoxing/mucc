@@ -256,7 +256,7 @@ static void codegen_integer_binary(AstKind kind, Type *type) {
 
 /* Pointer operands are in %rax and %rcx; sema has checked the pointee type. */
 static void codegen_pointer_offset(AstKind kind, Type *type) {
-  fprintf(out, "\timulq $%d, %%rcx\n", type->base->size);
+  fprintf(out, "\timulq $%d, %%rcx\n", type_size(type->base));
   fprintf(out, kind == AST_PTR_ADD ? "\taddq %%rcx, %%rax\n"
                                    : "\tsubq %%rcx, %%rax\n");
 }
@@ -376,7 +376,8 @@ static void codegen_expr(AstNode *expr) {
     fprintf(out, "\tpopq %%rcx\n");
     push_depth--;
     fprintf(out, "\tsubq %%rcx, %%rax\n");
-    fprintf(out, "\tmovq $%d, %%rcx\n", expr->d.binary.lhs->type->base->size);
+    fprintf(out, "\tmovq $%d, %%rcx\n",
+            type_size(expr->d.binary.lhs->type->base));
     fprintf(out, "\tcqto\n");
     fprintf(out, "\tidivq %%rcx\n");
     break;
@@ -558,7 +559,7 @@ static void codegen_expr(AstNode *expr) {
     int is_ptr = expr->type->kind == TYPE_PTR;
     bool wide = expr->type->size == 8;
     /* Pointers step by the pointee's size, integers by 1. */
-    int step = is_ptr ? expr->type->base->size : 1;
+    int step = is_ptr ? type_size(expr->type->base) : 1;
     codegen_addr(expr->d.unary.operand);
     codegen_load(expr->type, "%rcx");
     if (post) {

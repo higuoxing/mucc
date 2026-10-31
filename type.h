@@ -43,6 +43,8 @@ typedef struct Type {
   TypeKind kind;
   int size; /* In bytes; -1 for an incomplete type. */
   bool is_unsigned; /* Meaningful for integer types only. */
+  bool is_const;
+  struct Type *unqualified; /* Original type for a const-qualified copy. */
   struct Type *base; /* Array element, pointee, or enum's compatible integer type. */
   int array_len; /* Element count for TYPE_ARRAY; -1 for an unknown bound. */
   Member *members; /* Declaration order for TYPE_STRUCT. */
@@ -76,6 +78,8 @@ extern bool same_type(const Type *a, const Type *b);
 extern bool compatible_pointers(const Type *a, const Type *b);
 extern int type_size(const Type *type);
 extern int type_alignment(const Type *type);
+extern Type *unqualified_type(Type *type);
+extern Type *const_type(Type *type);
 extern Type *pointer_to(Type *base);
 extern Type *array_of(Type *base, int length);
 extern Type *struct_type(void);

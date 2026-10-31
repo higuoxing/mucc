@@ -251,7 +251,7 @@ void sema_check_global_variables(Parser *p) {
  * An enum and its compatible integer type are still distinct types here.
  */
 static bool same_typedef_type(Type *a, Type *b) {
-  if (a->kind != b->kind)
+  if (a->kind != b->kind || a->is_const != b->is_const)
     return false;
   if (a->kind == TYPE_PTR || a->kind == TYPE_ARRAY)
     return (a->kind != TYPE_ARRAY || a->array_len == b->array_len) &&
@@ -312,16 +312,20 @@ AstNode *sema_enumerator_expr(Parser *p, Enum *enumerator, Token loc) {
 
 /*
  * Convert an operand used as a value without promoting its integer type.
- * Array decay is the only explicit value conversion needed by our types so far.
+ * Arrays decay to pointers. Scalar value conversion removes the top-level
+ * const qualifier while preserving the qualifiers of any pointed-to type.
  */
 static AstNode *convert_to_value(Parser *p, AstNode *expr) {
   AstNode *node;
   Type *type;
   if (expr->type->kind == TYPE_STRUCT)
     error_at(p, expr->loc, "struct values are not supported yet");
-  if (expr->type->kind != TYPE_ARRAY)
+  if (expr->type->kind == TYPE_ARRAY)
+    type = pointer_to(expr->type->base);
+  else if (expr->type->is_const)
+    type = unqualified_type(expr->type);
+  else
     return expr;
-  type = pointer_to(expr->type->base);
   if (!type)
     error_at(p, expr->loc, "out of memory");
   node = new_expr(p, AST_CAST, type, expr->loc);
@@ -371,6 +375,11 @@ Function *declare_function(Parser *p, Token name, Type *return_type,
   Symbol *prev_sym = find_symbol_in_scope(p, name, 0);
   Function *func = NULL;
   int i;
+  /*
+   * Parameter objects keep const, but it is ignored in the function's type.
+   */
+  for (i = 0; i < nparams; ++i)
+    param_types[i] = unqualified_type(param_types[i]);
   if (prev_sym) {
     if (prev_sym->kind != SYMBOL_FUNCTION)
       error_at(p, name, "function conflicts with %s '%.*s'",
@@ -433,7 +442,7 @@ void sema_check_nonvoid_expr(Parser *p, AstNode *expr) {
 static bool null_pointer_constant(Parser *p, AstNode *expr) {
   int64_t value;
   if (expr->kind == AST_CAST && expr->type->kind == TYPE_PTR &&
-      expr->type->base->kind == TYPE_VOID)
+      expr->type->base->kind == TYPE_VOID && !expr->type->base->is_const)
     expr = expr->d.unary.operand;
   return eval_constant_expr(p, expr, /*allow_addr=*/false, &value) &&
          value == 0;
@@ -544,13 +553,15 @@ static bool eval_address_constant(Parser *p, AstNode *expr,
 AstNode *sema_convert_expr(Parser *p, Type *target, AstNode *expr, Token loc,
                            const char *context) {
   AstNode *node;
+  target = unqualified_type(target);
   expr = convert_to_value(p, expr);
   sema_check_nonvoid_expr(p, expr);
   if (same_type(target, expr->type))
     return expr;
   if (!(is_integer(target) && is_integer(expr->type)) &&
       !(target->kind == TYPE_BOOL && expr->type->kind == TYPE_PTR) &&
-      !compatible_pointers(target, expr->type) &&
+      !(compatible_pointers(target, expr->type) &&
+        (!expr->type->base->is_const || target->base->is_const)) &&
       !(target->kind == TYPE_PTR && null_pointer_constant(p, expr)))
     error_at(p, loc, "incompatible %s type", context);
   node = new_expr(p, AST_CAST, target, expr->loc);
@@ -626,7 +637,8 @@ static bool is_lvalue(const AstNode *expr) {
 }
 
 static bool is_modifiable_lvalue(const AstNode *expr) {
-  return is_lvalue(expr) && expr->type->kind != TYPE_ARRAY;
+  return is_lvalue(expr) && expr->type->kind != TYPE_ARRAY &&
+         !expr->type->is_const;
 }
 
 static bool is_increment_op(AstKind ty) {
@@ -706,7 +718,7 @@ AstNode *sema_sizeof(Parser *p, Type *type, Token loc) {
   AstNode *node;
   if (type->kind == TYPE_VOID)
     error_at(p, loc, "sizeof cannot be applied to void");
-  if (type->size < 0)
+  if (type_size(type) < 0)
     error_at(p, loc, "sizeof cannot be applied to an incomplete type");
   node = new_expr(p, AST_INT_LITERAL, &builtin_type_unsigned_long, loc);
   node->d.int_literal.val = (uint64_t)type_size(type);
@@ -755,7 +767,7 @@ AstNode *sema_unary(Parser *p, AstKind op, AstNode *operand, Token loc) {
     if (operand->type->kind == TYPE_PTR &&
         operand->type->base->kind == TYPE_VOID)
       error_at(p, loc, "pointer arithmetic on void pointer");
-    if (operand->type->kind == TYPE_PTR && operand->type->base->size < 0)
+    if (operand->type->kind == TYPE_PTR && type_size(operand->type->base) < 0)
       error_at(p, loc, "pointer arithmetic on incomplete type");
     type = operand->type;
     break;
@@ -810,8 +822,8 @@ static AstNode *sema_additive(Parser *p, AstKind kind, AstNode *left,
   if ((left->type->kind == TYPE_PTR && left->type->base->kind == TYPE_VOID) ||
       (right->type->kind == TYPE_PTR && right->type->base->kind == TYPE_VOID))
     error_at(p, loc, "pointer arithmetic on void pointer");
-  if ((left->type->kind == TYPE_PTR && left->type->base->size < 0) ||
-      (right->type->kind == TYPE_PTR && right->type->base->size < 0))
+  if ((left->type->kind == TYPE_PTR && type_size(left->type->base) < 0) ||
+      (right->type->kind == TYPE_PTR && type_size(right->type->base) < 0))
     error_at(p, loc, "pointer arithmetic on incomplete type");
   if (kind == AST_ADD && left->type->kind != TYPE_PTR &&
       right->type->kind == TYPE_PTR) {
@@ -823,7 +835,8 @@ static AstNode *sema_additive(Parser *p, AstKind kind, AstNode *left,
   if (left->type->kind == TYPE_PTR && right->type->kind == TYPE_PTR) {
     if (kind != AST_SUB)
       error_at(p, loc, "invalid operands to binary +");
-    if (!same_type(left->type->base, right->type->base))
+    if (!same_type(unqualified_type(left->type->base),
+                   unqualified_type(right->type->base)))
       error_at(p, loc, "pointer subtraction requires compatible types");
     /* Pointer difference has type ptrdiff_t, signed long on our target. */
     kind = AST_PTR_DIFF;
@@ -925,14 +938,20 @@ AstNode *sema_member(Parser *p, AstNode *base, Token op, Token name) {
   } else if (base->type->kind != TYPE_STRUCT) {
     error_at(p, op, "'.' requires a struct operand");
   }
-  if (base->type->size < 0)
+  if (type_size(base->type) < 0)
     error_at(p, op, "member access on incomplete struct");
-  for (member = base->type->members; member; member = member->next)
+  for (member = unqualified_type(base->type)->members; member;
+       member = member->next)
     if (same_identifier(member->name, name))
       break;
   if (!member)
     error_at(p, name, "no member named '%.*s' in struct", name.len, name.start);
   node = new_expr(p, AST_MEMBER, member->type, op);
+  if (base->type->is_const) {
+    node->type = const_type(node->type);
+    if (!node->type)
+      error_at(p, op, "out of memory");
+  }
   node->d.member.base = base;
   node->d.member.member = member;
   return node;
@@ -949,7 +968,7 @@ AstNode *sema_assignment(Parser *p, Token operator, AstNode *left,
   if (op != TOKEN_ASSIGN) {
     if (left->type->kind == TYPE_PTR && left->type->base->kind == TYPE_VOID)
       error_at(p, loc, "pointer arithmetic on void pointer");
-    if (left->type->kind == TYPE_PTR && left->type->base->size < 0)
+    if (left->type->kind == TYPE_PTR && type_size(left->type->base) < 0)
       error_at(p, loc, "pointer arithmetic on incomplete type");
     AstNode *binop;
     AstKind binop_ty;
@@ -1034,8 +1053,16 @@ AstNode *sema_conditional(Parser *p, AstNode *cond, AstNode *then_expr,
                null_pointer_constant(p, then_expr)) {
       type = else_expr->type;
     } else if (compatible_pointers(type, else_expr->type)) {
+      Type *base = type->base;
       if (else_expr->type->base->kind == TYPE_VOID)
-        type = else_expr->type;
+        base = else_expr->type->base;
+      if (type->base->is_const || else_expr->type->base->is_const)
+        base = const_type(base);
+      if (!base)
+        error_at(p, loc, "out of memory");
+      type = pointer_to(base);
+      if (!type)
+        error_at(p, loc, "out of memory");
     } else {
       error_at(p, loc, "incompatible conditional operand types");
     }

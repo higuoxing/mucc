@@ -64,15 +64,16 @@ static AstNode *parse_typedef_declarators(Parser *p, Type *base);
 static Type *parse_declarator(Parser *p, Type *type, Token *name);
 static Type *parse_type_name(Parser *p);
 
-static bool is_type_specifier(Parser *p, Token token) {
+static bool is_declspec(Parser *p, Token token) {
   TokenKind kind = token.kind;
   if (kind == TOKEN_IDENTIFIER) {
     Symbol *sym = find_symbol(p, token);
     return sym && sym->kind == SYMBOL_TYPEDEF;
   }
-  return kind == TOKEN_BOOL || kind == TOKEN_CHAR || kind == TOKEN_SHORT ||
-         kind == TOKEN_INT || kind == TOKEN_LONG || kind == TOKEN_UNSIGNED ||
-         kind == TOKEN_VOID || kind == TOKEN_STRUCT || kind == TOKEN_ENUM;
+  return kind == TOKEN_TYPEDEF || kind == TOKEN_CONST || kind == TOKEN_BOOL ||
+         kind == TOKEN_CHAR || kind == TOKEN_SHORT || kind == TOKEN_INT ||
+         kind == TOKEN_LONG || kind == TOKEN_UNSIGNED || kind == TOKEN_VOID ||
+         kind == TOKEN_STRUCT || kind == TOKEN_ENUM;
 }
 
 /* assignment-operator: = += -= *= /= %= <<= >>= &= ^= |=  (C11 6.5.16) */
@@ -201,8 +202,7 @@ static void parse_semicolon(Parser *p) {
  * A visible typedef name distinguishes a type name from a grouped expression.
  */
 static AstNode *parse_cast(Parser *p) {
-  if (p->current.kind == TOKEN_LPAREN && (p->lookahead.kind == TOKEN_TYPEDEF ||
-                                          is_type_specifier(p, p->lookahead))) {
+  if (p->current.kind == TOKEN_LPAREN && is_declspec(p, p->lookahead)) {
     Token loc = p->current;
     Type *type;
     parser_advance(p);
@@ -226,9 +226,7 @@ static AstNode *parse_unary(Parser *p) {
     Token loc = p->current;
     Type *type;
     parser_advance(p);
-    if (p->current.kind == TOKEN_LPAREN &&
-        (p->lookahead.kind == TOKEN_TYPEDEF ||
-         is_type_specifier(p, p->lookahead))) {
+    if (p->current.kind == TOKEN_LPAREN && is_declspec(p, p->lookahead)) {
       parser_advance(p);
       type = parse_type_name(p);
       parse_expect(p, TOKEN_RPAREN, "expect ')'");
@@ -577,7 +575,7 @@ static Member *parse_struct_member(Parser *p, Type *type, Type *base,
     error_at(p, name, "expect member name");
   if (member_type->kind == TYPE_VOID)
     error_at(p, name, "member has void type");
-  if (member_type->size < 0)
+  if (type_size(member_type) < 0)
     error_at(p, name, "member has incomplete type");
   for (member = type->members; member; member = member->next)
     if (same_identifier(member->name, name))
@@ -585,7 +583,7 @@ static Member *parse_struct_member(Parser *p, Type *type, Type *base,
   alignment = type_alignment(member_type);
   padding = (alignment - *size % alignment) % alignment;
   if (*size > INT_MAX - padding ||
-      member_type->size > INT_MAX - *size - padding)
+      type_size(member_type) > INT_MAX - *size - padding)
     error_at(p, name, "struct size exceeds supported limit");
   member = calloc(1, sizeof(Member));
   if (!member)
@@ -593,7 +591,7 @@ static Member *parse_struct_member(Parser *p, Type *type, Type *base,
   member->name = name;
   member->type = member_type;
   member->offset = *size + padding;
-  *size = member->offset + member_type->size;
+  *size = member->offset + type_size(member_type);
   if (alignment > type->alignment)
     type->alignment = alignment;
   return member;
@@ -674,12 +672,13 @@ static Type *parse_struct_specifier(Parser *p) {
 }
 
 /*
- * declaration-specifiers: (storage-class-specifier | type-specifier)+
+ * declaration-specifiers:
+ *   (storage-class-specifier | type-specifier | type-qualifier)+
  * (C11 6.7, supported subset).
  *
- * Consume typedef and type specifiers in one loop. Passing NULL forbids typedef
- * in type names, members and parameters. Once a base type is consumed, a
- * typedef name can instead be the declarator's name.
+ * Consume typedef, type specifiers and qualifiers in one loop. Passing NULL
+ * forbids typedef in type names, members and parameters. Once a base type is
+ * consumed, a typedef name can instead be the declarator's name.
  */
 static Type *parse_declspecs(Parser *p, bool *is_typedef) {
   enum {
@@ -700,12 +699,19 @@ static Type *parse_declspecs(Parser *p, bool *is_typedef) {
   };
   unsigned specs = DECLSPEC_NONE;
   Type *specified_type = NULL;
+  Type *type;
+  bool is_const = false;
 
   if (is_typedef)
     *is_typedef = false;
-  while (p->current.kind == TOKEN_TYPEDEF || is_type_specifier(p, p->current)) {
+  while (is_declspec(p, p->current)) {
     TokenKind kind = p->current.kind;
     unsigned flag;
+    if (kind == TOKEN_CONST) {
+      is_const = true;
+      parser_advance(p);
+      continue;
+    }
     if (kind == TOKEN_TYPEDEF) {
       if (!is_typedef)
         parse_error(p, "typedef is not allowed here");
@@ -781,45 +787,64 @@ static Type *parse_declspecs(Parser *p, bool *is_typedef) {
 
   switch (specs) {
   case DECLSPEC_BOOL:
-    return &builtin_type_bool;
+    type = &builtin_type_bool;
+    break;
   case DECLSPEC_VOID:
-    return &builtin_type_void;
+    type = &builtin_type_void;
+    break;
   case DECLSPEC_STRUCT:
   case DECLSPEC_ENUM:
   case DECLSPEC_TYPEDEF_NAME:
-    return specified_type;
+    type = specified_type;
+    break;
   case DECLSPEC_INT:
-    return &builtin_type_int;
+    type = &builtin_type_int;
+    break;
   case DECLSPEC_CHAR:
-    return &builtin_type_char;
+    type = &builtin_type_char;
+    break;
   case DECLSPEC_UNSIGNED:
   case DECLSPEC_UNSIGNED | DECLSPEC_INT:
-    return &builtin_type_unsigned;
+    type = &builtin_type_unsigned;
+    break;
   case DECLSPEC_UNSIGNED | DECLSPEC_CHAR:
-    return &builtin_type_unsigned_char;
+    type = &builtin_type_unsigned_char;
+    break;
   case DECLSPEC_SHORT:
   case DECLSPEC_SHORT | DECLSPEC_INT:
-    return &builtin_type_short;
+    type = &builtin_type_short;
+    break;
   case DECLSPEC_UNSIGNED | DECLSPEC_SHORT:
   case DECLSPEC_UNSIGNED | DECLSPEC_SHORT | DECLSPEC_INT:
-    return &builtin_type_unsigned_short;
+    type = &builtin_type_unsigned_short;
+    break;
   case DECLSPEC_LONG:
   case DECLSPEC_LONG | DECLSPEC_INT:
-    return &builtin_type_long;
+    type = &builtin_type_long;
+    break;
   case DECLSPEC_UNSIGNED | DECLSPEC_LONG:
   case DECLSPEC_UNSIGNED | DECLSPEC_LONG | DECLSPEC_INT:
-    return &builtin_type_unsigned_long;
+    type = &builtin_type_unsigned_long;
+    break;
   case DECLSPEC_LONG | DECLSPEC_LONG_LONG:
   case DECLSPEC_LONG | DECLSPEC_LONG_LONG | DECLSPEC_INT:
-    return &builtin_type_long_long;
+    type = &builtin_type_long_long;
+    break;
   case DECLSPEC_UNSIGNED | DECLSPEC_LONG | DECLSPEC_LONG_LONG:
   case DECLSPEC_UNSIGNED | DECLSPEC_LONG | DECLSPEC_LONG_LONG | DECLSPEC_INT:
-    return &builtin_type_unsigned_long_long;
+    type = &builtin_type_unsigned_long_long;
+    break;
   case DECLSPEC_NONE:
     parse_error(p, "expect type specifier");
   default:
     parse_error(p, "invalid combination of type specifiers");
   }
+  if (is_const) {
+    type = const_type(type);
+    if (!type)
+      parse_error(p, "out of memory");
+  }
+  return type;
 }
 
 /*
@@ -829,8 +854,8 @@ static Type *parse_declspecs(Parser *p, bool *is_typedef) {
  *   identifier
  *   identifier '[' constant-expression_opt ']'
  * pointer:
- *   '*'
- *   '*' pointer
+ *   '*' type-qualifier-list_opt
+ *   '*' type-qualifier-list_opt pointer
  * (C11 6.7.6, supported subset; _opt means optional.)
  *
  * The name may be omitted for a parameter declaration; callers enforce where
@@ -845,6 +870,12 @@ static Type *parse_declarator(Parser *p, Type *type, Token *name) {
     if (!type)
       parse_error(p, "out of memory");
     parser_advance(p);
+    while (p->current.kind == TOKEN_CONST) {
+      type = const_type(type);
+      if (!type)
+        parse_error(p, "out of memory");
+      parser_advance(p);
+    }
   }
   *name = p->current;
   if (p->current.kind == TOKEN_IDENTIFIER) {
@@ -857,7 +888,7 @@ static Type *parse_declarator(Parser *p, Type *type, Token *name) {
     parser_advance(p);
     if (type->kind == TYPE_VOID)
       error_at(p, loc, "array element has void type");
-    if (type->size < 0)
+    if (type_size(type) < 0)
       error_at(p, loc, "array element has incomplete type");
     if (p->current.kind != TOKEN_RBRACKET) {
       bound = parse_conditional(p);
@@ -1550,8 +1581,8 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
         if (!param_type)
           parse_error(p, "out of memory");
       }
-      if (param_type->kind == TYPE_VOID && param_types.len == 0 &&
-          param_name.kind != TOKEN_IDENTIFIER &&
+      if (param_type->kind == TYPE_VOID && !param_type->is_const &&
+          param_types.len == 0 && param_name.kind != TOKEN_IDENTIFIER &&
           p->current.kind == TOKEN_RPAREN)
         break;
       if (param_type->kind == TYPE_VOID)
@@ -1708,7 +1739,7 @@ static AstNode *parse_for_stmt(Parser *p) {
   /* A declaration in the init clause is scoped to the whole loop. */
   enter_scope(p);
 
-  if (p->current.kind == TOKEN_TYPEDEF || is_type_specifier(p, p->current)) {
+  if (is_declspec(p, p->current)) {
     /* parse_decl consumes the declaration's own ';'. */
     for_node->d.for_stmt.init = parse_decl(p, false);
   } else if (p->current.kind == TOKEN_SEMICOLON) {
@@ -1989,7 +2020,7 @@ static AstNode *parse_stmt(Parser *p, bool allow_decl) {
   if (p->current.kind == TOKEN_IDENTIFIER && p->lookahead.kind == TOKEN_COLON)
     return parse_label_stmt(p);
 
-  if (p->current.kind == TOKEN_TYPEDEF || is_type_specifier(p, p->current)) {
+  if (is_declspec(p, p->current)) {
     if (allow_decl)
       return parse_decl(p, true);
     parse_error(p, "expect statement");
