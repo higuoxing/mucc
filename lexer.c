@@ -37,7 +37,7 @@ static const Keyword keywords[] = {
     KW("_Alignas", TOKEN_RESERVED),
     KW("_Alignof", TOKEN_RESERVED),
     KW("_Atomic", TOKEN_RESERVED),
-    KW("_Bool", TOKEN_RESERVED),
+    KW("_Bool", TOKEN_BOOL),
     KW("_Complex", TOKEN_RESERVED),
     KW("_Generic", TOKEN_RESERVED),
     KW("_Imaginary", TOKEN_RESERVED),

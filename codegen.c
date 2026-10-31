@@ -138,7 +138,7 @@ static void codegen_addr(AstNode *expr) {
 static void codegen_load(Type *type, const char *dst) {
   if (type->size == 8)
     fprintf(out, "\tmovq (%%rax), %s\n", dst);
-  else if (type->kind == TYPE_CHAR)
+  else if (type->size == 1)
     fprintf(out,
             type->is_unsigned ? "\tmovzbq (%%rax), %s\n"
                               : "\tmovsbq (%%rax), %s\n",
@@ -162,7 +162,7 @@ static void codegen_load(Type *type, const char *dst) {
 static void codegen_store(Type *type) {
   if (type->size == 8)
     fprintf(out, "\tmovq %%rcx, (%%rax)\n");
-  else if (type->kind == TYPE_CHAR)
+  else if (type->size == 1)
     fprintf(out, "\tmovb %%cl, (%%rax)\n");
   else if (type->kind == TYPE_SHORT)
     fprintf(out, "\tmovw %%cx, (%%rax)\n");
@@ -172,10 +172,15 @@ static void codegen_store(Type *type) {
 
 /*
  * Normalize the value in %rax to its integer type: truncate to the type's
- * width, then sign- or zero-extend. Long, pointer and void need no change.
+ * width, then sign- or zero-extend. _Bool converts any nonzero value to 1.
+ * Long, pointer and void need no change.
  */
 static void codegen_normalize(Type *type) {
-  if (type->kind == TYPE_CHAR)
+  if (type->kind == TYPE_BOOL) {
+    fprintf(out, "\tcmpq $0, %%rax\n");
+    fprintf(out, "\tsetne %%al\n");
+    fprintf(out, "\tmovzbl %%al, %%eax\n");
+  } else if (type->kind == TYPE_CHAR)
     fprintf(out, type->is_unsigned ? "\tmovzbq %%al, %%rax\n"
                                    : "\tmovsbq %%al, %%rax\n");
   else if (type->kind == TYPE_SHORT)
@@ -305,12 +310,15 @@ static void codegen_expr(AstNode *expr) {
       codegen_pointer_offset(op, operation_type);
     else
       codegen_integer_binary(op, operation_type);
+    /*
+     * Convert back before storing, so _Bool objects contain only 0 or 1.
+     */
+    codegen_normalize(expr->type);
     fprintf(out, "\tmovq %%rax, %%rcx\n");
     fprintf(out, "\tpopq %%rax\n");
     push_depth--;
     codegen_store(expr->type);
     fprintf(out, "\tmovq %%rcx, %%rax\n");
-    codegen_normalize(expr->type);
     break;
   }
   case AST_CAST:
@@ -514,7 +522,13 @@ static void codegen_expr(AstNode *expr) {
     if (slots)
       fprintf(out, "\taddq $%d, %%rsp\n", slots * 8);
     push_depth -= slots;
-    codegen_normalize(expr->type);
+    /*
+     * Only the low byte of a _Bool return value is defined by the ABI.
+     */
+    if (expr->type->kind == TYPE_BOOL)
+      fprintf(out, "\tmovzbl %%al, %%eax\n");
+    else
+      codegen_normalize(expr->type);
     break;
   }
   case AST_NEG:
@@ -534,38 +548,40 @@ static void codegen_expr(AstNode *expr) {
     fprintf(out, "\tmovzbl %%al, %%eax\n");
     break;
   case AST_PRE_INCREMENT:
-  case AST_PRE_DECREMENT: {
+  case AST_PRE_DECREMENT:
+  case AST_POST_INCREMENT:
+  case AST_POST_DECREMENT: {
+    bool post =
+        expr->kind == AST_POST_INCREMENT || expr->kind == AST_POST_DECREMENT;
+    bool decrement =
+        expr->kind == AST_PRE_DECREMENT || expr->kind == AST_POST_DECREMENT;
     int is_ptr = expr->type->kind == TYPE_PTR;
     bool wide = expr->type->size == 8;
     /* Pointers step by the pointee's size, integers by 1. */
     int step = is_ptr ? expr->type->base->size : 1;
     codegen_addr(expr->d.unary.operand);
     codegen_load(expr->type, "%rcx");
-    fprintf(out, "\t%s%c $%d, %s\n",
-            expr->kind == AST_PRE_INCREMENT ? "add" : "sub", wide ? 'q' : 'l',
-            step, wide ? "%rcx" : "%ecx");
+    if (post) {
+      /* Save the original value as the result. */
+      fprintf(out, "\tpushq %%rcx\n");
+      push_depth++;
+    }
+    /*
+     * For _Bool, ++ always stores 1 and -- toggles between 0 and 1.
+     */
+    if (expr->type->kind == TYPE_BOOL)
+      fprintf(out, decrement ? "\txorl $1, %%ecx\n" : "\tmovl $1, %%ecx\n");
+    else
+      fprintf(out, "\t%s%c $%d, %s\n", decrement ? "sub" : "add",
+              wide ? 'q' : 'l', step, wide ? "%rcx" : "%ecx");
     codegen_store(expr->type);
-    fprintf(out, "\tmovq %%rcx, %%rax\n");
-    codegen_normalize(expr->type);
-    break;
-  }
-  case AST_POST_INCREMENT:
-  case AST_POST_DECREMENT: {
-    int is_ptr = expr->type->kind == TYPE_PTR;
-    bool wide = expr->type->size == 8;
-    int step = is_ptr ? expr->type->base->size : 1;
-
-    codegen_addr(expr->d.unary.operand);
-    codegen_load(expr->type, "%rcx");
-    /* Save the original value as the result. */
-    fprintf(out, "\tpushq %%rcx\n");
-    push_depth++;
-    fprintf(out, "\t%s%c $%d, %s\n",
-            expr->kind == AST_POST_INCREMENT ? "add" : "sub", wide ? 'q' : 'l',
-            step, wide ? "%rcx" : "%ecx");
-    codegen_store(expr->type);
-    fprintf(out, "\tpopq %%rax\n");
-    push_depth--;
+    if (post) {
+      fprintf(out, "\tpopq %%rax\n");
+      push_depth--;
+    } else {
+      fprintf(out, "\tmovq %%rcx, %%rax\n");
+      codegen_normalize(expr->type);
+    }
     break;
   }
   default:
@@ -747,7 +763,7 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
       codegen_expr(stmt->d.decl.init);
       if (stmt->d.decl.var->type->size == 8)
         fprintf(out, "\tmovq %%rax, -%d(%%rbp)\n", stmt->d.decl.var->offset);
-      else if (stmt->d.decl.var->type->kind == TYPE_CHAR)
+      else if (stmt->d.decl.var->type->size == 1)
         fprintf(out, "\tmovb %%al, -%d(%%rbp)\n", stmt->d.decl.var->offset);
       else if (stmt->d.decl.var->type->kind == TYPE_SHORT)
         fprintf(out, "\tmovw %%ax, -%d(%%rbp)\n", stmt->d.decl.var->offset);
@@ -848,7 +864,7 @@ static void codegen_global_variable(Variable *var) {
       fprintf(stderr, "unsupported global initializer size\n");
       exit(1);
     }
-    fprintf(out, "\t%s %" PRIu64 "\n", directive, var->initializer.value);
+    fprintf(out, "\t%s %" PRId64 "\n", directive, var->initializer.value);
   } else {
     fprintf(out, "\t.zero %d\n", size);
   }
@@ -904,7 +920,7 @@ void codegen(const AstNode *ast, FILE *out_file) {
           if (param->type->size == 8)
             fprintf(out, "\tmovq %s, -%d(%%rbp)\n", argregs64[nparams],
                     param->offset);
-          else if (param->type->kind == TYPE_CHAR)
+          else if (param->type->size == 1)
             fprintf(out, "\tmovb %s, -%d(%%rbp)\n", argregs8[nparams],
                     param->offset);
           else if (param->type->kind == TYPE_SHORT)
@@ -918,7 +934,7 @@ void codegen(const AstNode *ast, FILE *out_file) {
           if (param->type->size == 8) {
             fprintf(out, "\tmovq %d(%%rbp), %%rax\n", offset);
             fprintf(out, "\tmovq %%rax, -%d(%%rbp)\n", param->offset);
-          } else if (param->type->kind == TYPE_CHAR) {
+          } else if (param->type->size == 1) {
             fprintf(out, "\tmovb %d(%%rbp), %%al\n", offset);
             fprintf(out, "\tmovb %%al, -%d(%%rbp)\n", param->offset);
           } else if (param->type->kind == TYPE_SHORT) {

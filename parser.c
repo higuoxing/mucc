@@ -70,9 +70,9 @@ static bool is_type_specifier(Parser *p, Token token) {
     Symbol *sym = find_symbol(p, token);
     return sym && sym->kind == SYMBOL_TYPEDEF;
   }
-  return kind == TOKEN_CHAR || kind == TOKEN_SHORT || kind == TOKEN_INT ||
-         kind == TOKEN_LONG || kind == TOKEN_UNSIGNED || kind == TOKEN_VOID ||
-         kind == TOKEN_STRUCT || kind == TOKEN_ENUM;
+  return kind == TOKEN_BOOL || kind == TOKEN_CHAR || kind == TOKEN_SHORT ||
+         kind == TOKEN_INT || kind == TOKEN_LONG || kind == TOKEN_UNSIGNED ||
+         kind == TOKEN_VOID || kind == TOKEN_STRUCT || kind == TOKEN_ENUM;
 }
 
 /* assignment-operator: = += -= *= /= %= <<= >>= &= ^= |=  (C11 6.5.16) */
@@ -694,8 +694,9 @@ static Type *parse_declspecs(Parser *p, bool *is_typedef) {
     DECLSPEC_STRUCT = 1 << 7,
     DECLSPEC_ENUM = 1 << 8,
     DECLSPEC_TYPEDEF_NAME = 1 << 9,
+    DECLSPEC_BOOL = 1 << 10,
     DECLSPEC_EXCLUSIVE = DECLSPEC_VOID | DECLSPEC_STRUCT | DECLSPEC_ENUM |
-        DECLSPEC_TYPEDEF_NAME,
+        DECLSPEC_TYPEDEF_NAME | DECLSPEC_BOOL,
   };
   unsigned specs = DECLSPEC_NONE;
   Type *specified_type = NULL;
@@ -720,6 +721,9 @@ static Type *parse_declspecs(Parser *p, bool *is_typedef) {
     if (kind == TOKEN_IDENTIFIER && specs)
       break;
     switch (kind) {
+    case TOKEN_BOOL:
+      flag = DECLSPEC_BOOL;
+      break;
     case TOKEN_INT:
       flag = DECLSPEC_INT;
       break;
@@ -776,6 +780,8 @@ static Type *parse_declspecs(Parser *p, bool *is_typedef) {
   }
 
   switch (specs) {
+  case DECLSPEC_BOOL:
+    return &builtin_type_bool;
   case DECLSPEC_VOID:
     return &builtin_type_void;
   case DECLSPEC_STRUCT:

@@ -26,6 +26,7 @@
 typedef struct Member Member;
 
 typedef enum {
+  TYPE_BOOL,
   TYPE_CHAR,
   TYPE_SHORT,
   TYPE_INT,
@@ -55,6 +56,7 @@ struct Member {
   Member *next;
 };
 
+extern Type builtin_type_bool;
 extern Type builtin_type_char;
 extern Type builtin_type_unsigned_char;
 extern Type builtin_type_short;

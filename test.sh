@@ -151,6 +151,238 @@ function check_error() {
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
+# Recursive scalar initializer evaluation keeps address and integer contexts separate.
+check 1 'int x; int b = (_Bool)&x; int main(void) { return b; }' constant-nested-integer-cast
+check 1 'int x; unsigned char b = (unsigned char)(_Bool)&x; int main(void) { return b; }' constant-nested-narrow-cast
+check 1 'int x; long b = (long)(_Bool)(_Bool)&x; int main(void) { return b; }' constant-nested-wide-cast
+check 1 'int x; _Bool b = 1 ? (_Bool)&x : 0; int main(void) { return b; }' constant-conditional-bool
+check 0 'int x; _Bool b = 0 ? (_Bool)&x : 0; int main(void) { return b; }' constant-conditional-bool-zero
+check 1 '_Bool b = !(void *)0; int main(void) { return b; }' constant-logical-null
+check 0 'int x; int b = !&x; int main(void) { return b; }' constant-logical-address
+check 1 'int x; _Bool b = &x != 0; int main(void) { return b; }' constant-address-ne-null
+check 0 'int x; int b = &x == (void *)0; int main(void) { return b; }' constant-address-eq-null
+check 1 'int x; int b = 0 != &x; int main(void) { return b; }' constant-null-ne-address
+check 1 'int b = (void *)0 == (int *)0; int main(void) { return b; }' constant-null-eq-null
+check 1 'int b = (int *)256 == (int *)256; int main(void) { return b; }' constant-numeric-pointer-eq
+check 1 'int b = (void *)4294967296UL != 0; int main(void) { return b; }' constant-high-pointer-ne-null
+check 1 'int x; int b = &x == &x; int main(void) { return b; }' constant-same-object-address
+check 0 'int x; int b = &x != &x; int main(void) { return b; }' constant-same-object-address-ne
+check 1 'int a[3]; int b = &a[2] == a + 2; int main(void) { return b; }' constant-same-array-offset
+check 0 'int a[3]; int b = a == a + 1; int main(void) { return b; }' constant-different-array-offset
+check 1 'struct S { int a; int b; }; struct S s; int b = &s.a != &s.b; int main(void) { return b; }' constant-member-address-comparison
+check 1 'int a[3]; int b = a < a + 1; int main(void) { return b; }' constant-array-relational
+check 0 'int a[3]; int b = a + 1 <= a; int main(void) { return b; }' constant-array-relational-false
+check 1 'int x; int b = (_Bool)&x + 41; int main(void) { return b == 42; }' constant-arithmetic-after-address-bool
+check 1 'int x; int b = ~(_Bool)&x; int main(void) { return b == -2; }' constant-unary-after-address-bool
+check 0 'int x; _Bool b = (_Bool)&x - 1; int main(void) { return b; }' constant-bool-from-arithmetic-zero
+check 1 'int x; _Bool b = (_Bool)&x + 255; int main(void) { return b; }' constant-bool-from-arithmetic-nonzero
+check 1 'int x; int b = &x && (_Bool)(void *)4294967296UL; int main(void) { return b; }' constant-logical-and-address
+check 1 'int f(void); int x; int b = &x || f(); int main(void) { return b; }' constant-short-circuit-call
+check 0 'int f(void); int b = (void *)0 && f(); int main(void) { return b; }' constant-short-circuit-null
+check 1 'int x; int b = &x ? 1 : 1 / 0; int main(void) { return b; }' constant-conditional-skips-invalid-branch
+check 42 'int x = 42; int *p = (_Bool)&x ? &x : 0; int main(void) { return *p; }' constant-pointer-conditional-bool
+check 42 'int x = 42; int *p = &x ? &x : 0; int main(void) { return *p; }' constant-pointer-conditional-address
+check 42 'int x = 42; int *p = !(void *)0 ? &x : 0; int main(void) { return *p; }' constant-pointer-conditional-logical
+check 42 'int x = 42; int *p = &*(&x ? &x : 0); int main(void) { return *p; }' constant-nested-lvalue-address
+check 1 'int a[2]; char *p = (char *)a + 4; _Bool b = (_Bool)((char *)a + 4); int main(void) { return b && p == (char *)&a[1]; }' constant-pointer-relocation-preserved
+check 1 'int x; int b = (_Bool)&x << 8; int main(void) { return b == 256; }' constant-shift-after-address-bool
+check 0 'int x; unsigned b = (unsigned)(_Bool)&x + 4294967295U; int main(void) { return b; }' constant-unsigned-wrap-after-address-bool
+check 1 'int x; _Bool b = (_Bool)(unsigned char)((_Bool)&x + 255); int main(void) { return b == 0; }' constant-nested-narrowing-before-bool
+check_error constant-integer-enum-address 'int x; enum { A = (_Bool)&x + 1 };' \
+            '1:33: error: not an integer constant expression'
+check_error constant-integer-array-address 'int x; int a[(_Bool)&x + 1];' \
+            '1:27: error: not an integer constant expression'
+check_error constant-integer-case-address 'int x; int main(void) { switch(1) { case (_Bool)&x: return 1; } return 0; }' \
+            '1:51: error: not an integer constant expression'
+check_error constant-integer-enum-logical-address 'int x; enum { A = !&x };' \
+            '1:23: error: not an integer constant expression'
+check_error constant-integer-enum-comparison-address 'int x; enum { A = &x != 0 };' \
+            '1:27: error: not an integer constant expression'
+check_error constant-integer-array-conditional-address 'int x; int a[&x ? 1 : 2];' \
+            '1:24: error: not an integer constant expression'
+check_error constant-initializer-nested-variable 'int x; int b = (_Bool)x;' \
+            '1:16: error: global initializer is not a constant expression'
+check_error constant-initializer-nested-pointer-variable 'int x; int *p = &x; int b = (int)(_Bool)p;' \
+            '1:29: error: global initializer is not a constant expression'
+check_error constant-initializer-address-with-dynamic-condition 'int n, x; int b = n ? (_Bool)&x : 0;' \
+            '1:21: error: global initializer is not a constant expression'
+check_error constant-initializer-address-with-evaluated-call 'int f(void); int x; int b = &x && f();' \
+            '1:32: error: global initializer is not a constant expression'
+check_error constant-initializer-logical-pointer-read 'int *p = 0; int b = !p;' \
+            '1:21: error: global initializer is not a constant expression'
+check_error constant-initializer-address-comma 'int x; int b = (0, (_Bool)&x);' \
+            '1:18: error: global initializer is not a constant expression'
+check_error constant-initializer-address-assignment 'int x; _Bool b; int n = (b = &x);' \
+            '1:28: error: global initializer is not a constant expression'
+check_error constant-initializer-address-arithmetic-overflow 'int x; int n = (_Bool)&x + 2147483647;' \
+            '1:38: error: integer overflow in constant expression'
+check_error constant-initializer-address-arithmetic-division-zero 'int x; int n = (_Bool)&x / 0;' \
+            '1:29: error: division by zero in constant expression'
+check_error constant-initializer-address-arithmetic-invalid-shift 'int x; int n = (_Bool)&x << 32;' \
+            '1:31: error: invalid shift count in constant expression'
+
+check_error constant-integer-null-cast-enum 'enum { A = (_Bool)(void *)0 };' \
+            '1:29: error: not an integer constant expression'
+check_error constant-null-pointer-from-address-expression 'int x; int *p = (_Bool)&x - 1;' \
+            '1:13: error: incompatible initializer type'
+check_error constant-address-offset-not-integer-constant 'int a[2]; int *p = a + ((_Bool)&a - 1);' \
+            '1:22: error: global initializer is not a constant expression'
+
+# _Bool codegen: scalar conversions, byte storage, updates and calls.
+check 0 'int main(void) { _Bool b = 0; return b; }' bool-runtime-init-zero
+check 1 'int main(void) { _Bool b = 1; return b; }' bool-runtime-init-one
+check 1 'int main(void) { _Bool b = -1; return b; }' bool-runtime-init-negative
+check 1 'int main(void) { _Bool b = 256; return b; }' bool-runtime-init-not-byte-truncation
+check 1 'int main(void) { _Bool b = 4294967296UL; return b; }' bool-runtime-init-high-bits
+check 1 'int main(void) { _Bool b = 18446744073709551615ULL; return b; }' bool-runtime-init-unsigned-max
+check 0 'int main(void) { _Bool b = (unsigned char)256; return b; }' bool-runtime-init-narrowed-zero
+check 1 'int main(void) { int n = 256; return (_Bool)n; }' bool-runtime-cast-int
+check 1 'int main(void) { long n = 1L << 40; return (_Bool)n; }' bool-runtime-cast-long
+check 1 'int main(void) { long long n = -4294967296LL; return (_Bool)n; }' bool-runtime-cast-long-long
+check 0 'int main(void) { unsigned n = 4294967295U; return (_Bool)(n + 1); }' bool-runtime-cast-wrapped-unsigned
+check 1 'int main(void) { _Bool b = 256; return (long)b == 1L && (unsigned char)b == 1; }' bool-runtime-cast-from-bool
+check 0 'int main(void) { int *p = 0; _Bool b = p; return b; }' bool-runtime-init-null-pointer
+check 1 'int main(void) { int n; int *p = &n; _Bool b = p; return b; }' bool-runtime-init-object-pointer
+check 1 'int main(void) { void *p = (void *)4294967296UL; return (_Bool)p; }' bool-runtime-cast-high-pointer
+check 1 'int main(void) { int a[2]; _Bool b = a; return b; }' bool-runtime-init-array
+check 1 'int main(void) { _Bool b = ""; return b; }' bool-runtime-init-string
+check 1 'int main(void) { int guard = 305419896; _Bool b = 256; return guard == 305419896 && b == 1; }' bool-runtime-local-init-byte-width
+check 1 'int main(void) { _Bool a; _Bool b; int r = (a = b = 256); return r == 1 && a == 1 && b == 1; }' bool-runtime-chained-assignment
+check 0 'int main(void) { _Bool b = 1; return b = 0; }' bool-runtime-assignment-zero-result
+check 1 'int main(void) { _Bool b = 0; int n; return (b = &n) == 1 && b == 1; }' bool-runtime-assignment-pointer
+check 1 'int main(void) { _Bool b = 1; int *p = 0; return (b = p) == 0 && b == 0; }' bool-runtime-assignment-null-pointer
+check 1 'int main(void) { _Bool a[3]; a[0] = 1; a[1] = 1; a[2] = 1; a[1] = 0; return a[0] + 2*a[1] + 4*a[2] == 5; }' bool-runtime-array-byte-access
+check 1 'int main(void) { struct S { _Bool a; unsigned char c; _Bool b; unsigned char d; }; struct S s; s.c = 123; s.d = 45; s.a = 256; s.b = 0; s.a++; s.b--; return s.c == 123 && s.d == 45 && s.a == 1 && s.b == 1; }' bool-runtime-member-byte-access
+check 1 'int main(void) { struct S { _Bool b; int n; }; struct S s; struct S *p = &s; p->n = 42; p->b = 256; p->b += 255; return p->b == 1 && p->n == 42; }' bool-runtime-arrow-compound-assignment
+check 1 'int main(void) { _Bool b = 0; _Bool *p = &b; *p = 256; return *p; }' bool-runtime-pointer-load-store
+check 1 'int main(void) { _Bool b = 1; return -b == -1 && ~b == -2 && b + b == 2; }' bool-runtime-signed-integer-promotion
+check 1 'int main(void) { _Bool b = 1; return b << 8 == 256 && b / 2 == 0 && b % 2 == 1; }' bool-runtime-integer-operations
+check 1 'int main(void) { _Bool b = 1; int n = 0; if (b) n++; while (b) { n++; b = 0; } return n == 2; }' bool-runtime-conditions
+check 1 'int main(void) { _Bool b = 1; switch(b) { case 1: return 1; default: return 0; } }' bool-runtime-switch-promotion
+check 1 'int main(void) { _Bool a = 0; _Bool b = 1; int n = 0; a && ++n; b || ++n; return n == 0 && (a ? a : b) == 1; }' bool-runtime-short-circuit
+check 1 'int count; long next(void) { count++; return 1L << 40; } int main(void) { _Bool b = next(); return b == 1 && count == 1; }' bool-runtime-conversion-side-effect-once
+check 0 '_Bool b; int main(void) { return b; }' bool-runtime-global-zero-load
+check 1 '_Bool b = 256; int main(void) { return b; }' bool-runtime-global-nonzero-load
+check 1 '_Bool b; int main(void) { b = 256; b += 255; return b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-global-update-representation
+check 1 '_Bool b = 1; int main(void) { _Bool *p = &b; return p + 1 - p == 1 && sizeof(*p) == 1 && *p == 1; }' bool-runtime-pointer-arithmetic
+check 1 '_Bool f(long n) { return n; } int main(void) { return f(1L << 40) == 1 && f(0) == 0; }' bool-runtime-function-return
+check 1 '_Bool f(void *p) { return p; } int main(void) { return f((void *)4294967296UL) == 1 && f((void *)0) == 0; }' bool-runtime-function-pointer-return
+check 1 'int f(_Bool b) { return b; } int main(void) { return f(256); }' bool-runtime-function-argument
+check 1 '_Bool f(_Bool b) { b += 255; return b; } int main(void) { return f(0) == 1 && f(1) == 1; }' bool-runtime-function-parameter-update
+check 21 'int f(_Bool a,_Bool b,_Bool c,_Bool d,_Bool e,_Bool f) { return a + 2*b + 4*c + 8*d + 16*e + 32*f; } int main(void) { return f(256,0,-1,0,4294967296UL,0); }' bool-runtime-six-register-arguments
+check 85 'int f(_Bool a,_Bool b,_Bool c,_Bool d,_Bool e,_Bool f,_Bool g,_Bool h) { return a+2*b+4*c+8*d+16*e+32*f+64*g+128*h; } int main(void) { return f(256,0,-1,0,4294967296UL,0,65536,0); }' bool-runtime-stack-arguments
+check 1 'int f(int a,long b,char c,_Bool d,short e,int f,_Bool g,_Bool h) { g += 255; h--; return a==3 && b==4294967296L && c==-1 && d==1 && e==7 && f==9 && g==1 && h==1; } int main(void) { return f(3,4294967296L,-1,256,7,9,256,0); }' bool-runtime-mixed-stack-arguments
+check 1 '_Bool f(_Bool b) { return b; } int main(void) { return f(f(256)); }' bool-runtime-nested-calls
+check 1 'int f(); int main(void) { return f((_Bool)256); } int f(int b) { return b; }' bool-runtime-default-argument-promotion
+check 1 'int calls; _Bool *target(_Bool *p) { calls++; return p; } int main(void) { _Bool b = 1; int old = (*target(&b))++; int new = ++(*target(&b)); return calls==2 && old==1 && new==1 && b==1; }' bool-runtime-increment-address-once
+check 1 'int calls; _Bool *target(_Bool *p) { calls++; return p; } int value(void) { calls++; return 256; } int main(void) { _Bool b = 0; int r = (*target(&b) += value()); return calls==2 && r==1 && b==1; }' bool-runtime-compound-address-once
+check 1 'int main(void) { _Bool b = 0; int r = ++b; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-pre-increment-0
+check 1 'int main(void) { _Bool b = 1; int r = ++b; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-pre-increment-1
+check 1 'int main(void) { _Bool b = 0; int r = b++; return r == 0 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-post-increment-0
+check 1 'int main(void) { _Bool b = 1; int r = b++; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-post-increment-1
+check 1 'int main(void) { _Bool b = 0; int r = --b; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-pre-decrement-0
+check 1 'int main(void) { _Bool b = 1; int r = --b; return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-pre-decrement-1
+check 1 'int main(void) { _Bool b = 0; int r = b--; return r == 0 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-post-decrement-0
+check 1 'int main(void) { _Bool b = 1; int r = b--; return r == 1 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-post-decrement-1
+check 1 'int main(void) { _Bool b = 1; int r = (b += 255); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-add-1-255
+check 1 'int main(void) { _Bool b = 1; int r = (b += 4294967295U); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-add-1-4294967295U
+check 1 'int main(void) { _Bool b = 0; int r = (b += 4294967296UL); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-add-0-4294967296UL
+check 1 'int main(void) { _Bool b = 0; int r = (b -= 1); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-sub-0-1
+check 1 'int main(void) { _Bool b = 1; int r = (b -= 1); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-sub-1-1
+check 1 'int main(void) { _Bool b = 1; int r = (b *= 256); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-mul-1-256
+check 1 'int main(void) { _Bool b = 1; int r = (b *= 0); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-mul-1-0
+check 1 'int main(void) { _Bool b = 1; int r = (b /= 2); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-div-1-2
+check 1 'int main(void) { _Bool b = 1; int r = (b %= 2); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-mod-1-2
+check 1 'int main(void) { _Bool b = 1; int r = (b <<= 8); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-lshift-1-8
+check 1 'int main(void) { _Bool b = 1; int r = (b >>= 1); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-rshift-1-1
+check 1 'int main(void) { _Bool b = 1; int r = (b &= 2); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-and-1-2
+check 1 'int main(void) { _Bool b = 0; int r = (b |= 256); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-or-0-256
+check 1 'int main(void) { _Bool b = 1; int r = (b ^= 1); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-xor-1-1
+check 1 'int main(void) { _Bool b = 1; int r = (b ^= 256); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-xor-1-256
+
+# _Bool frontend: types, promotions, constant conversions and diagnostics.
+check 1 'int main(void) { return sizeof(_Bool); }' bool-sizeof-type
+check 3 'int main(void) { _Bool a[3]; return sizeof(a); }' bool-array-size
+check 1 'typedef _Bool B; typedef _Bool B; int main(void) { B b; return sizeof(b); }' bool-typedef
+check 1 '_Bool typedef B; int main(void) { return sizeof(B); }' bool-typedef-after-type
+check 1 '_Bool f(_Bool b); int main(void) { return sizeof(f(256)); }' bool-function-type
+check 1 '_Bool f(_Bool b); int main(void) { int x; return sizeof(f(&x)); }' bool-pointer-argument
+check 1 '_Bool f(_Bool b); int main(void) { int a[2]; return sizeof(f(a)); }' bool-array-argument
+check 1 '_Bool f(_Bool b); int main(void) { return sizeof(f("abc")); }' bool-string-argument
+check 1 'struct S { _Bool a; _Bool b; }; int main(void) { return sizeof(struct S) == 2; }' bool-struct-members
+check 12 'struct S { _Bool a; int i; _Bool b; }; int main(void) { return sizeof(struct S); }' bool-struct-alignment
+check 1 'int main(void) { int x; return sizeof((_Bool)&x); }' bool-pointer-cast-type
+check 1 'int main(void) { return sizeof((_Bool)"abc"); }' bool-string-cast-type
+check 4 'int main(void) { _Bool b; return sizeof(b + b); }' bool-arithmetic-promotion
+check 4 'int main(void) { _Bool b; return sizeof(~b); }' bool-bitwise-promotion
+check 4 'int main(void) { _Bool b; return sizeof(-b); }' bool-negation-promotion
+check 4 'int main(void) { _Bool b; return sizeof(b << b); }' bool-shift-promotion
+check 4 'int main(void) { _Bool b; return sizeof(1 ? b : b); }' bool-conditional-promotion
+check 1 'int main(void) { _Bool b; return sizeof(b = 256); }' bool-assignment-type
+check 1 'int main(void) { _Bool b; int x; return sizeof(b = &x); }' bool-pointer-assignment
+check 1 'int main(void) { _Bool b; return sizeof(b += 2); }' bool-compound-assignment-type
+check 1 'int main(void) { _Bool b; return sizeof(++b) + sizeof(b--) == 2; }' bool-inc-dec-type
+check 0 'enum E { A = (_Bool)0 }; int main(void) { return A; }' bool-constant-zero
+check 1 'enum E { A = (_Bool)256 }; int main(void) { return A; }' bool-constant-not-truncation
+check 1 'enum E { A = (_Bool)-1 }; int main(void) { return A; }' bool-constant-negative
+check 1 'enum E { A = (_Bool)18446744073709551615ULL }; int main(void) { return A; }' bool-constant-unsigned-max
+check 0 'enum E { A = (_Bool)(unsigned char)256 }; int main(void) { return A; }' bool-constant-after-narrowing
+check 4 'int main(void) { int a[(_Bool)256]; return sizeof(a); }' bool-constant-array-bound
+check 0 'int x; int a[3]; _Bool b = 0; int main(void) { return *(unsigned char *)&b; }' bool-global-zero
+check 1 'int x; int a[3]; _Bool b = 1; int main(void) { return *(unsigned char *)&b; }' bool-global-one
+check 1 'int x; int a[3]; _Bool b = -256; int main(void) { return *(unsigned char *)&b; }' bool-global-negative
+check 1 'int x; int a[3]; _Bool b = 256; int main(void) { return *(unsigned char *)&b; }' bool-global-wide
+check 1 'int x; int a[3]; _Bool b = 4294967296UL; int main(void) { return *(unsigned char *)&b; }' bool-global-high-bit
+check 1 'int x; int a[3]; _Bool b = 18446744073709551615ULL; int main(void) { return *(unsigned char *)&b; }' bool-global-unsigned-max
+check 0 'int x; int a[3]; _Bool b = (unsigned char)256; int main(void) { return *(unsigned char *)&b; }' bool-global-narrowed
+check 0 'int x; int a[3]; _Bool b = (void *)0; int main(void) { return *(unsigned char *)&b; }' bool-global-null
+check 1 'int x; int a[3]; _Bool b = (int *)256; int main(void) { return *(unsigned char *)&b; }' bool-global-nonzero-pointer
+check 1 'int x; int a[3]; _Bool b = (void *)4294967296UL; int main(void) { return *(unsigned char *)&b; }' bool-global-high-pointer
+check 1 'int x; int a[3]; _Bool b = &x; int main(void) { return *(unsigned char *)&b; }' bool-global-address
+check 1 'int x; int a[3]; _Bool b = a; int main(void) { return *(unsigned char *)&b; }' bool-global-array
+check 1 'int x; int a[3]; _Bool b = (_Bool)""; int main(void) { return *(unsigned char *)&b; }' bool-global-string
+check 1 'int x; int a[3]; _Bool b = (_Bool)(_Bool)&x; int main(void) { return *(unsigned char *)&b; }' bool-global-nested-casts
+check 1 'int x; int a[3]; _Bool b = (_Bool)(a + 2); int main(void) { return *(unsigned char *)&b; }' bool-global-address-offset
+check 1 'int x; int a[3]; _Bool b = 0 ? (int *)0 : &x; int main(void) { return *(unsigned char *)&b; }' bool-global-pointer-conditional
+check_error bool-unsigned 'unsigned _Bool b;' \
+            '1:10: error: invalid combination of type specifiers'
+check_error bool-unsigned-reversed '_Bool unsigned b;' \
+            '1:7: error: invalid combination of type specifiers'
+check_error bool-int '_Bool int b;' \
+            '1:7: error: invalid combination of type specifiers'
+check_error bool-char 'char _Bool b;' \
+            '1:6: error: invalid combination of type specifiers'
+check_error bool-long 'long _Bool b;' \
+            '1:6: error: invalid combination of type specifiers'
+check_error bool-short '_Bool short b;' \
+            '1:7: error: invalid combination of type specifiers'
+check_error bool-duplicate '_Bool _Bool b;' \
+            '1:7: error: duplicate _Bool type specifier'
+check_error bool-global-type-conflict '_Bool b; unsigned char b;' \
+            "1:24: error: conflicting declaration of variable 'b'"
+check_error bool-prototype-conflict 'int f(); int f(_Bool b);' \
+            "1:14: error: conflicting declaration of function 'f'"
+check_error bool-prototype-conflict-reversed 'int f(_Bool b); int f();' \
+            "1:21: error: conflicting declaration of function 'f'"
+check_error bool-void-init 'void f(void); int main(void) { _Bool b = f(); return 0; }' \
+            '1:42: error: void expression used as a value'
+check_error bool-struct-init 'struct S { int x; }; int main(void) { struct S s; _Bool b = s; return 0; }' \
+            '1:61: error: struct values are not supported yet'
+check_error bool-void-cast 'void f(void); int main(void) { return (_Bool)f(); }' \
+            '1:46: error: cast operand must have scalar type'
+check_error bool-pointer-incompatible 'int main(void) { _Bool b; unsigned char *p = &b; return 0; }' \
+            '1:42: error: incompatible initializer type'
+check_error bool-nonzero-to-pointer 'int main(void) { int *p = (_Bool)256; return 0; }' \
+            '1:23: error: incompatible initializer type'
+check_error bool-global-variable-init 'int x; _Bool b = x;' \
+            '1:18: error: global initializer is not a constant expression'
+check_error bool-global-pointer-variable-init 'int *p; _Bool b = p;' \
+            '1:19: error: global initializer is not a constant expression'
+check_error bool-address-enumerator 'int x; enum E { A = (_Bool)&x };' \
+            '1:31: error: not an integer constant expression'
+check_error bool-address-array-bound 'int x; int a[(_Bool)&x];' \
+            '1:23: error: not an integer constant expression'
+
 # Explicit casts share AST_CAST with implicit conversions.
 check 1 'int main(void) { return (char)255 == -1; }' cast-signed-char
 check 1 'int main(void) { return (unsigned char)511 == 255; }' cast-unsigned-char
@@ -1850,9 +2082,9 @@ check_error short-duplicate-unsigned 'int main(void) { unsigned short unsigned x
 check_error short-conflicting-return 'short f(void); int f(void);' '1:20: error: conflicting declaration of function '"'"'f'"'"''
 check_error short-conflicting-parameter 'int f(short); int f(int);' '1:19: error: conflicting declaration of function '"'"'f'"'"''
 check_error short-conflicting-signedness 'int f(short); int f(unsigned short);' '1:19: error: conflicting declaration of function '"'"'f'"'"''
-check_error short-no-prototype-promotion 'int f(); int f(short);' '1:14: error: conflicting declaration of function '"'"'f'"'"''
+check_error short-no-prototype-promotion 'int f(); int f(short);' "1:14: error: conflicting declaration of function 'f'"
 check_error short-no-prototype-promotion-reverse 'int f(short); int f();' '1:19: error: conflicting declaration of function '"'"'f'"'"''
-check_error unsigned-short-no-prototype-promotion 'int f(); int f(unsigned short);' '1:14: error: conflicting declaration of function '"'"'f'"'"''
+check_error unsigned-short-no-prototype-promotion 'int f(); int f(unsigned short);' "1:14: error: conflicting declaration of function 'f'"
 check_error short-incompatible-pointer 'int main(void) { int x; short *p = &x; return 0; }' '1:32: error: incompatible initializer type'
 check_error short-declaration-as-statement 'int main(void) { if (1) short x; return 0; }' '1:25: error: expect statement'
 
@@ -1993,7 +2225,7 @@ check_error int-unsigned-char-specifier 'int main(void) { int unsigned char c; r
 check_error unsigned-char-duplicate-unsigned 'int main(void) { unsigned char unsigned c; return 0; }' '1:32: error: duplicate unsigned type specifier'
 check_error unsigned-char-conflicting-param 'int f(unsigned char); int f(char);' '1:27: error: conflicting declaration of function '"'"'f'"'"''
 check_error unsigned-char-conflicting-return 'unsigned char f(void); char f(void);' '1:29: error: conflicting declaration of function '"'"'f'"'"''
-check_error unsigned-char-prototype-promotion 'int f(); int f(unsigned char);' '1:14: error: conflicting declaration of function '"'"'f'"'"''
+check_error unsigned-char-prototype-promotion 'int f(); int f(unsigned char);' "1:14: error: conflicting declaration of function 'f'"
 check_error unsigned-char-prototype-promotion-reverse 'int f(unsigned char); int f();' '1:27: error: conflicting declaration of function '"'"'f'"'"''
 check_error unsigned-char-incompatible-pointer 'int main(void) { char c; unsigned char *p = &c; return 0; }' '1:41: error: incompatible initializer type'
 
@@ -2145,7 +2377,7 @@ check_error unsupported-comma-decl 'int main() { int a, b; return 0; }' "1:19: e
 check 42 'int main() { int a = 42; a == 3; return a; }'
 check_error invalid-int-char-specifiers 'int main() { int char; return 0; }' '1:18: error: invalid combination of type specifiers'
 for kw in \
-    _Alignas _Alignof _Atomic _Bool _Complex _Generic _Imaginary \
+    _Alignas _Alignof _Atomic _Complex _Generic _Imaginary \
 	     _Noreturn _Static_assert _Thread_local \
 	     auto break case const continue default do double else extern \
 	     float for goto if inline register restrict signed sizeof \
@@ -2154,7 +2386,7 @@ for kw in \
 		"int main() { int $kw; return 0; }" \
 		'1:18: error: expect variable name'
 done
-for kw in enum struct void; do
+for kw in _Bool enum struct void; do
     check_error "reserved-kw-$kw" \
                 "int main() { int $kw; return 0; }" \
                 '1:18: error: invalid combination of type specifiers'

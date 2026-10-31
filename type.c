@@ -20,6 +20,7 @@
 
 #include "type.h"
 
+Type builtin_type_bool = {.kind = TYPE_BOOL, .size = 1, .is_unsigned = true};
 Type builtin_type_char = {.kind = TYPE_CHAR, .size = 1, .base = NULL};
 Type builtin_type_unsigned_char = {
     .kind = TYPE_CHAR, .size = 1, .is_unsigned = true, .base = NULL};
@@ -38,19 +39,20 @@ Type builtin_type_unsigned_long_long = {
 Type builtin_type_void = {.kind = TYPE_VOID, .size = 0, .base = NULL};
 
 bool is_integer(const Type *type) {
-  return type->kind == TYPE_CHAR || type->kind == TYPE_SHORT ||
-         type->kind == TYPE_INT || type->kind == TYPE_LONG ||
-         type->kind == TYPE_LONG_LONG || type->kind == TYPE_ENUM;
+  return type->kind == TYPE_BOOL || type->kind == TYPE_CHAR ||
+         type->kind == TYPE_SHORT || type->kind == TYPE_INT ||
+         type->kind == TYPE_LONG || type->kind == TYPE_LONG_LONG ||
+         type->kind == TYPE_ENUM;
 }
 
 /*
  * On our target, int represents every char and short value, including
- * unsigned char and unsigned short. Enums use int as their compatible type
- * and also promote to int. Other types remain unchanged.
+ * unsigned char and unsigned short. _Bool and enums also promote to int.
+ * Other types remain unchanged.
  */
 Type *integer_promotion_type(Type *type) {
-  if (type->kind == TYPE_CHAR || type->kind == TYPE_SHORT ||
-      type->kind == TYPE_ENUM)
+  if (type->kind == TYPE_BOOL || type->kind == TYPE_CHAR ||
+      type->kind == TYPE_SHORT || type->kind == TYPE_ENUM)
     return &builtin_type_int;
   return type;
 }

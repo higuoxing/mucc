@@ -51,10 +51,11 @@ typedef struct Variable {
   bool has_initializer;
   /*
    * The variable's type selects integer bits, an address, or a string for a
-   * character array. Integer values contain only the object's stored bits.
+   * character array. Integer values retain the evaluator's signed values or
+   * unsigned bit patterns.
    */
   union {
-    uint64_t value;
+    int64_t value;
     AddressConstant address;
     AstNode *string;
   } initializer;

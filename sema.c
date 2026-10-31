@@ -110,9 +110,17 @@ void sema_check_variable_name(Parser *p, Token name, bool is_parameter) {
 }
 
 static AstNode *new_expr(Parser *p, AstKind kind, Type *type, Token loc);
-static bool constant_integer_tree(Parser *p, AstNode *expr);
+
+/*
+ * allow_addr permits symbolic addresses in static initializers. Integer
+ * constant expressions disable it, including for evaluated subexpressions.
+ */
+static bool eval_constant_expr(Parser *p, AstNode *expr, bool allow_addr,
+                               int64_t *result);
 static bool eval_address_constant(Parser *p, AstNode *expr,
                                   AddressConstant *address);
+static bool eval_constant_condition(Parser *p, AstNode *expr, bool allow_addr,
+                                    bool *result);
 
 /*
  * Create a variable and register its name in the current scope. Callers check
@@ -190,13 +198,12 @@ void sema_initialize_string_array(Parser *p, Variable *var, AstNode *expr) {
 
 /*
  * Evaluate after conversion so narrowing and signedness match the object's
- * type. Integers keep their stored bits, pointers keep a base and byte offset,
- * and character arrays keep the string whose bytes initialize their storage.
+ * type. Integers keep their evaluated values, pointers keep a base and byte
+ * offset, and character arrays keep the string whose bytes initialize them.
  */
 void sema_initialize_global_variable(Parser *p, Token name, AstNode *expr) {
   Variable *var = find_symbol_in_scope(p, name, 0)->d.variable;
-  uint64_t value;
-  int width;
+  int64_t value;
   if (var->has_initializer)
     error_at(p, name, "redefinition of variable '%.*s'", name.len, name.start);
   if (var->type->kind == TYPE_ARRAY) {
@@ -212,12 +219,8 @@ void sema_initialize_global_variable(Parser *p, Token name, AstNode *expr) {
     var->has_initializer = true;
     return;
   }
-  if (!constant_integer_tree(p, expr))
+  if (!eval_constant_expr(p, expr, /*allow_addr=*/true, &value))
     error_at(p, expr->loc, "global initializer is not a constant expression");
-  value = (uint64_t)eval_const_expr(p, expr);
-  width = type_size(var->type) * 8;
-  if (width < 64)
-    value &= (UINT64_C(1) << width) - 1;
   var->initializer.value = value;
   var->has_initializer = true;
 }
@@ -427,67 +430,13 @@ void sema_check_nonvoid_expr(Parser *p, AstNode *expr) {
     error_at(p, expr->loc, "void expression used as a value");
 }
 
-/*
- * Check integer constant expressions before evaluating them. Calls, variable
- * reads and side effects are allowed only in unevaluated branches.
- */
-static bool constant_integer_tree(Parser *p, AstNode *expr) {
-  if (!is_integer(expr->type))
-    return false;
-  switch (expr->kind) {
-  case AST_INT_LITERAL:
-    return true;
-  case AST_CAST:
-    return constant_integer_tree(p, expr->d.unary.operand);
-  case AST_CONDITIONAL:
-    if (!constant_integer_tree(p, expr->d.conditional.cond))
-      return false;
-    return constant_integer_tree(p, eval_const_expr(p, expr->d.conditional.cond)
-                                        ? expr->d.conditional.then_expr
-                                        : expr->d.conditional.else_expr);
-  case AST_LOGICAL_AND:
-  case AST_LOGICAL_OR: {
-    bool lhs;
-    if (!constant_integer_tree(p, expr->d.binary.lhs))
-      return false;
-    lhs = eval_const_expr(p, expr->d.binary.lhs) != 0;
-    if ((expr->kind == AST_LOGICAL_AND && !lhs) ||
-        (expr->kind == AST_LOGICAL_OR && lhs))
-      return true;
-    return constant_integer_tree(p, expr->d.binary.rhs);
-  }
-  case AST_NEG:
-  case AST_BITWISE_NOT:
-  case AST_LOGICAL_NOT:
-    return constant_integer_tree(p, expr->d.unary.operand);
-  case AST_ADD:
-  case AST_SUB:
-  case AST_MUL:
-  case AST_DIV:
-  case AST_MOD:
-  case AST_LSHIFT:
-  case AST_RSHIFT:
-  case AST_LT:
-  case AST_LE:
-  case AST_GT:
-  case AST_GE:
-  case AST_EQ:
-  case AST_NE:
-  case AST_BIT_AND:
-  case AST_BIT_XOR:
-  case AST_BIT_OR:
-    return constant_integer_tree(p, expr->d.binary.lhs) &&
-           constant_integer_tree(p, expr->d.binary.rhs);
-  default:
-    return false;
-  }
-}
-
 static bool null_pointer_constant(Parser *p, AstNode *expr) {
+  int64_t value;
   if (expr->kind == AST_CAST && expr->type->kind == TYPE_PTR &&
       expr->type->base->kind == TYPE_VOID)
     expr = expr->d.unary.operand;
-  return constant_integer_tree(p, expr) && eval_const_expr(p, expr) == 0;
+  return eval_constant_expr(p, expr, /*allow_addr=*/false, &value) &&
+         value == 0;
 }
 
 static void add_address_offset(Parser *p, AddressConstant *address,
@@ -528,47 +477,53 @@ static bool eval_lvalue_address(Parser *p, AstNode *expr,
   }
 }
 
+static bool address_nonzero(const AddressConstant *address) {
+  return address->base != NULL || address->offset != 0;
+}
+
 /*
- * C11 6.6 permits null pointers and addresses of static objects, including
- * an integer constant offset. Reading a pointer variable is not constant,
- * even when that variable has a constant initializer of its own.
+ * Pointer expressions keep their symbolic base and byte offset. Their integer
+ * operands and conditions use the same recursive evaluator as scalar values.
  */
 static bool eval_address_constant(Parser *p, AstNode *expr,
                                   AddressConstant *address) {
+  if (expr->type->kind != TYPE_PTR)
+    return false;
   switch (expr->kind) {
   case AST_CAST: {
     AstNode *operand = expr->d.unary.operand;
+    int64_t value;
     if (operand->type->kind == TYPE_ARRAY)
       return eval_lvalue_address(p, operand, address) &&
-             (address->base || address->offset != 0);
+             address_nonzero(address);
     if (operand->type->kind == TYPE_PTR)
       return eval_address_constant(p, operand, address);
-    if (!constant_integer_tree(p, operand))
+    if (!eval_constant_expr(p, operand, /*allow_addr=*/true, &value))
       return false;
-    address->base = NULL;
-    address->offset = eval_const_expr(p, operand);
+    *address = (AddressConstant){.offset = value};
     return true;
   }
   case AST_ADDR:
     return eval_lvalue_address(p, expr->d.unary.operand, address);
-  case AST_CONDITIONAL:
-    if (!constant_integer_tree(p, expr->d.conditional.cond))
+  case AST_CONDITIONAL: {
+    bool condition;
+    if (!eval_constant_condition(p, expr->d.conditional.cond,
+                                 /*allow_addr=*/true, &condition))
       return false;
     return eval_address_constant(p,
-                                 eval_const_expr(p, expr->d.conditional.cond)
-                                     ? expr->d.conditional.then_expr
-                                     : expr->d.conditional.else_expr,
+                                 condition ? expr->d.conditional.then_expr
+                                           : expr->d.conditional.else_expr,
                                  address);
+  }
   case AST_PTR_ADD:
   case AST_PTR_SUB: {
     AstNode *index = expr->d.binary.rhs;
     int size = type_size(expr->d.binary.lhs->type->base);
     int64_t offset;
     if (!eval_address_constant(p, expr->d.binary.lhs, address) ||
-        (!address->base && address->offset == 0) ||
-        !constant_integer_tree(p, index))
+        !address_nonzero(address) ||
+        !eval_constant_expr(p, index, /*allow_addr=*/false, &offset))
       return false;
-    offset = eval_const_expr(p, index);
     if (index->type->is_unsigned && (uint64_t)offset > INT64_MAX)
       error_at(p, expr->loc, "address offset exceeds supported range");
     if (expr->kind == AST_PTR_SUB) {
@@ -594,6 +549,7 @@ AstNode *sema_convert_expr(Parser *p, Type *target, AstNode *expr, Token loc,
   if (same_type(target, expr->type))
     return expr;
   if (!(is_integer(target) && is_integer(expr->type)) &&
+      !(target->kind == TYPE_BOOL && expr->type->kind == TYPE_PTR) &&
       !compatible_pointers(target, expr->type) &&
       !(target->kind == TYPE_PTR && null_pointer_constant(p, expr)))
     error_at(p, loc, "incompatible %s type", context);
@@ -1119,74 +1075,14 @@ static int64_t checked_integer(Parser *p, Type *type, int64_t val) {
   return val;
 }
 
-/* Evaluate an integer constant expression (C11 6.6). */
-int64_t eval_const_expr(Parser *p, AstNode *expr) {
-  int64_t lhs, rhs;
-  bool unsigned_comparison;
+/*
+ * Both evaluation contexts share integer arithmetic, including target-width
+ * wrapping and diagnostics for undefined operations.
+ */
+static int64_t eval_integer_binary(Parser *p, AstNode *expr, int64_t lhs,
+                                   int64_t rhs) {
   int width = expr->type->size * 8;
-  switch (expr->kind) {
-  case AST_INT_LITERAL:
-    return integer_from_bits(expr->d.int_literal.val);
-  case AST_CAST: {
-    if (!is_integer(expr->type) || !is_integer(expr->d.unary.operand->type))
-      parse_error(p, "not an integer constant expression");
-    int64_t val = eval_const_expr(p, expr->d.unary.operand);
-    if (expr->type->size < 8) {
-      int64_t modulus = INT64_C(1) << width;
-      val = (uint64_t)val & (uint64_t)(modulus - 1);
-      return expr->type->is_unsigned || val < modulus / 2 ? val : val - modulus;
-    }
-    return val;
-  }
-  case AST_CONDITIONAL:
-    return eval_const_expr(p, expr->d.conditional.cond)
-               ? eval_const_expr(p, expr->d.conditional.then_expr)
-               : eval_const_expr(p, expr->d.conditional.else_expr);
-  case AST_NEG: {
-    int64_t val = eval_const_expr(p, expr->d.unary.operand);
-    if (!expr->type->is_unsigned && val == INT64_MIN)
-      parse_error(p, "integer overflow in constant expression");
-    return checked_integer(p, expr->type, integer_from_bits(0 - (uint64_t)val));
-  }
-  case AST_BITWISE_NOT:
-    return checked_integer(p, expr->type,
-                           ~eval_const_expr(p, expr->d.unary.operand));
-  case AST_LOGICAL_NOT:
-    return !eval_const_expr(p, expr->d.unary.operand);
-  case AST_LOGICAL_AND: {
-    /* Preserve short-circuit semantics, so 0 && (1 / 0) is valid. */
-    int64_t lhs = eval_const_expr(p, expr->d.binary.lhs);
-    return lhs ? eval_const_expr(p, expr->d.binary.rhs) != 0 : 0;
-  }
-  case AST_LOGICAL_OR: {
-    int64_t lhs = eval_const_expr(p, expr->d.binary.lhs);
-    return lhs ? 1 : eval_const_expr(p, expr->d.binary.rhs) != 0;
-  }
-  case AST_ADD:
-  case AST_SUB:
-  case AST_MUL:
-  case AST_DIV:
-  case AST_MOD:
-  case AST_LSHIFT:
-  case AST_RSHIFT:
-  case AST_LT:
-  case AST_LE:
-  case AST_GT:
-  case AST_GE:
-  case AST_EQ:
-  case AST_NE:
-  case AST_BIT_AND:
-  case AST_BIT_XOR:
-  case AST_BIT_OR:
-    break;
-  default:
-    /* AST_VAR, AST_ASSIGN, increments, and so on are not constant. */
-    parse_error(p, "not an integer constant expression");
-  }
-
-  lhs = eval_const_expr(p, expr->d.binary.lhs);
-  rhs = eval_const_expr(p, expr->d.binary.rhs);
-  unsigned_comparison = expr->d.binary.lhs->type->is_unsigned;
+  bool unsigned_comparison = expr->d.binary.lhs->type->is_unsigned;
 
   switch (expr->kind) {
   case AST_ADD:
@@ -1274,6 +1170,211 @@ int64_t eval_const_expr(Parser *p, AstNode *expr) {
   default:
     parse_error(p, "invalid constant expression");
   }
+}
+
+/*
+ * Conditions accept either an integer result or, when allowed, an address.
+ * The expression's type selects the evaluator, so no result tag is needed.
+ */
+static bool eval_constant_condition(Parser *p, AstNode *expr, bool allow_addr,
+                                    bool *result) {
+  if (expr->type->kind == TYPE_PTR) {
+    AddressConstant address;
+    if (!allow_addr || !eval_address_constant(p, expr, &address))
+      return false;
+    *result = address_nonzero(&address);
+    return true;
+  }
+  int64_t value;
+  if (!eval_constant_expr(p, expr, /*allow_addr=*/allow_addr, &value))
+    return false;
+  *result = value != 0;
+  return true;
+}
+
+/*
+ * Separate AST_VAR expressions can name the same object. Distinct string
+ * literals may be merged by the implementation, so do not assume inequality.
+ */
+static bool same_address_base(AstNode *a, AstNode *b) {
+  return a == b || (a && b && a->kind == AST_VAR && b->kind == AST_VAR &&
+                    a->d.variable.var == b->d.variable.var);
+}
+
+/*
+ * A pointer comparison may also have an integer zero as its null operand.
+ */
+static bool eval_comparison_address(Parser *p, AstNode *expr,
+                                    AddressConstant *address) {
+  if (expr->type->kind == TYPE_PTR)
+    return eval_address_constant(p, expr, address);
+  int64_t value;
+  if (!eval_constant_expr(p, expr, /*allow_addr=*/true, &value) || value != 0)
+    return false;
+  *address = (AddressConstant){0};
+  return true;
+}
+
+static bool eval_address_comparison(Parser *p, AstNode *expr, int64_t *result) {
+  AstNode *lhs = expr->d.binary.lhs;
+  AstNode *rhs = expr->d.binary.rhs;
+  AddressConstant left, right;
+  bool equality = expr->kind == AST_EQ || expr->kind == AST_NE;
+  if (!equality && (lhs->type->kind != TYPE_PTR || rhs->type->kind != TYPE_PTR))
+    return false;
+  if (!eval_comparison_address(p, lhs, &left) ||
+      !eval_comparison_address(p, rhs, &right))
+    return false;
+  if (!same_address_base(left.base, right.base)) {
+    if (!equality || (address_nonzero(&left) && address_nonzero(&right)))
+      return false;
+    *result = expr->kind == AST_NE;
+    return true;
+  }
+  if (equality) {
+    bool equal = left.offset == right.offset;
+    *result = expr->kind == AST_EQ ? equal : !equal;
+    return true;
+  }
+  /*
+   * Relational comparisons are folded only within the same static object.
+   */
+  if (!left.base)
+    return false;
+  switch (expr->kind) {
+  case AST_LT:
+    *result = left.offset < right.offset;
+    return true;
+  case AST_LE:
+    *result = left.offset <= right.offset;
+    return true;
+  case AST_GT:
+    *result = left.offset > right.offset;
+    return true;
+  case AST_GE:
+    *result = left.offset >= right.offset;
+    return true;
+  default:
+    return false;
+  }
+}
+
+/*
+ * Evaluate integer results recursively. With allow_addr, casts to _Bool,
+ * comparisons and conditions may consume addresses through the pointer
+ * evaluator. Calls, reads and side effects fail in evaluated branches.
+ */
+static bool eval_constant_expr(Parser *p, AstNode *expr, bool allow_addr,
+                               int64_t *result) {
+  int64_t left, right;
+  bool condition;
+  if (!is_integer(expr->type))
+    return false;
+  switch (expr->kind) {
+  case AST_INT_LITERAL:
+    *result = integer_from_bits(expr->d.int_literal.val);
+    return true;
+  case AST_CAST: {
+    AstNode *operand = expr->d.unary.operand;
+    if (expr->type->kind == TYPE_BOOL) {
+      if (!eval_constant_condition(p, operand, /*allow_addr=*/allow_addr,
+                                   &condition))
+        return false;
+      *result = condition;
+      return true;
+    }
+    if (!eval_constant_expr(p, operand, /*allow_addr=*/allow_addr, &left))
+      return false;
+    if (expr->type->size < 8) {
+      int width = expr->type->size * 8;
+      int64_t modulus = INT64_C(1) << width;
+      left = (uint64_t)left & (uint64_t)(modulus - 1);
+      if (!expr->type->is_unsigned && left >= modulus / 2)
+        left -= modulus;
+    }
+    *result = left;
+    return true;
+  }
+  case AST_CONDITIONAL:
+    if (!eval_constant_condition(p, expr->d.conditional.cond,
+                                 /*allow_addr=*/allow_addr, &condition))
+      return false;
+    return eval_constant_expr(p,
+                              condition ? expr->d.conditional.then_expr
+                                        : expr->d.conditional.else_expr,
+                              /*allow_addr=*/allow_addr, result);
+  case AST_LOGICAL_AND:
+  case AST_LOGICAL_OR:
+    if (!eval_constant_condition(p, expr->d.binary.lhs,
+                                 /*allow_addr=*/allow_addr, &condition))
+      return false;
+    if ((expr->kind == AST_LOGICAL_AND && !condition) ||
+        (expr->kind == AST_LOGICAL_OR && condition)) {
+      *result = condition;
+      return true;
+    }
+    if (!eval_constant_condition(p, expr->d.binary.rhs,
+                                 /*allow_addr=*/allow_addr, &condition))
+      return false;
+    *result = condition;
+    return true;
+  case AST_LOGICAL_NOT:
+    if (!eval_constant_condition(p, expr->d.unary.operand,
+                                 /*allow_addr=*/allow_addr, &condition))
+      return false;
+    *result = !condition;
+    return true;
+  case AST_NEG:
+  case AST_BITWISE_NOT:
+    if (!eval_constant_expr(p, expr->d.unary.operand, /*allow_addr=*/allow_addr,
+                            &left))
+      return false;
+    if (expr->kind == AST_NEG) {
+      if (!expr->type->is_unsigned && left == INT64_MIN)
+        parse_error(p, "integer overflow in constant expression");
+      *result =
+          checked_integer(p, expr->type, integer_from_bits(0 - (uint64_t)left));
+    } else {
+      *result = checked_integer(p, expr->type, ~left);
+    }
+    return true;
+  case AST_LT:
+  case AST_LE:
+  case AST_GT:
+  case AST_GE:
+  case AST_EQ:
+  case AST_NE:
+  case AST_ADD:
+  case AST_SUB:
+  case AST_MUL:
+  case AST_DIV:
+  case AST_MOD:
+  case AST_LSHIFT:
+  case AST_RSHIFT:
+  case AST_BIT_AND:
+  case AST_BIT_XOR:
+  case AST_BIT_OR:
+    if (expr->d.binary.lhs->type->kind == TYPE_PTR ||
+        expr->d.binary.rhs->type->kind == TYPE_PTR)
+      return allow_addr && eval_address_comparison(p, expr, result);
+    if (!eval_constant_expr(p, expr->d.binary.lhs, /*allow_addr=*/allow_addr,
+                            &left) ||
+        !eval_constant_expr(p, expr->d.binary.rhs, /*allow_addr=*/allow_addr,
+                            &right))
+      return false;
+    *result = eval_integer_binary(p, expr, left, right);
+    return true;
+  default:
+    return false;
+  }
+}
+
+/* Evaluate an integer constant expression (C11 6.6). */
+int64_t eval_const_expr(Parser *p, AstNode *expr) {
+  int64_t value;
+  if (!eval_constant_expr(p, expr, /*allow_addr=*/false, &value))
+    parse_error(p, "not an integer constant expression");
+  return value;
 }
 
 /*
