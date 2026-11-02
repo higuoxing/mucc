@@ -1,4 +1,4 @@
-cc
+mucc
 *.o
 *.d
 .qemu/

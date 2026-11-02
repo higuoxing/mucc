@@ -1,7 +1,7 @@
 CC := gcc
 OPT := -O2
 CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Werror $(OPT)
-TARGET := cc
+TARGET := mucc
 
 SRCS := main.c lexer.c type.c parser.c sema.c layout.c codegen.c vector.c
 OBJS := $(SRCS:.c=.o)

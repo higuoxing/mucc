@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 CC="${CC:-gcc}"
-TEST_CC="${TEST_CC:-$SCRIPT_DIR/cc}"
+TEST_CC="${TEST_CC:-$SCRIPT_DIR/mucc}"
 TEST_KEEP_TMP="${TEST_KEEP_TMP:-0}"
 
 compare=0
@@ -26,7 +26,7 @@ done
 passed=0
 rejected=0
 
-WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/test-cc.XXXXXX")
+WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/test-mucc.XXXXXX")
 function cleanup() {
     if [[ "$TEST_KEEP_TMP" == 1 ]]; then
 	printf 'Temporary files kept in %s\n' "$WORK_DIR" >&2
