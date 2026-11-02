@@ -28,6 +28,12 @@
 #include "type.h"
 #include "vector.h"
 
+typedef enum {
+  STORAGE_NONE,
+  STORAGE_TYPEDEF,
+  STORAGE_STATIC,
+} StorageClass;
+
 static AstNode *new_ast_node(Parser *p, AstKind kind);
 static AstNode *new_expr(Parser *p, AstKind kind, Type *type);
 static void reset_function_state(Parser *p);
@@ -59,7 +65,7 @@ static AstNode *parse_stmt(Parser *p, bool allow_decl);
 static AstNode *parse_compound_stmt(Parser *p);
 static AstNode *parse_block(Parser *p);
 static AstNode *parse_external_declaration(Parser *p);
-static Type *parse_declspecs(Parser *p, bool *is_typedef);
+static Type *parse_declspecs(Parser *p, StorageClass *storage_class);
 static AstNode *parse_typedef_declarators(Parser *p, Type *base);
 static Type *parse_declarator(Parser *p, Type *type, Token *name);
 static Type *parse_type_name(Parser *p);
@@ -70,10 +76,10 @@ static bool is_declspec(Parser *p, Token token) {
     Symbol *sym = find_symbol(p, token);
     return sym && sym->kind == SYMBOL_TYPEDEF;
   }
-  return kind == TOKEN_TYPEDEF || kind == TOKEN_CONST || kind == TOKEN_BOOL ||
-         kind == TOKEN_CHAR || kind == TOKEN_SHORT || kind == TOKEN_INT ||
-         kind == TOKEN_LONG || kind == TOKEN_UNSIGNED || kind == TOKEN_VOID ||
-         kind == TOKEN_STRUCT || kind == TOKEN_ENUM;
+  return kind == TOKEN_TYPEDEF || kind == TOKEN_STATIC || kind == TOKEN_CONST ||
+         kind == TOKEN_BOOL || kind == TOKEN_CHAR || kind == TOKEN_SHORT ||
+         kind == TOKEN_INT || kind == TOKEN_LONG || kind == TOKEN_UNSIGNED ||
+         kind == TOKEN_VOID || kind == TOKEN_STRUCT || kind == TOKEN_ENUM;
 }
 
 /* assignment-operator: = += -= *= /= %= <<= >>= &= ^= |=  (C11 6.5.16) */
@@ -676,11 +682,12 @@ static Type *parse_struct_specifier(Parser *p) {
  *   (storage-class-specifier | type-specifier | type-qualifier)+
  * (C11 6.7, supported subset).
  *
- * Consume typedef, type specifiers and qualifiers in one loop. Passing NULL
- * forbids typedef in type names, members and parameters. Once a base type is
- * consumed, a typedef name can instead be the declarator's name.
+ * Consume storage classes, type specifiers and qualifiers in one loop. Passing
+ * NULL forbids storage classes in type names, members and parameters. A storage
+ * class belongs to the declaration, independently of its type. Once a base type
+ * is consumed, a typedef name can instead be the declarator's name.
  */
-static Type *parse_declspecs(Parser *p, bool *is_typedef) {
+static Type *parse_declspecs(Parser *p, StorageClass *storage_class) {
   enum {
     DECLSPEC_NONE = 0,
     DECLSPEC_INT = 1 << 0,
@@ -702,8 +709,8 @@ static Type *parse_declspecs(Parser *p, bool *is_typedef) {
   Type *type;
   bool is_const = false;
 
-  if (is_typedef)
-    *is_typedef = false;
+  if (storage_class)
+    *storage_class = STORAGE_NONE;
   while (is_declspec(p, p->current)) {
     TokenKind kind = p->current.kind;
     unsigned flag;
@@ -712,12 +719,18 @@ static Type *parse_declspecs(Parser *p, bool *is_typedef) {
       parser_advance(p);
       continue;
     }
-    if (kind == TOKEN_TYPEDEF) {
-      if (!is_typedef)
-        parse_error(p, "typedef is not allowed here");
-      if (*is_typedef)
-        parse_error(p, "duplicate typedef specifier");
-      *is_typedef = true;
+    if (kind == TOKEN_TYPEDEF || kind == TOKEN_STATIC) {
+      StorageClass storage =
+          kind == TOKEN_TYPEDEF ? STORAGE_TYPEDEF : STORAGE_STATIC;
+      if (!storage_class)
+        parse_error(p, "%.*s is not allowed here", p->current.len,
+                    p->current.start);
+      if (*storage_class == storage)
+        parse_error(p, "duplicate %.*s specifier", p->current.len,
+                    p->current.start);
+      if (*storage_class != STORAGE_NONE)
+        parse_error(p, "multiple storage classes in declaration");
+      *storage_class = storage;
       parser_advance(p);
       continue;
     }
@@ -989,14 +1002,16 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
   Token loc = p->current;
   Token name;
   Type *type;
-  bool is_typedef;
+  StorageClass storage_class;
 
-  type = parse_declspecs(p, &is_typedef);
-  if (is_typedef) {
+  type = parse_declspecs(p, &storage_class);
+  if (storage_class == STORAGE_TYPEDEF) {
     if (!allow_typedef)
       error_at(p, loc, "typedef is not allowed in a for initializer");
     return parse_typedef_declarators(p, type);
   }
+  if (storage_class == STORAGE_STATIC && !allow_typedef)
+    error_at(p, loc, "static is not allowed in a for initializer");
   if ((type->kind == TYPE_STRUCT || type->kind == TYPE_ENUM) &&
       p->current.kind == TOKEN_SEMICOLON) {
     decl = new_ast_node(p, AST_DECL);
@@ -1010,6 +1025,9 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
 
   if (name.kind != TOKEN_IDENTIFIER)
     error_at(p, name, "expect variable name");
+
+  if (storage_class == STORAGE_STATIC)
+    error_at(p, name, "static local variables are not supported yet");
 
   decl = new_ast_node(p, AST_DECL);
   decl->loc = name;
@@ -1510,7 +1528,7 @@ static AstNode *parse_block(Parser *p) {
  * no additional AST node.
  */
 static AstNode *parse_global_declaration(Parser *p, Type *base, Type *type,
-                                         Token name) {
+                                         Token name, bool is_static) {
   AstNode *head = NULL;
   AstNode **tail = &head;
   for (;;) {
@@ -1520,7 +1538,8 @@ static AstNode *parse_global_declaration(Parser *p, Type *base, Type *type,
     if (p->current.kind == TOKEN_LPAREN)
       parse_error(p, "function declarations in a declaration list are not "
                      "supported yet");
-    decl = declare_global_variable(p, name, type);
+    decl = declare_global_variable(p, name, type, is_static,
+                                   p->current.kind == TOKEN_ASSIGN);
     if (p->current.kind == TOKEN_ASSIGN) {
       sema_initialize_global_variable(p, name, parse_initializer(p, type));
     }
@@ -1542,7 +1561,7 @@ static AstNode *parse_global_declaration(Parser *p, Type *base, Type *type,
  * type and name have been consumed.
  */
 static AstNode *parse_function_declaration(Parser *p, Type *return_type,
-                                           Token func_name) {
+                                           Token func_name, bool is_static) {
   AstNode *fn = new_ast_node(p, AST_FUNCTION);
   Function *func;
   Variable *params = NULL;
@@ -1554,7 +1573,6 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
 
   vector_init(&param_types, sizeof(Type *));
   fn->loc = func_name;
-  fn->d.function.name = func_name;
   if (return_type->kind == TYPE_ARRAY)
     error_at(p, func_name, "function cannot return an array");
   if (return_type->kind == TYPE_STRUCT)
@@ -1630,7 +1648,7 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
 
   nparams = (int)param_types.len;
   func = declare_function(p, func_name, return_type, param_types.data, nparams,
-                          explicit_params || definition, definition);
+                          explicit_params || definition, definition, is_static);
   vector_free(&param_types);
 
   if (!definition) {
@@ -1641,6 +1659,7 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
   }
 
   p->current_function = func;
+  fn->d.function.declaration = func;
   fn->d.function.params = params;
   fn->d.function.body = parse_compound_stmt(p);
   leave_scope(p);
@@ -1656,11 +1675,11 @@ static AstNode *parse_external_declaration(Parser *p) {
   Type *base;
   Type *type;
   Token name;
-  bool is_typedef;
+  StorageClass storage_class;
 
   reset_function_state(p);
-  base = parse_declspecs(p, &is_typedef);
-  if (is_typedef) {
+  base = parse_declspecs(p, &storage_class);
+  if (storage_class == STORAGE_TYPEDEF) {
     parse_typedef_declarators(p, base);
     return NULL;
   }
@@ -1673,8 +1692,10 @@ static AstNode *parse_external_declaration(Parser *p) {
   if (name.kind != TOKEN_IDENTIFIER)
     error_at(p, name, "expect declaration name");
   if (p->current.kind == TOKEN_LPAREN)
-    return parse_function_declaration(p, type, name);
-  return parse_global_declaration(p, base, type, name);
+    return parse_function_declaration(p, type, name,
+                                      storage_class == STORAGE_STATIC);
+  return parse_global_declaration(p, base, type, name,
+                                  storage_class == STORAGE_STATIC);
 }
 
 /*

@@ -40,7 +40,8 @@ extern Symbol *add_symbol(Parser *p, Token name, SymbolKind kind,
                           void *declaration, int scope_depth);
 extern void sema_check_variable_name(Parser *p, Token name, bool is_parameter);
 extern Variable *new_variable(Parser *p, Token name, Type *type);
-extern AstNode *declare_global_variable(Parser *p, Token name, Type *type);
+extern AstNode *declare_global_variable(Parser *p, Token name, Type *type,
+                                        bool is_static, bool has_initializer);
 extern void sema_initialize_global_variable(Parser *p, Token name, AstNode *expr);
 extern void sema_initialize_string_array(Parser *p, Variable *var, AstNode *expr);
 extern void sema_check_global_variables(Parser *p);
@@ -53,8 +54,9 @@ extern void check_calls(Parser *p);
 extern void check_gotos(Parser *p);
 
 extern Function *declare_function(Parser *p, Token name, Type *return_type,
-                                       Type **param_types, int nparams,
-                                       bool has_prototype, bool definition);
+                                   Type **param_types, int nparams,
+                                   bool has_prototype, bool definition,
+                                   bool is_static);
 extern AstNode *sema_switch_condition(Parser *p, AstNode *expr);
 extern AstNode *sema_check_condition(Parser *p, AstNode *expr);
 extern AstNode *sema_subscript(Parser *p, AstNode *base, AstNode *index,

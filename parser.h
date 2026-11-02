@@ -47,6 +47,7 @@ typedef struct Variable {
   Type *type;
   int offset; /* Positive distance below %rbp for stack variables. */
   bool is_global;
+  bool is_static; /* Internal linkage for file-scope objects. */
   bool is_parameter;
   bool has_initializer;
   /*
@@ -97,6 +98,7 @@ typedef struct Function {
   Type **param_types;
   int has_prototype; /* 0 for a declaration with an empty argument list. */
   int is_defined; /* 1 once a definition has been seen. */
+  bool is_static; /* Internal linkage, retained across redeclarations. */
 } Function;
 
 typedef enum {
@@ -229,7 +231,7 @@ typedef struct AstNode {
   struct AstNode *next; /* Statements or external declarations. */
   union {
     struct {
-      Token name;
+      Function *declaration; /* Shared type and linkage across redeclarations. */
       struct AstNode *body;
       /*
        * Parameters in reverse declaration order. This list is retained for

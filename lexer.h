@@ -90,6 +90,7 @@ typedef enum {
   TOKEN_SLASH_EQ, /* '/=' */
   TOKEN_STAR,     /* '*' */
   TOKEN_STAR_EQ,  /* '*=' */
+  TOKEN_STATIC,   /* 'static' */
   TOKEN_STRING_LITERAL,
   TOKEN_STRUCT,   /* 'struct' */
   TOKEN_SWITCH,   /* 'switch' */

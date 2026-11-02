@@ -44,11 +44,14 @@ function fail() {
 }
 
 function check() {
-    local expected=$1
-    local source=$2
-    local name=${3:-test$((passed + 1))}
+    local name=${1:-test$((passed + 1))}
+    local expected=$2
+    local source=$3
+    local extra_source=${4:-} # Optional second translation unit.
     local base="$WORK_DIR/execute-$((passed + 1))"
     local input="$base.c"
+    local assembly_inputs=("$base.s")
+    local reference_inputs=("$input")
     local actual_code
     local reference_code
 
@@ -61,9 +64,22 @@ function check() {
 	fail "$name: compiler exited with status $actual_code"
     fi
 
+    if [[ -n "$extra_source" ]]; then
+        printf '%s' "$extra_source" > "$base.extra.c"
+        if "$TEST_CC" "$base.extra.c" -o "$base.extra.s" 2> "$base.extra.compile.err"; then
+            :
+        else
+            actual_code=$?
+            cat "$base.extra.compile.err" >&2
+            fail "$name: compiler exited with status $actual_code for second translation unit"
+        fi
+        assembly_inputs+=("$base.extra.s")
+        reference_inputs+=("$base.extra.c")
+    fi
+
     # Don't allow a stale executable to hide a linker that produced no output.
     rm -f -- "$base.out"
-    if "$CC" "$base.s" -o "$base.out" > "$base.link.log" 2>&1; then
+    if "$CC" "${assembly_inputs[@]}" -o "$base.out" > "$base.link.log" 2>&1; then
 	:
     else
 	actual_code=$?
@@ -84,7 +100,7 @@ function check() {
     fi
 
     if ((compare)); then
-        if "$CC" -std=c11 -O0 "$input" -o "$base.reference.out" > "$base.reference.compile.log" 2>&1; then
+        if "$CC" -std=c11 -O0 "${reference_inputs[@]}" -o "$base.reference.out" > "$base.reference.compile.log" 2>&1; then
             :
         else
             reference_code=$?
@@ -151,69 +167,179 @@ function check_error() {
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
+# File-scope static declarations retain internal linkage across redeclarations.
+check static-global-zero 0 'static int x; int main(void) { return x; }'
+check static-global-initializer 42 'static int x = 42; int main(void) { return x; }'
+check static-after-type 42 'int static x = 42; int main(void) { return x; }'
+check static-between-type-specifiers 1 'unsigned static long x = 1UL << 40; int main(void) { return x == (1UL << 40); }'
+check static-with-const 42 'const static int x = 42; int main(void) { return x; }'
+check static-typedef-type 42 'typedef int I; I static x = 42; int main(void) { I y = 0; y = x; return y; }'
+check static-tentative-definition 42 'static int x; static int x = 42; static int x; int main(void) { return x; }'
+check static-declaration-list 42 'static int a = 20, b = 22; int main(void) { return a + b; }'
+check static-address-initializer 42 'static int x = 42; static int *p = &x; int main(void) { return *p; }'
+check static-string-completes-array 42 'static char text[] = "*"; static char text[]; int main(void) { return text[0]; }'
+check static-composite-array-type 8 'static int a[2]; static int a[]; int main(void) { return sizeof a; }'
+check static-struct-object 42 'static struct S { int x; } s; int main(void) { s.x = 42; return s.x; }'
+check static-enum-object 42 'static enum E { A = 42 } x = A; int main(void) { return x; }'
+check static-object-shadowing 42 'static int x = 42; int main(void) { { int x = 1; x++; } return x; }'
+check static-function-definition 42 'static int f(void) { return 42; } int main(void) { return f(); }'
+check static-function-specifier-order 42 'int static f(void) { return 42; } int main(void) { return f(); }'
+check static-function-inherits-linkage 42 'static int f(int); int f(int x) { return x; } int main(void) { return f(42); }'
+check static-function-redeclarations 42 'static int f(void); int f(void); static int f(void) { return 42; } int main(void) { return f(); }'
+check static-function-later-plain-prototype 42 'static int f(void) { return 42; } int f(void); int main(void) { return f(); }'
+check static-function-refines-prototype 42 'static int f(); int f(int x) { return x; } int main(void) { return f(42); }'
+check static-function-name-hidden-by-parameter 42 'static int f(int f); int f(int f) { return f; } int main(void) { return f(42); }'
+check static-recursion 120 'static int fact(int n) { if (n < 2) return 1; return n * fact(n - 1); } int main(void) { return fact(5); }'
+check static-unused-prototype 42 'static int unused(void); int main(void) { return 42; }'
+check static-keyword-boundaries 42 'int main(void) { int statically = 20; int static_ = 21; int static1 = 1; return statically + static_ + static1; }'
+
+# Static symbols with the same spelling belong to their own translation units.
+check \
+    static-separate-translation-units \
+    42 \
+    'static int value = 20; static int zero; static char text[] = "*"; static int *ptr = &value; static int helper(void); int helper(void) { return *ptr + zero; } int helper(void); int other(void); int main(void) { if (text[0] != 42) return 99; zero = 1; return helper() + other(); }' \
+    'static int value = 21; static int zero; static char text[] = "+"; static int *ptr = &value; static int helper(void) { return *ptr + zero; } int other(void) { if (zero != 0 || text[0] != 43 || *ptr != 21) return 100; return helper(); }'
+check \
+    static-object-independent-of-external \
+    42 \
+    'static int shared = 20; int other(void); int main(void) { return shared + other(); }' \
+    'int shared = 22; int other(void) { return shared; }'
+check \
+    static-function-independent-of-external \
+    42 \
+    'static int shared(void) { return 20; } int other(void); int main(void) { return shared() + other(); }' \
+    'int shared(void) { return 22; } int other(void) { return shared(); }'
+
+check_error static-variable-after-external 'int x; static int x;' \
+            "1:19: error: static declaration of 'x' follows non-static declaration"
+check_error static-variable-before-external 'static int x; int x;' \
+            "1:19: error: non-static declaration of 'x' follows static declaration"
+check_error static-variable-after-definition 'int x = 1; static int x;' \
+            "1:23: error: static declaration of 'x' follows non-static declaration"
+check_error static-variable-later-external-definition 'static int x; int x = 1;' \
+            "1:19: error: non-static declaration of 'x' follows static declaration"
+check_error static-function-after-external 'int f(void); static int f(void);' \
+            "1:25: error: static declaration of 'f' follows non-static declaration"
+check_error static-function-after-external-definition 'int f(void) { return 0; } static int f(void);' \
+            "1:38: error: static declaration of 'f' follows non-static declaration"
+check_error static-duplicate-storage 'static static int x;' \
+            "1:8: error: duplicate static specifier"
+check_error static-duplicate-storage-after-type 'static int static x;' \
+            "1:12: error: duplicate static specifier"
+check_error static-with-typedef 'static typedef int T;' \
+            "1:8: error: multiple storage classes in declaration"
+check_error static-after-typedef 'typedef int static T;' \
+            "1:13: error: multiple storage classes in declaration"
+check_error static-parameter 'int f(static int x);' \
+            "1:7: error: static is not allowed here"
+check_error static-unnamed-parameter 'int f(int static);' \
+            "1:11: error: static is not allowed here"
+check_error static-member 'struct S { static int x; };' \
+            "1:12: error: static is not allowed here"
+check_error static-sizeof-type 'int main(void) { return sizeof(static int); }' \
+            "1:32: error: static is not allowed here"
+check_error static-cast-type 'int main(void) { return (static int)1; }' \
+            "1:26: error: static is not allowed here"
+check_error static-for-initializer 'int main(void) { for (static int x = 0; x < 1; x++) {} return 0; }' \
+            "1:23: error: static is not allowed in a for initializer"
+check_error static-incomplete-array 'static int a[];' \
+            "1:12: error: static variable has incomplete type"
+check_error static-array-completed-too-late 'static int a[]; static int a[2];' \
+            "1:12: error: static variable has incomplete type"
+check_error static-incomplete-struct 'static struct S x; struct S { int a; };' \
+            "1:17: error: static variable has incomplete type"
+check_error static-incomplete-const-struct 'static const struct S x; struct S { int a; };' \
+            "1:23: error: static variable has incomplete type"
+check_error static-conflicting-variable-type 'static int x; static long x;' \
+            "1:27: error: conflicting declaration of variable 'x'"
+check_error static-conflicting-function-type 'static int f(int); static int f(long);' \
+            "1:31: error: conflicting declaration of function 'f'"
+check_error static-variable-redefinition 'static int x = 1; static int x = 2;' \
+            "1:30: error: redefinition of variable 'x'"
+check_error static-function-redefinition 'static int f(void) { return 1; } int f(void) { return 2; }' \
+            "1:38: error: redefinition of function 'f'"
+check_error static-variable-typedef-conflict 'typedef int T; static int T;' \
+            "1:27: error: variable conflicts with typedef 'T'"
+check_error static-function-variable-conflict 'int f; static int f(void);' \
+            "1:19: error: function conflicts with variable 'f'"
+check_error static-nonconstant-initializer 'int f(void); static int x = f();' \
+            "1:29: error: global initializer is not a constant expression"
+check_error static-missing-type 'static x;' \
+            "1:8: error: expect type specifier"
+check_error static-missing-name 'int static;' \
+            "1:11: error: expect declaration name"
+check_error static-keyword-as-variable 'int main() { int static; return 0; }' \
+            "1:24: error: expect variable name"
+check_error static-unbraced-declaration 'int main(void) { if (1) static int x; return 0; }' \
+            "1:25: error: expect statement"
+check_error static-local-not-supported 'int main(void) { static int x; return 0; }' \
+            "1:29: error: static local variables are not supported yet"
+check_error static-local-initializer-not-supported 'int main(void) { int static x = 1; return x; }' \
+            "1:29: error: static local variables are not supported yet"
+
 # Const qualification applies independently to objects and pointed-to types.
-check 42 'int main(void) { const int x = 42; return x; }' const-local-int
-check 42 'int main(void) { int const x = 42; return x; }' const-specifier-order
-check 42 'int main(void) { const const int const x = 42; return x; }' const-repeated-qualifier
-check 1 'int main(void) { unsigned const long const x = 1UL << 40; return x == (1UL << 40); }' const-mixed-specifiers
-check 1 'int main(void) { const char a = -1; const short b = -2; const _Bool c = 256; return a == -1 && b == -2 && c == 1; }' const-small-integers
-check 42 'const int x = 42; const int x; int main(void) { return x; }' const-global-definition
-check 0 'const int x; int main(void) { return x; }' const-global-zero
-check 1 'const char a = -1; const unsigned long b = 18446744073709551615UL; int main(void) { return a == -1 && b == 18446744073709551615UL; }' const-global-widths
-check 42 'const int c = 1; int main(void) { int x = 1; x = 42; return x; }' const-builtin-not-mutated
-check 42 'typedef int I; const I c = 1; int main(void) { I x = 1; x = 42; return x; }' const-typedef-not-mutated
-check 42 'typedef const int I; typedef const int I; int main(void) { I x = 42; return x; }' const-typedef-const
-check 42 'typedef int I; typedef const I CI; typedef CI const CI; int main(void) { CI x = 42; return x; }' const-typedef-repeated-const
-check 42 'typedef const int T; int main(void) { T const T = 42; return T; }' const-typedef-name-as-identifier
-check 42 'int main(void) { int x = 42; const int *p = &x; return *p; }' const-pointer-to-const
-check 42 'int main(void) { int x = 1; int *const p = &x; *p = 42; return x; }' const-const-pointer
-check 42 'int main(void) { int x = 42; const int *const p = &x; return *p; }' const-const-pointer-to-const
-check 42 'int main(void) { int x = 1; int * const const p = &x; *p = 42; return x; }' const-repeated-pointer-qualifier
-check 1 'typedef int *P; int main(void) { int x; P p = &x; const P q = p; p = 0; return q == &x && p == 0; }' const-pointer-typedef-not-mutated
-check 42 'int main(void) { int x = 1; const int *p = &x; *(int *)p = 42; return x; }' const-explicit-cast-removes-const
-check 42 'int main(void) { int x = 42; void *v = &x; const int *p = v; return *p; }' const-void-pointer-add-qualifier
-check 42 'int main(void) { int x = 42; const void *v = &x; const int *p = v; return *p; }' const-const-void-pointer
-check 1 'int main(void) { const int *p = 0; const void *q = 0; return p == 0 && q == 0; }' const-null-pointer
-check 42 'int main(void) { int x = 1; int *p = &x; int *const *q = &p; **q = 42; return x; }' const-add-inner-pointer-const
-check 42 'int main(void) { int x = 42; const int *p = &x; const int *const *q = &p; return **q; }' const-nested-compatible-pointer
-check 1 'int main(void) { int x = 42; const int *p; p = &x; return *p == 42; }' const-mutable-pointer-assignment
-check 42 'int f(const int x) { return x; } int main(void) { return f(42); }' const-const-parameter
-check 42 'int f(const int); int f(int x) { x += 1; return x; } int main(void) { return f(41); }' const-parameter-qualifier-compatibility
-check 42 'int f(int); int f(const int x) { return x; } int main(void) { return f(42); }' const-parameter-qualifier-reversed
-check 42 'int f(int *); int f(int *const p) { *p = 42; return *p; } int main(void) { int x; return f(&x); }' const-pointer-parameter-top-qualifier
-check 42 'int f(const int *p) { return *p; } int main(void) { int x = 42; return f(&x); }' const-argument-add-qualifier
-check 42 'int x = 42; const int *f(void) { return &x; } int main(void) { return *f(); }' const-return-add-qualifier
-check 42 'const int f(void) { return 42; } int main(void) { return f(); }' const-qualified-return-value
-check 42 'int f(); int f(const int x) { return x; } int main(void) { return f(42); }' const-prototype-promotion-compatibility
-check 42 'int f(); int main(void) { const char c = 41; return f(c); } int f(int x) { return x + 1; }' const-default-argument-promotion
-check 1 'int main(void) { const int x = 1; const unsigned y = 2; return -x == -1 && ~x == -2 && x+y == 3 && x << 3 == 8; }' const-scalar-promotion
-check 42 'int main(void) { const int x = 1; switch(x) { case 1: return 42; default: return 0; } }' const-switch-promotion
-check 42 'int main(void) { const int x = 1; if (x) return 42; return 0; }' const-condition
-check 1 'int main(void) { const int x = 1; int y = 2; return (1 ? x : y) == 1 && (0 ? x : y) == 2; }' const-conditional-scalar
-check 42 'int main(void) { int x = 42; int *p = &x; const int *q = p; const int *r = 1 ? p : q; return *r; }' const-conditional-add-qualifier
-check 42 'int main(void) { int x = 42; int *p = &x; const int *q = p; const int *r = 1 ? q : p; return *r; }' const-conditional-add-qualifier-reversed
-check 42 'int main(void) { int x = 42; const int *p = &x; void *q = &x; const void *r = 1 ? p : q; return *(const int *)r; }' const-conditional-const-void
-check 42 'int main(void) { int x = 42; const int *p = &x; void *q = &x; const void *r = 1 ? q : p; return *(const int *)r; }' const-conditional-const-void-reversed
-check 42 'int main(void) { const int a[2]; int b[2]; b[1] = 42; const int *p = b; return p[1]; }' const-array-element-qualification
-check 1 'typedef int A[2]; const A a; int main(void) { A b; b[0] = 42; return sizeof(a) == 8 && b[0] == 42; }' const-array-typedef-not-mutated
-check 42 'int f(const int a[]) { return a[1]; } int main(void) { int a[2]; a[1] = 42; return f(a); }' const-array-parameter
-check 98 'int main(void) { const char a[] = "abc"; const char *p = a; return p[1]; }' const-local-string-array
-check 98 'const char a[] = "abc"; int main(void) { return a[1]; }' const-global-string-array
-check 98 'int main(void) { const char *p = "abc"; return p[1]; }' const-string-pointer
-check 1 'int main(void) { int a[3]; const int *p = a; p++; ++p; p--; --p; return p == a && p - a == 0 && a + 2 - p == 2; }' const-pointer-arithmetic
-check 1 'enum E { A = 42 }; int main(void) { const enum E e = A; return e == 42 && sizeof(e) == 4; }' const-enum-qualification
-check 42 'struct S { int x; }; int main(void) { struct S s; s.x = 42; const struct S *p = &s; return p->x; }' const-struct-pointer
-check 0 'struct S { int x; }; const struct S s; int main(void) { return s.x; }' const-global-const-struct
-check 42 'struct S { int *p; }; int main(void) { int x; struct S s; s.p = &x; const struct S *p = &s; *p->p = 42; return x; }' const-const-struct-pointer-member
-check 42 'struct N { int x; struct N *next; }; int main(void) { struct N a; struct N b; a.next = &b; const struct N *p = &a; p->next->x = 42; return b.x; }' const-const-not-transitive-through-pointer
-check 1 'struct S { int x; }; int main(void) { struct S s; const struct S *p = &s; return p - &s == 0; }' const-qualified-struct-identity
-check 42 'typedef struct { int x; } S; int main(void) { S s; s.x = 42; const S *p = &s; return p->x; }' const-anonymous-struct-identity
-check 42 'struct S; const struct S *p; struct S { int x; }; int main(void) { struct S s; s.x = 42; p = &s; return p->x; }' const-forward-qualified-struct
-check 1 'struct S; typedef const struct S CS; struct S { long x; }; int main(void) { CS a[2]; const struct S *p = a; p++; --p; return sizeof(a) == 16 && p+1-p == 1; }' const-forward-struct-size-and-step
-check 0 'struct S; const struct S s; struct S { int x; }; int main(void) { return s.x; }' const-forward-global-qualified-object
-check 1 'int main(void) { return sizeof(const int) == 4 && sizeof(int *const) == 8 && sizeof(const int[2]) == 8; }' const-sizeof-qualified-types
-check 42 'int main(void) { return (const int)42; }' const-qualified-cast
-check 42 'int main(void) { int constancy = 20; int const_ = 22; return constancy + const_; }' const-keyword-boundaries
+check const-local-int 42 'int main(void) { const int x = 42; return x; }'
+check const-specifier-order 42 'int main(void) { int const x = 42; return x; }'
+check const-repeated-qualifier 42 'int main(void) { const const int const x = 42; return x; }'
+check const-mixed-specifiers 1 'int main(void) { unsigned const long const x = 1UL << 40; return x == (1UL << 40); }'
+check const-small-integers 1 'int main(void) { const char a = -1; const short b = -2; const _Bool c = 256; return a == -1 && b == -2 && c == 1; }'
+check const-global-definition 42 'const int x = 42; const int x; int main(void) { return x; }'
+check const-global-zero 0 'const int x; int main(void) { return x; }'
+check const-global-widths 1 'const char a = -1; const unsigned long b = 18446744073709551615UL; int main(void) { return a == -1 && b == 18446744073709551615UL; }'
+check const-builtin-not-mutated 42 'const int c = 1; int main(void) { int x = 1; x = 42; return x; }'
+check const-typedef-not-mutated 42 'typedef int I; const I c = 1; int main(void) { I x = 1; x = 42; return x; }'
+check const-typedef-const 42 'typedef const int I; typedef const int I; int main(void) { I x = 42; return x; }'
+check const-typedef-repeated-const 42 'typedef int I; typedef const I CI; typedef CI const CI; int main(void) { CI x = 42; return x; }'
+check const-typedef-name-as-identifier 42 'typedef const int T; int main(void) { T const T = 42; return T; }'
+check const-pointer-to-const 42 'int main(void) { int x = 42; const int *p = &x; return *p; }'
+check const-const-pointer 42 'int main(void) { int x = 1; int *const p = &x; *p = 42; return x; }'
+check const-const-pointer-to-const 42 'int main(void) { int x = 42; const int *const p = &x; return *p; }'
+check const-repeated-pointer-qualifier 42 'int main(void) { int x = 1; int * const const p = &x; *p = 42; return x; }'
+check const-pointer-typedef-not-mutated 1 'typedef int *P; int main(void) { int x; P p = &x; const P q = p; p = 0; return q == &x && p == 0; }'
+check const-explicit-cast-removes-const 42 'int main(void) { int x = 1; const int *p = &x; *(int *)p = 42; return x; }'
+check const-void-pointer-add-qualifier 42 'int main(void) { int x = 42; void *v = &x; const int *p = v; return *p; }'
+check const-const-void-pointer 42 'int main(void) { int x = 42; const void *v = &x; const int *p = v; return *p; }'
+check const-null-pointer 1 'int main(void) { const int *p = 0; const void *q = 0; return p == 0 && q == 0; }'
+check const-add-inner-pointer-const 42 'int main(void) { int x = 1; int *p = &x; int *const *q = &p; **q = 42; return x; }'
+check const-nested-compatible-pointer 42 'int main(void) { int x = 42; const int *p = &x; const int *const *q = &p; return **q; }'
+check const-mutable-pointer-assignment 1 'int main(void) { int x = 42; const int *p; p = &x; return *p == 42; }'
+check const-const-parameter 42 'int f(const int x) { return x; } int main(void) { return f(42); }'
+check const-parameter-qualifier-compatibility 42 'int f(const int); int f(int x) { x += 1; return x; } int main(void) { return f(41); }'
+check const-parameter-qualifier-reversed 42 'int f(int); int f(const int x) { return x; } int main(void) { return f(42); }'
+check const-pointer-parameter-top-qualifier 42 'int f(int *); int f(int *const p) { *p = 42; return *p; } int main(void) { int x; return f(&x); }'
+check const-argument-add-qualifier 42 'int f(const int *p) { return *p; } int main(void) { int x = 42; return f(&x); }'
+check const-return-add-qualifier 42 'int x = 42; const int *f(void) { return &x; } int main(void) { return *f(); }'
+check const-qualified-return-value 42 'const int f(void) { return 42; } int main(void) { return f(); }'
+check const-prototype-promotion-compatibility 42 'int f(); int f(const int x) { return x; } int main(void) { return f(42); }'
+check const-default-argument-promotion 42 'int f(); int main(void) { const char c = 41; return f(c); } int f(int x) { return x + 1; }'
+check const-scalar-promotion 1 'int main(void) { const int x = 1; const unsigned y = 2; return -x == -1 && ~x == -2 && x+y == 3 && x << 3 == 8; }'
+check const-switch-promotion 42 'int main(void) { const int x = 1; switch(x) { case 1: return 42; default: return 0; } }'
+check const-condition 42 'int main(void) { const int x = 1; if (x) return 42; return 0; }'
+check const-conditional-scalar 1 'int main(void) { const int x = 1; int y = 2; return (1 ? x : y) == 1 && (0 ? x : y) == 2; }'
+check const-conditional-add-qualifier 42 'int main(void) { int x = 42; int *p = &x; const int *q = p; const int *r = 1 ? p : q; return *r; }'
+check const-conditional-add-qualifier-reversed 42 'int main(void) { int x = 42; int *p = &x; const int *q = p; const int *r = 1 ? q : p; return *r; }'
+check const-conditional-const-void 42 'int main(void) { int x = 42; const int *p = &x; void *q = &x; const void *r = 1 ? p : q; return *(const int *)r; }'
+check const-conditional-const-void-reversed 42 'int main(void) { int x = 42; const int *p = &x; void *q = &x; const void *r = 1 ? q : p; return *(const int *)r; }'
+check const-array-element-qualification 42 'int main(void) { const int a[2]; int b[2]; b[1] = 42; const int *p = b; return p[1]; }'
+check const-array-typedef-not-mutated 1 'typedef int A[2]; const A a; int main(void) { A b; b[0] = 42; return sizeof(a) == 8 && b[0] == 42; }'
+check const-array-parameter 42 'int f(const int a[]) { return a[1]; } int main(void) { int a[2]; a[1] = 42; return f(a); }'
+check const-local-string-array 98 'int main(void) { const char a[] = "abc"; const char *p = a; return p[1]; }'
+check const-global-string-array 98 'const char a[] = "abc"; int main(void) { return a[1]; }'
+check const-string-pointer 98 'int main(void) { const char *p = "abc"; return p[1]; }'
+check const-pointer-arithmetic 1 'int main(void) { int a[3]; const int *p = a; p++; ++p; p--; --p; return p == a && p - a == 0 && a + 2 - p == 2; }'
+check const-enum-qualification 1 'enum E { A = 42 }; int main(void) { const enum E e = A; return e == 42 && sizeof(e) == 4; }'
+check const-struct-pointer 42 'struct S { int x; }; int main(void) { struct S s; s.x = 42; const struct S *p = &s; return p->x; }'
+check const-global-const-struct 0 'struct S { int x; }; const struct S s; int main(void) { return s.x; }'
+check const-const-struct-pointer-member 42 'struct S { int *p; }; int main(void) { int x; struct S s; s.p = &x; const struct S *p = &s; *p->p = 42; return x; }'
+check const-const-not-transitive-through-pointer 42 'struct N { int x; struct N *next; }; int main(void) { struct N a; struct N b; a.next = &b; const struct N *p = &a; p->next->x = 42; return b.x; }'
+check const-qualified-struct-identity 1 'struct S { int x; }; int main(void) { struct S s; const struct S *p = &s; return p - &s == 0; }'
+check const-anonymous-struct-identity 42 'typedef struct { int x; } S; int main(void) { S s; s.x = 42; const S *p = &s; return p->x; }'
+check const-forward-qualified-struct 42 'struct S; const struct S *p; struct S { int x; }; int main(void) { struct S s; s.x = 42; p = &s; return p->x; }'
+check const-forward-struct-size-and-step 1 'struct S; typedef const struct S CS; struct S { long x; }; int main(void) { CS a[2]; const struct S *p = a; p++; --p; return sizeof(a) == 16 && p+1-p == 1; }'
+check const-forward-global-qualified-object 0 'struct S; const struct S s; struct S { int x; }; int main(void) { return s.x; }'
+check const-sizeof-qualified-types 1 'int main(void) { return sizeof(const int) == 4 && sizeof(int *const) == 8 && sizeof(const int[2]) == 8; }'
+check const-qualified-cast 42 'int main(void) { return (const int)42; }'
+check const-keyword-boundaries 42 'int main(void) { int constancy = 20; int const_ = 22; return constancy + const_; }'
 check_error const-assign-object 'int main(void) { const int x = 1; x = 2; return x; }' \
             '1:37: error: invalid assignment target'
 check_error const-compound-object 'int main(void) { const int x = 1; x += 2; return x; }' \
@@ -310,42 +436,42 @@ check_error const-reserved-keyword 'int main() { int const; return 0; }' \
             '1:23: error: expect variable name'
 
 # Recursive scalar initializer evaluation keeps address and integer contexts separate.
-check 1 'int x; int b = (_Bool)&x; int main(void) { return b; }' constant-nested-integer-cast
-check 1 'int x; unsigned char b = (unsigned char)(_Bool)&x; int main(void) { return b; }' constant-nested-narrow-cast
-check 1 'int x; long b = (long)(_Bool)(_Bool)&x; int main(void) { return b; }' constant-nested-wide-cast
-check 1 'int x; _Bool b = 1 ? (_Bool)&x : 0; int main(void) { return b; }' constant-conditional-bool
-check 0 'int x; _Bool b = 0 ? (_Bool)&x : 0; int main(void) { return b; }' constant-conditional-bool-zero
-check 1 '_Bool b = !(void *)0; int main(void) { return b; }' constant-logical-null
-check 0 'int x; int b = !&x; int main(void) { return b; }' constant-logical-address
-check 1 'int x; _Bool b = &x != 0; int main(void) { return b; }' constant-address-ne-null
-check 0 'int x; int b = &x == (void *)0; int main(void) { return b; }' constant-address-eq-null
-check 1 'int x; int b = 0 != &x; int main(void) { return b; }' constant-null-ne-address
-check 1 'int b = (void *)0 == (int *)0; int main(void) { return b; }' constant-null-eq-null
-check 1 'int b = (int *)256 == (int *)256; int main(void) { return b; }' constant-numeric-pointer-eq
-check 1 'int b = (void *)4294967296UL != 0; int main(void) { return b; }' constant-high-pointer-ne-null
-check 1 'int x; int b = &x == &x; int main(void) { return b; }' constant-same-object-address
-check 0 'int x; int b = &x != &x; int main(void) { return b; }' constant-same-object-address-ne
-check 1 'int a[3]; int b = &a[2] == a + 2; int main(void) { return b; }' constant-same-array-offset
-check 0 'int a[3]; int b = a == a + 1; int main(void) { return b; }' constant-different-array-offset
-check 1 'struct S { int a; int b; }; struct S s; int b = &s.a != &s.b; int main(void) { return b; }' constant-member-address-comparison
-check 1 'int a[3]; int b = a < a + 1; int main(void) { return b; }' constant-array-relational
-check 0 'int a[3]; int b = a + 1 <= a; int main(void) { return b; }' constant-array-relational-false
-check 1 'int x; int b = (_Bool)&x + 41; int main(void) { return b == 42; }' constant-arithmetic-after-address-bool
-check 1 'int x; int b = ~(_Bool)&x; int main(void) { return b == -2; }' constant-unary-after-address-bool
-check 0 'int x; _Bool b = (_Bool)&x - 1; int main(void) { return b; }' constant-bool-from-arithmetic-zero
-check 1 'int x; _Bool b = (_Bool)&x + 255; int main(void) { return b; }' constant-bool-from-arithmetic-nonzero
-check 1 'int x; int b = &x && (_Bool)(void *)4294967296UL; int main(void) { return b; }' constant-logical-and-address
-check 1 'int f(void); int x; int b = &x || f(); int main(void) { return b; }' constant-short-circuit-call
-check 0 'int f(void); int b = (void *)0 && f(); int main(void) { return b; }' constant-short-circuit-null
-check 1 'int x; int b = &x ? 1 : 1 / 0; int main(void) { return b; }' constant-conditional-skips-invalid-branch
-check 42 'int x = 42; int *p = (_Bool)&x ? &x : 0; int main(void) { return *p; }' constant-pointer-conditional-bool
-check 42 'int x = 42; int *p = &x ? &x : 0; int main(void) { return *p; }' constant-pointer-conditional-address
-check 42 'int x = 42; int *p = !(void *)0 ? &x : 0; int main(void) { return *p; }' constant-pointer-conditional-logical
-check 42 'int x = 42; int *p = &*(&x ? &x : 0); int main(void) { return *p; }' constant-nested-lvalue-address
-check 1 'int a[2]; char *p = (char *)a + 4; _Bool b = (_Bool)((char *)a + 4); int main(void) { return b && p == (char *)&a[1]; }' constant-pointer-relocation-preserved
-check 1 'int x; int b = (_Bool)&x << 8; int main(void) { return b == 256; }' constant-shift-after-address-bool
-check 0 'int x; unsigned b = (unsigned)(_Bool)&x + 4294967295U; int main(void) { return b; }' constant-unsigned-wrap-after-address-bool
-check 1 'int x; _Bool b = (_Bool)(unsigned char)((_Bool)&x + 255); int main(void) { return b == 0; }' constant-nested-narrowing-before-bool
+check constant-nested-integer-cast 1 'int x; int b = (_Bool)&x; int main(void) { return b; }'
+check constant-nested-narrow-cast 1 'int x; unsigned char b = (unsigned char)(_Bool)&x; int main(void) { return b; }'
+check constant-nested-wide-cast 1 'int x; long b = (long)(_Bool)(_Bool)&x; int main(void) { return b; }'
+check constant-conditional-bool 1 'int x; _Bool b = 1 ? (_Bool)&x : 0; int main(void) { return b; }'
+check constant-conditional-bool-zero 0 'int x; _Bool b = 0 ? (_Bool)&x : 0; int main(void) { return b; }'
+check constant-logical-null 1 '_Bool b = !(void *)0; int main(void) { return b; }'
+check constant-logical-address 0 'int x; int b = !&x; int main(void) { return b; }'
+check constant-address-ne-null 1 'int x; _Bool b = &x != 0; int main(void) { return b; }'
+check constant-address-eq-null 0 'int x; int b = &x == (void *)0; int main(void) { return b; }'
+check constant-null-ne-address 1 'int x; int b = 0 != &x; int main(void) { return b; }'
+check constant-null-eq-null 1 'int b = (void *)0 == (int *)0; int main(void) { return b; }'
+check constant-numeric-pointer-eq 1 'int b = (int *)256 == (int *)256; int main(void) { return b; }'
+check constant-high-pointer-ne-null 1 'int b = (void *)4294967296UL != 0; int main(void) { return b; }'
+check constant-same-object-address 1 'int x; int b = &x == &x; int main(void) { return b; }'
+check constant-same-object-address-ne 0 'int x; int b = &x != &x; int main(void) { return b; }'
+check constant-same-array-offset 1 'int a[3]; int b = &a[2] == a + 2; int main(void) { return b; }'
+check constant-different-array-offset 0 'int a[3]; int b = a == a + 1; int main(void) { return b; }'
+check constant-member-address-comparison 1 'struct S { int a; int b; }; struct S s; int b = &s.a != &s.b; int main(void) { return b; }'
+check constant-array-relational 1 'int a[3]; int b = a < a + 1; int main(void) { return b; }'
+check constant-array-relational-false 0 'int a[3]; int b = a + 1 <= a; int main(void) { return b; }'
+check constant-arithmetic-after-address-bool 1 'int x; int b = (_Bool)&x + 41; int main(void) { return b == 42; }'
+check constant-unary-after-address-bool 1 'int x; int b = ~(_Bool)&x; int main(void) { return b == -2; }'
+check constant-bool-from-arithmetic-zero 0 'int x; _Bool b = (_Bool)&x - 1; int main(void) { return b; }'
+check constant-bool-from-arithmetic-nonzero 1 'int x; _Bool b = (_Bool)&x + 255; int main(void) { return b; }'
+check constant-logical-and-address 1 'int x; int b = &x && (_Bool)(void *)4294967296UL; int main(void) { return b; }'
+check constant-short-circuit-call 1 'int f(void); int x; int b = &x || f(); int main(void) { return b; }'
+check constant-short-circuit-null 0 'int f(void); int b = (void *)0 && f(); int main(void) { return b; }'
+check constant-conditional-skips-invalid-branch 1 'int x; int b = &x ? 1 : 1 / 0; int main(void) { return b; }'
+check constant-pointer-conditional-bool 42 'int x = 42; int *p = (_Bool)&x ? &x : 0; int main(void) { return *p; }'
+check constant-pointer-conditional-address 42 'int x = 42; int *p = &x ? &x : 0; int main(void) { return *p; }'
+check constant-pointer-conditional-logical 42 'int x = 42; int *p = !(void *)0 ? &x : 0; int main(void) { return *p; }'
+check constant-nested-lvalue-address 42 'int x = 42; int *p = &*(&x ? &x : 0); int main(void) { return *p; }'
+check constant-pointer-relocation-preserved 1 'int a[2]; char *p = (char *)a + 4; _Bool b = (_Bool)((char *)a + 4); int main(void) { return b && p == (char *)&a[1]; }'
+check constant-shift-after-address-bool 1 'int x; int b = (_Bool)&x << 8; int main(void) { return b == 256; }'
+check constant-unsigned-wrap-after-address-bool 0 'int x; unsigned b = (unsigned)(_Bool)&x + 4294967295U; int main(void) { return b; }'
+check constant-nested-narrowing-before-bool 1 'int x; _Bool b = (_Bool)(unsigned char)((_Bool)&x + 255); int main(void) { return b == 0; }'
 check_error constant-integer-enum-address 'int x; enum { A = (_Bool)&x + 1 };' \
             '1:33: error: not an integer constant expression'
 check_error constant-integer-array-address 'int x; int a[(_Bool)&x + 1];' \
@@ -387,121 +513,121 @@ check_error constant-address-offset-not-integer-constant 'int a[2]; int *p = a +
             '1:22: error: global initializer is not a constant expression'
 
 # _Bool codegen: scalar conversions, byte storage, updates and calls.
-check 0 'int main(void) { _Bool b = 0; return b; }' bool-runtime-init-zero
-check 1 'int main(void) { _Bool b = 1; return b; }' bool-runtime-init-one
-check 1 'int main(void) { _Bool b = -1; return b; }' bool-runtime-init-negative
-check 1 'int main(void) { _Bool b = 256; return b; }' bool-runtime-init-not-byte-truncation
-check 1 'int main(void) { _Bool b = 4294967296UL; return b; }' bool-runtime-init-high-bits
-check 1 'int main(void) { _Bool b = 18446744073709551615ULL; return b; }' bool-runtime-init-unsigned-max
-check 0 'int main(void) { _Bool b = (unsigned char)256; return b; }' bool-runtime-init-narrowed-zero
-check 1 'int main(void) { int n = 256; return (_Bool)n; }' bool-runtime-cast-int
-check 1 'int main(void) { long n = 1L << 40; return (_Bool)n; }' bool-runtime-cast-long
-check 1 'int main(void) { long long n = -4294967296LL; return (_Bool)n; }' bool-runtime-cast-long-long
-check 0 'int main(void) { unsigned n = 4294967295U; return (_Bool)(n + 1); }' bool-runtime-cast-wrapped-unsigned
-check 1 'int main(void) { _Bool b = 256; return (long)b == 1L && (unsigned char)b == 1; }' bool-runtime-cast-from-bool
-check 0 'int main(void) { int *p = 0; _Bool b = p; return b; }' bool-runtime-init-null-pointer
-check 1 'int main(void) { int n; int *p = &n; _Bool b = p; return b; }' bool-runtime-init-object-pointer
-check 1 'int main(void) { void *p = (void *)4294967296UL; return (_Bool)p; }' bool-runtime-cast-high-pointer
-check 1 'int main(void) { int a[2]; _Bool b = a; return b; }' bool-runtime-init-array
-check 1 'int main(void) { _Bool b = ""; return b; }' bool-runtime-init-string
-check 1 'int main(void) { int guard = 305419896; _Bool b = 256; return guard == 305419896 && b == 1; }' bool-runtime-local-init-byte-width
-check 1 'int main(void) { _Bool a; _Bool b; int r = (a = b = 256); return r == 1 && a == 1 && b == 1; }' bool-runtime-chained-assignment
-check 0 'int main(void) { _Bool b = 1; return b = 0; }' bool-runtime-assignment-zero-result
-check 1 'int main(void) { _Bool b = 0; int n; return (b = &n) == 1 && b == 1; }' bool-runtime-assignment-pointer
-check 1 'int main(void) { _Bool b = 1; int *p = 0; return (b = p) == 0 && b == 0; }' bool-runtime-assignment-null-pointer
-check 1 'int main(void) { _Bool a[3]; a[0] = 1; a[1] = 1; a[2] = 1; a[1] = 0; return a[0] + 2*a[1] + 4*a[2] == 5; }' bool-runtime-array-byte-access
-check 1 'int main(void) { struct S { _Bool a; unsigned char c; _Bool b; unsigned char d; }; struct S s; s.c = 123; s.d = 45; s.a = 256; s.b = 0; s.a++; s.b--; return s.c == 123 && s.d == 45 && s.a == 1 && s.b == 1; }' bool-runtime-member-byte-access
-check 1 'int main(void) { struct S { _Bool b; int n; }; struct S s; struct S *p = &s; p->n = 42; p->b = 256; p->b += 255; return p->b == 1 && p->n == 42; }' bool-runtime-arrow-compound-assignment
-check 1 'int main(void) { _Bool b = 0; _Bool *p = &b; *p = 256; return *p; }' bool-runtime-pointer-load-store
-check 1 'int main(void) { _Bool b = 1; return -b == -1 && ~b == -2 && b + b == 2; }' bool-runtime-signed-integer-promotion
-check 1 'int main(void) { _Bool b = 1; return b << 8 == 256 && b / 2 == 0 && b % 2 == 1; }' bool-runtime-integer-operations
-check 1 'int main(void) { _Bool b = 1; int n = 0; if (b) n++; while (b) { n++; b = 0; } return n == 2; }' bool-runtime-conditions
-check 1 'int main(void) { _Bool b = 1; switch(b) { case 1: return 1; default: return 0; } }' bool-runtime-switch-promotion
-check 1 'int main(void) { _Bool a = 0; _Bool b = 1; int n = 0; a && ++n; b || ++n; return n == 0 && (a ? a : b) == 1; }' bool-runtime-short-circuit
-check 1 'int count; long next(void) { count++; return 1L << 40; } int main(void) { _Bool b = next(); return b == 1 && count == 1; }' bool-runtime-conversion-side-effect-once
-check 0 '_Bool b; int main(void) { return b; }' bool-runtime-global-zero-load
-check 1 '_Bool b = 256; int main(void) { return b; }' bool-runtime-global-nonzero-load
-check 1 '_Bool b; int main(void) { b = 256; b += 255; return b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-global-update-representation
-check 1 '_Bool b = 1; int main(void) { _Bool *p = &b; return p + 1 - p == 1 && sizeof(*p) == 1 && *p == 1; }' bool-runtime-pointer-arithmetic
-check 1 '_Bool f(long n) { return n; } int main(void) { return f(1L << 40) == 1 && f(0) == 0; }' bool-runtime-function-return
-check 1 '_Bool f(void *p) { return p; } int main(void) { return f((void *)4294967296UL) == 1 && f((void *)0) == 0; }' bool-runtime-function-pointer-return
-check 1 'int f(_Bool b) { return b; } int main(void) { return f(256); }' bool-runtime-function-argument
-check 1 '_Bool f(_Bool b) { b += 255; return b; } int main(void) { return f(0) == 1 && f(1) == 1; }' bool-runtime-function-parameter-update
-check 21 'int f(_Bool a,_Bool b,_Bool c,_Bool d,_Bool e,_Bool f) { return a + 2*b + 4*c + 8*d + 16*e + 32*f; } int main(void) { return f(256,0,-1,0,4294967296UL,0); }' bool-runtime-six-register-arguments
-check 85 'int f(_Bool a,_Bool b,_Bool c,_Bool d,_Bool e,_Bool f,_Bool g,_Bool h) { return a+2*b+4*c+8*d+16*e+32*f+64*g+128*h; } int main(void) { return f(256,0,-1,0,4294967296UL,0,65536,0); }' bool-runtime-stack-arguments
-check 1 'int f(int a,long b,char c,_Bool d,short e,int f,_Bool g,_Bool h) { g += 255; h--; return a==3 && b==4294967296L && c==-1 && d==1 && e==7 && f==9 && g==1 && h==1; } int main(void) { return f(3,4294967296L,-1,256,7,9,256,0); }' bool-runtime-mixed-stack-arguments
-check 1 '_Bool f(_Bool b) { return b; } int main(void) { return f(f(256)); }' bool-runtime-nested-calls
-check 1 'int f(); int main(void) { return f((_Bool)256); } int f(int b) { return b; }' bool-runtime-default-argument-promotion
-check 1 'int calls; _Bool *target(_Bool *p) { calls++; return p; } int main(void) { _Bool b = 1; int old = (*target(&b))++; int new = ++(*target(&b)); return calls==2 && old==1 && new==1 && b==1; }' bool-runtime-increment-address-once
-check 1 'int calls; _Bool *target(_Bool *p) { calls++; return p; } int value(void) { calls++; return 256; } int main(void) { _Bool b = 0; int r = (*target(&b) += value()); return calls==2 && r==1 && b==1; }' bool-runtime-compound-address-once
-check 1 'int main(void) { _Bool b = 0; int r = ++b; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-pre-increment-0
-check 1 'int main(void) { _Bool b = 1; int r = ++b; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-pre-increment-1
-check 1 'int main(void) { _Bool b = 0; int r = b++; return r == 0 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-post-increment-0
-check 1 'int main(void) { _Bool b = 1; int r = b++; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-post-increment-1
-check 1 'int main(void) { _Bool b = 0; int r = --b; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-pre-decrement-0
-check 1 'int main(void) { _Bool b = 1; int r = --b; return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-pre-decrement-1
-check 1 'int main(void) { _Bool b = 0; int r = b--; return r == 0 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-post-decrement-0
-check 1 'int main(void) { _Bool b = 1; int r = b--; return r == 1 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-post-decrement-1
-check 1 'int main(void) { _Bool b = 1; int r = (b += 255); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-add-1-255
-check 1 'int main(void) { _Bool b = 1; int r = (b += 4294967295U); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-add-1-4294967295U
-check 1 'int main(void) { _Bool b = 0; int r = (b += 4294967296UL); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-add-0-4294967296UL
-check 1 'int main(void) { _Bool b = 0; int r = (b -= 1); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-sub-0-1
-check 1 'int main(void) { _Bool b = 1; int r = (b -= 1); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-sub-1-1
-check 1 'int main(void) { _Bool b = 1; int r = (b *= 256); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-mul-1-256
-check 1 'int main(void) { _Bool b = 1; int r = (b *= 0); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-mul-1-0
-check 1 'int main(void) { _Bool b = 1; int r = (b /= 2); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-div-1-2
-check 1 'int main(void) { _Bool b = 1; int r = (b %= 2); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-mod-1-2
-check 1 'int main(void) { _Bool b = 1; int r = (b <<= 8); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-lshift-1-8
-check 1 'int main(void) { _Bool b = 1; int r = (b >>= 1); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-rshift-1-1
-check 1 'int main(void) { _Bool b = 1; int r = (b &= 2); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-and-1-2
-check 1 'int main(void) { _Bool b = 0; int r = (b |= 256); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-or-0-256
-check 1 'int main(void) { _Bool b = 1; int r = (b ^= 1); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }' bool-runtime-compound-xor-1-1
-check 1 'int main(void) { _Bool b = 1; int r = (b ^= 256); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }' bool-runtime-compound-xor-1-256
+check bool-runtime-init-zero 0 'int main(void) { _Bool b = 0; return b; }'
+check bool-runtime-init-one 1 'int main(void) { _Bool b = 1; return b; }'
+check bool-runtime-init-negative 1 'int main(void) { _Bool b = -1; return b; }'
+check bool-runtime-init-not-byte-truncation 1 'int main(void) { _Bool b = 256; return b; }'
+check bool-runtime-init-high-bits 1 'int main(void) { _Bool b = 4294967296UL; return b; }'
+check bool-runtime-init-unsigned-max 1 'int main(void) { _Bool b = 18446744073709551615ULL; return b; }'
+check bool-runtime-init-narrowed-zero 0 'int main(void) { _Bool b = (unsigned char)256; return b; }'
+check bool-runtime-cast-int 1 'int main(void) { int n = 256; return (_Bool)n; }'
+check bool-runtime-cast-long 1 'int main(void) { long n = 1L << 40; return (_Bool)n; }'
+check bool-runtime-cast-long-long 1 'int main(void) { long long n = -4294967296LL; return (_Bool)n; }'
+check bool-runtime-cast-wrapped-unsigned 0 'int main(void) { unsigned n = 4294967295U; return (_Bool)(n + 1); }'
+check bool-runtime-cast-from-bool 1 'int main(void) { _Bool b = 256; return (long)b == 1L && (unsigned char)b == 1; }'
+check bool-runtime-init-null-pointer 0 'int main(void) { int *p = 0; _Bool b = p; return b; }'
+check bool-runtime-init-object-pointer 1 'int main(void) { int n; int *p = &n; _Bool b = p; return b; }'
+check bool-runtime-cast-high-pointer 1 'int main(void) { void *p = (void *)4294967296UL; return (_Bool)p; }'
+check bool-runtime-init-array 1 'int main(void) { int a[2]; _Bool b = a; return b; }'
+check bool-runtime-init-string 1 'int main(void) { _Bool b = ""; return b; }'
+check bool-runtime-local-init-byte-width 1 'int main(void) { int guard = 305419896; _Bool b = 256; return guard == 305419896 && b == 1; }'
+check bool-runtime-chained-assignment 1 'int main(void) { _Bool a; _Bool b; int r = (a = b = 256); return r == 1 && a == 1 && b == 1; }'
+check bool-runtime-assignment-zero-result 0 'int main(void) { _Bool b = 1; return b = 0; }'
+check bool-runtime-assignment-pointer 1 'int main(void) { _Bool b = 0; int n; return (b = &n) == 1 && b == 1; }'
+check bool-runtime-assignment-null-pointer 1 'int main(void) { _Bool b = 1; int *p = 0; return (b = p) == 0 && b == 0; }'
+check bool-runtime-array-byte-access 1 'int main(void) { _Bool a[3]; a[0] = 1; a[1] = 1; a[2] = 1; a[1] = 0; return a[0] + 2*a[1] + 4*a[2] == 5; }'
+check bool-runtime-member-byte-access 1 'int main(void) { struct S { _Bool a; unsigned char c; _Bool b; unsigned char d; }; struct S s; s.c = 123; s.d = 45; s.a = 256; s.b = 0; s.a++; s.b--; return s.c == 123 && s.d == 45 && s.a == 1 && s.b == 1; }'
+check bool-runtime-arrow-compound-assignment 1 'int main(void) { struct S { _Bool b; int n; }; struct S s; struct S *p = &s; p->n = 42; p->b = 256; p->b += 255; return p->b == 1 && p->n == 42; }'
+check bool-runtime-pointer-load-store 1 'int main(void) { _Bool b = 0; _Bool *p = &b; *p = 256; return *p; }'
+check bool-runtime-signed-integer-promotion 1 'int main(void) { _Bool b = 1; return -b == -1 && ~b == -2 && b + b == 2; }'
+check bool-runtime-integer-operations 1 'int main(void) { _Bool b = 1; return b << 8 == 256 && b / 2 == 0 && b % 2 == 1; }'
+check bool-runtime-conditions 1 'int main(void) { _Bool b = 1; int n = 0; if (b) n++; while (b) { n++; b = 0; } return n == 2; }'
+check bool-runtime-switch-promotion 1 'int main(void) { _Bool b = 1; switch(b) { case 1: return 1; default: return 0; } }'
+check bool-runtime-short-circuit 1 'int main(void) { _Bool a = 0; _Bool b = 1; int n = 0; a && ++n; b || ++n; return n == 0 && (a ? a : b) == 1; }'
+check bool-runtime-conversion-side-effect-once 1 'int count; long next(void) { count++; return 1L << 40; } int main(void) { _Bool b = next(); return b == 1 && count == 1; }'
+check bool-runtime-global-zero-load 0 '_Bool b; int main(void) { return b; }'
+check bool-runtime-global-nonzero-load 1 '_Bool b = 256; int main(void) { return b; }'
+check bool-runtime-global-update-representation 1 '_Bool b; int main(void) { b = 256; b += 255; return b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-pointer-arithmetic 1 '_Bool b = 1; int main(void) { _Bool *p = &b; return p + 1 - p == 1 && sizeof(*p) == 1 && *p == 1; }'
+check bool-runtime-function-return 1 '_Bool f(long n) { return n; } int main(void) { return f(1L << 40) == 1 && f(0) == 0; }'
+check bool-runtime-function-pointer-return 1 '_Bool f(void *p) { return p; } int main(void) { return f((void *)4294967296UL) == 1 && f((void *)0) == 0; }'
+check bool-runtime-function-argument 1 'int f(_Bool b) { return b; } int main(void) { return f(256); }'
+check bool-runtime-function-parameter-update 1 '_Bool f(_Bool b) { b += 255; return b; } int main(void) { return f(0) == 1 && f(1) == 1; }'
+check bool-runtime-six-register-arguments 21 'int f(_Bool a,_Bool b,_Bool c,_Bool d,_Bool e,_Bool f) { return a + 2*b + 4*c + 8*d + 16*e + 32*f; } int main(void) { return f(256,0,-1,0,4294967296UL,0); }'
+check bool-runtime-stack-arguments 85 'int f(_Bool a,_Bool b,_Bool c,_Bool d,_Bool e,_Bool f,_Bool g,_Bool h) { return a+2*b+4*c+8*d+16*e+32*f+64*g+128*h; } int main(void) { return f(256,0,-1,0,4294967296UL,0,65536,0); }'
+check bool-runtime-mixed-stack-arguments 1 'int f(int a,long b,char c,_Bool d,short e,int f,_Bool g,_Bool h) { g += 255; h--; return a==3 && b==4294967296L && c==-1 && d==1 && e==7 && f==9 && g==1 && h==1; } int main(void) { return f(3,4294967296L,-1,256,7,9,256,0); }'
+check bool-runtime-nested-calls 1 '_Bool f(_Bool b) { return b; } int main(void) { return f(f(256)); }'
+check bool-runtime-default-argument-promotion 1 'int f(); int main(void) { return f((_Bool)256); } int f(int b) { return b; }'
+check bool-runtime-increment-address-once 1 'int calls; _Bool *target(_Bool *p) { calls++; return p; } int main(void) { _Bool b = 1; int old = (*target(&b))++; int new = ++(*target(&b)); return calls==2 && old==1 && new==1 && b==1; }'
+check bool-runtime-compound-address-once 1 'int calls; _Bool *target(_Bool *p) { calls++; return p; } int value(void) { calls++; return 256; } int main(void) { _Bool b = 0; int r = (*target(&b) += value()); return calls==2 && r==1 && b==1; }'
+check bool-runtime-pre-increment-0 1 'int main(void) { _Bool b = 0; int r = ++b; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-pre-increment-1 1 'int main(void) { _Bool b = 1; int r = ++b; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-post-increment-0 1 'int main(void) { _Bool b = 0; int r = b++; return r == 0 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-post-increment-1 1 'int main(void) { _Bool b = 1; int r = b++; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-pre-decrement-0 1 'int main(void) { _Bool b = 0; int r = --b; return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-pre-decrement-1 1 'int main(void) { _Bool b = 1; int r = --b; return r == 0 && b == 0 && *(unsigned char *)&b == 0; }'
+check bool-runtime-post-decrement-0 1 'int main(void) { _Bool b = 0; int r = b--; return r == 0 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-post-decrement-1 1 'int main(void) { _Bool b = 1; int r = b--; return r == 1 && b == 0 && *(unsigned char *)&b == 0; }'
+check bool-runtime-compound-add-1-255 1 'int main(void) { _Bool b = 1; int r = (b += 255); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-compound-add-1-4294967295U 1 'int main(void) { _Bool b = 1; int r = (b += 4294967295U); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }'
+check bool-runtime-compound-add-0-4294967296UL 1 'int main(void) { _Bool b = 0; int r = (b += 4294967296UL); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-compound-sub-0-1 1 'int main(void) { _Bool b = 0; int r = (b -= 1); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-compound-sub-1-1 1 'int main(void) { _Bool b = 1; int r = (b -= 1); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }'
+check bool-runtime-compound-mul-1-256 1 'int main(void) { _Bool b = 1; int r = (b *= 256); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-compound-mul-1-0 1 'int main(void) { _Bool b = 1; int r = (b *= 0); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }'
+check bool-runtime-compound-div-1-2 1 'int main(void) { _Bool b = 1; int r = (b /= 2); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }'
+check bool-runtime-compound-mod-1-2 1 'int main(void) { _Bool b = 1; int r = (b %= 2); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-compound-lshift-1-8 1 'int main(void) { _Bool b = 1; int r = (b <<= 8); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-compound-rshift-1-1 1 'int main(void) { _Bool b = 1; int r = (b >>= 1); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }'
+check bool-runtime-compound-and-1-2 1 'int main(void) { _Bool b = 1; int r = (b &= 2); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }'
+check bool-runtime-compound-or-0-256 1 'int main(void) { _Bool b = 0; int r = (b |= 256); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
+check bool-runtime-compound-xor-1-1 1 'int main(void) { _Bool b = 1; int r = (b ^= 1); return r == 0 && b == 0 && *(unsigned char *)&b == 0; }'
+check bool-runtime-compound-xor-1-256 1 'int main(void) { _Bool b = 1; int r = (b ^= 256); return r == 1 && b == 1 && *(unsigned char *)&b == 1; }'
 
 # _Bool frontend: types, promotions, constant conversions and diagnostics.
-check 1 'int main(void) { return sizeof(_Bool); }' bool-sizeof-type
-check 3 'int main(void) { _Bool a[3]; return sizeof(a); }' bool-array-size
-check 1 'typedef _Bool B; typedef _Bool B; int main(void) { B b; return sizeof(b); }' bool-typedef
-check 1 '_Bool typedef B; int main(void) { return sizeof(B); }' bool-typedef-after-type
-check 1 '_Bool f(_Bool b); int main(void) { return sizeof(f(256)); }' bool-function-type
-check 1 '_Bool f(_Bool b); int main(void) { int x; return sizeof(f(&x)); }' bool-pointer-argument
-check 1 '_Bool f(_Bool b); int main(void) { int a[2]; return sizeof(f(a)); }' bool-array-argument
-check 1 '_Bool f(_Bool b); int main(void) { return sizeof(f("abc")); }' bool-string-argument
-check 1 'struct S { _Bool a; _Bool b; }; int main(void) { return sizeof(struct S) == 2; }' bool-struct-members
-check 12 'struct S { _Bool a; int i; _Bool b; }; int main(void) { return sizeof(struct S); }' bool-struct-alignment
-check 1 'int main(void) { int x; return sizeof((_Bool)&x); }' bool-pointer-cast-type
-check 1 'int main(void) { return sizeof((_Bool)"abc"); }' bool-string-cast-type
-check 4 'int main(void) { _Bool b; return sizeof(b + b); }' bool-arithmetic-promotion
-check 4 'int main(void) { _Bool b; return sizeof(~b); }' bool-bitwise-promotion
-check 4 'int main(void) { _Bool b; return sizeof(-b); }' bool-negation-promotion
-check 4 'int main(void) { _Bool b; return sizeof(b << b); }' bool-shift-promotion
-check 4 'int main(void) { _Bool b; return sizeof(1 ? b : b); }' bool-conditional-promotion
-check 1 'int main(void) { _Bool b; return sizeof(b = 256); }' bool-assignment-type
-check 1 'int main(void) { _Bool b; int x; return sizeof(b = &x); }' bool-pointer-assignment
-check 1 'int main(void) { _Bool b; return sizeof(b += 2); }' bool-compound-assignment-type
-check 1 'int main(void) { _Bool b; return sizeof(++b) + sizeof(b--) == 2; }' bool-inc-dec-type
-check 0 'enum E { A = (_Bool)0 }; int main(void) { return A; }' bool-constant-zero
-check 1 'enum E { A = (_Bool)256 }; int main(void) { return A; }' bool-constant-not-truncation
-check 1 'enum E { A = (_Bool)-1 }; int main(void) { return A; }' bool-constant-negative
-check 1 'enum E { A = (_Bool)18446744073709551615ULL }; int main(void) { return A; }' bool-constant-unsigned-max
-check 0 'enum E { A = (_Bool)(unsigned char)256 }; int main(void) { return A; }' bool-constant-after-narrowing
-check 4 'int main(void) { int a[(_Bool)256]; return sizeof(a); }' bool-constant-array-bound
-check 0 'int x; int a[3]; _Bool b = 0; int main(void) { return *(unsigned char *)&b; }' bool-global-zero
-check 1 'int x; int a[3]; _Bool b = 1; int main(void) { return *(unsigned char *)&b; }' bool-global-one
-check 1 'int x; int a[3]; _Bool b = -256; int main(void) { return *(unsigned char *)&b; }' bool-global-negative
-check 1 'int x; int a[3]; _Bool b = 256; int main(void) { return *(unsigned char *)&b; }' bool-global-wide
-check 1 'int x; int a[3]; _Bool b = 4294967296UL; int main(void) { return *(unsigned char *)&b; }' bool-global-high-bit
-check 1 'int x; int a[3]; _Bool b = 18446744073709551615ULL; int main(void) { return *(unsigned char *)&b; }' bool-global-unsigned-max
-check 0 'int x; int a[3]; _Bool b = (unsigned char)256; int main(void) { return *(unsigned char *)&b; }' bool-global-narrowed
-check 0 'int x; int a[3]; _Bool b = (void *)0; int main(void) { return *(unsigned char *)&b; }' bool-global-null
-check 1 'int x; int a[3]; _Bool b = (int *)256; int main(void) { return *(unsigned char *)&b; }' bool-global-nonzero-pointer
-check 1 'int x; int a[3]; _Bool b = (void *)4294967296UL; int main(void) { return *(unsigned char *)&b; }' bool-global-high-pointer
-check 1 'int x; int a[3]; _Bool b = &x; int main(void) { return *(unsigned char *)&b; }' bool-global-address
-check 1 'int x; int a[3]; _Bool b = a; int main(void) { return *(unsigned char *)&b; }' bool-global-array
-check 1 'int x; int a[3]; _Bool b = (_Bool)""; int main(void) { return *(unsigned char *)&b; }' bool-global-string
-check 1 'int x; int a[3]; _Bool b = (_Bool)(_Bool)&x; int main(void) { return *(unsigned char *)&b; }' bool-global-nested-casts
-check 1 'int x; int a[3]; _Bool b = (_Bool)(a + 2); int main(void) { return *(unsigned char *)&b; }' bool-global-address-offset
-check 1 'int x; int a[3]; _Bool b = 0 ? (int *)0 : &x; int main(void) { return *(unsigned char *)&b; }' bool-global-pointer-conditional
+check bool-sizeof-type 1 'int main(void) { return sizeof(_Bool); }'
+check bool-array-size 3 'int main(void) { _Bool a[3]; return sizeof(a); }'
+check bool-typedef 1 'typedef _Bool B; typedef _Bool B; int main(void) { B b; return sizeof(b); }'
+check bool-typedef-after-type 1 '_Bool typedef B; int main(void) { return sizeof(B); }'
+check bool-function-type 1 '_Bool f(_Bool b); int main(void) { return sizeof(f(256)); }'
+check bool-pointer-argument 1 '_Bool f(_Bool b); int main(void) { int x; return sizeof(f(&x)); }'
+check bool-array-argument 1 '_Bool f(_Bool b); int main(void) { int a[2]; return sizeof(f(a)); }'
+check bool-string-argument 1 '_Bool f(_Bool b); int main(void) { return sizeof(f("abc")); }'
+check bool-struct-members 1 'struct S { _Bool a; _Bool b; }; int main(void) { return sizeof(struct S) == 2; }'
+check bool-struct-alignment 12 'struct S { _Bool a; int i; _Bool b; }; int main(void) { return sizeof(struct S); }'
+check bool-pointer-cast-type 1 'int main(void) { int x; return sizeof((_Bool)&x); }'
+check bool-string-cast-type 1 'int main(void) { return sizeof((_Bool)"abc"); }'
+check bool-arithmetic-promotion 4 'int main(void) { _Bool b; return sizeof(b + b); }'
+check bool-bitwise-promotion 4 'int main(void) { _Bool b; return sizeof(~b); }'
+check bool-negation-promotion 4 'int main(void) { _Bool b; return sizeof(-b); }'
+check bool-shift-promotion 4 'int main(void) { _Bool b; return sizeof(b << b); }'
+check bool-conditional-promotion 4 'int main(void) { _Bool b; return sizeof(1 ? b : b); }'
+check bool-assignment-type 1 'int main(void) { _Bool b; return sizeof(b = 256); }'
+check bool-pointer-assignment 1 'int main(void) { _Bool b; int x; return sizeof(b = &x); }'
+check bool-compound-assignment-type 1 'int main(void) { _Bool b; return sizeof(b += 2); }'
+check bool-inc-dec-type 1 'int main(void) { _Bool b; return sizeof(++b) + sizeof(b--) == 2; }'
+check bool-constant-zero 0 'enum E { A = (_Bool)0 }; int main(void) { return A; }'
+check bool-constant-not-truncation 1 'enum E { A = (_Bool)256 }; int main(void) { return A; }'
+check bool-constant-negative 1 'enum E { A = (_Bool)-1 }; int main(void) { return A; }'
+check bool-constant-unsigned-max 1 'enum E { A = (_Bool)18446744073709551615ULL }; int main(void) { return A; }'
+check bool-constant-after-narrowing 0 'enum E { A = (_Bool)(unsigned char)256 }; int main(void) { return A; }'
+check bool-constant-array-bound 4 'int main(void) { int a[(_Bool)256]; return sizeof(a); }'
+check bool-global-zero 0 'int x; int a[3]; _Bool b = 0; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-one 1 'int x; int a[3]; _Bool b = 1; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-negative 1 'int x; int a[3]; _Bool b = -256; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-wide 1 'int x; int a[3]; _Bool b = 256; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-high-bit 1 'int x; int a[3]; _Bool b = 4294967296UL; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-unsigned-max 1 'int x; int a[3]; _Bool b = 18446744073709551615ULL; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-narrowed 0 'int x; int a[3]; _Bool b = (unsigned char)256; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-null 0 'int x; int a[3]; _Bool b = (void *)0; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-nonzero-pointer 1 'int x; int a[3]; _Bool b = (int *)256; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-high-pointer 1 'int x; int a[3]; _Bool b = (void *)4294967296UL; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-address 1 'int x; int a[3]; _Bool b = &x; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-array 1 'int x; int a[3]; _Bool b = a; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-string 1 'int x; int a[3]; _Bool b = (_Bool)""; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-nested-casts 1 'int x; int a[3]; _Bool b = (_Bool)(_Bool)&x; int main(void) { return *(unsigned char *)&b; }'
+check bool-global-address-offset 1 'int x; int a[3]; _Bool b = (_Bool)(a + 2); int main(void) { return *(unsigned char *)&b; }'
+check bool-global-pointer-conditional 1 'int x; int a[3]; _Bool b = 0 ? (int *)0 : &x; int main(void) { return *(unsigned char *)&b; }'
 check_error bool-unsigned 'unsigned _Bool b;' \
             '1:10: error: invalid combination of type specifiers'
 check_error bool-unsigned-reversed '_Bool unsigned b;' \
@@ -542,73 +668,73 @@ check_error bool-address-array-bound 'int x; int a[(_Bool)&x];' \
             '1:23: error: not an integer constant expression'
 
 # Explicit casts share AST_CAST with implicit conversions.
-check 1 'int main(void) { return (char)255 == -1; }' cast-signed-char
-check 1 'int main(void) { return (unsigned char)511 == 255; }' cast-unsigned-char
-check 1 'int main(void) { return (short)65535 == -1; }' cast-signed-short
-check 1 'int main(void) { return (unsigned short)-1 == 65535; }' cast-unsigned-short
-check 1 'int main(void) { return (int)4294967295U == -1; }' cast-signed-int
-check 1 'int main(void) { return (unsigned)-1 == 4294967295U; }' cast-unsigned-int
-check 1 'int main(void) { return (long)-1 == -1L; }' cast-signed-long
-check 1 'int main(void) { return (unsigned long)-1 == 18446744073709551615UL; }' cast-unsigned-long
-check 1 'int main(void) { return (long long)-1 == -1LL; }' cast-signed-long-long
-check 1 'int main(void) { return (unsigned long long)-1 == 18446744073709551615ULL; }' cast-unsigned-long-long
-check 1 'int main(void) { return (long)(int)4294967295U == -1L; }' cast-signed-widening
-check 1 'int main(void) { return (unsigned long)(unsigned)-1 == 4294967295UL; }' cast-unsigned-widening
-check 1 'int main(void) { return (unsigned long)(char)255 == 18446744073709551615UL; }' cast-signed-byte-widening
-check 1 'int main(void) { return (long long)(short)65535 == -1LL; }' cast-signed-short-widening
-check 1 'int main(void) { return (char)(unsigned char)511 == -1; }' cast-nested-right-association
-check 1 'int main(void) { return -(char)255 == 1; }' cast-unary-negation
-check 1 'int main(void) { return ~(unsigned char)0 == -1; }' cast-unary-complement
-check 1 'int main(void) { return !(int *)0 == 1; }' cast-unary-not
-check 1 'int main(void) { return 3 * (unsigned char)257 == 3; }' cast-multiplication-precedence
-check 1 'int main(void) { return (int)257 / (char)2 == 128; }' cast-division-precedence
-check 1 'int main(void) { return (char)(255 + 2) == 1; }' cast-parenthesized-operand
-check 1 'int main(void) { return (int)(1 ? 42 : 0) == 42; }' cast-conditional-operand
-check 1 'int main(void) { return sizeof((unsigned char)1000) == 1 && sizeof((long)1) == 8; }' cast-sizeof-result-type
-check 42 'typedef unsigned long U; int main(void) { U n = (U)42; return n; }' cast-typedef-name
-check 42 'typedef int T; int main(void) { int T = 42; return (T) + 0; }' cast-shadowed-typedef-grouping
-check 42 'enum E { A = 42 }; int main(void) { enum E e = (enum E)42; return (int)e; }' cast-enum-type
-check 42 'int main(void) { int x = 42; void *p = &x; return *(int *)p; }' cast-dereference-cast
-check 42 'typedef int *P; int main(void) { int x = 42; void *p = &x; return *((P)p); }' cast-pointer-typedef
-check 1 'int main(void) { int x = 42; char *p = (char *)&x; return (int *)p == &x; }' cast-unrelated-pointer-types
-check 1 'int main(void) { int x = 42; unsigned long n = (unsigned long)&x; int *p = (int *)n; return p == &x && *p == 42; }' cast-pointer-integer-roundtrip
-check 1 'int main(void) { return (unsigned long)(int *)-1 == 18446744073709551615UL; }' cast-signed-int-to-pointer
-check 1 'int main(void) { return (unsigned long)(int *)4294967295U == 4294967295UL; }' cast-unsigned-int-to-pointer
-check 1 'int main(void) { return (unsigned long)(void *)(char)255 == 18446744073709551615UL; }' cast-signed-char-to-pointer
-check 1 'int main(void) { return (unsigned long)(void *)(unsigned char)511 == 255UL; }' cast-unsigned-char-to-pointer
-check 1 'int main(void) { return (int)(void *)4294967338UL == 42; }' cast-pointer-to-int-truncation
-check 1 'int main(void) { return (unsigned char)(void *)511 == 255; }' cast-pointer-to-byte
-check 42 'int main(void) { int a[2]; int *p = (int *)a; p[1] = 42; return a[1]; }' cast-array-decay
-check 120 'int main(void) { int x = 305419896; return *(unsigned char *)&x; }' cast-object-representation
-check 98 'int main(void) { return ((char *)"abc")[1]; }' cast-string-decay
-check 42 'int main(void) { struct S { int x; }; struct S s; void *p = &s; ((struct S *)p)->x = 42; return s.x; }' cast-struct-pointer
-check 42 'int main(void) { typedef void V; int x = 0; (V)(x = 42); return x; }' cast-void-typedef
-check 42 'int main(void) { int x = 41; (void)x++; return x; }' cast-void-side-effect
-check 42 'int x; void f(void) { x = 42; } int main(void) { (void)f(); return x; }' cast-void-call
-check 42 'int main(void) { (void)(void)0; return 42; }' cast-void-to-void
-check 42 'int main(void) { struct S { int x; }; struct S s; s.x = 42; (void)s; return 42; }' cast-discard-struct
-check 42 'int main(void) { char s[] = "abc"; (void)s; return 42; }' cast-discard-array
-check 42 'int main(void) { int n = 0; for ((void)(n = 42); 0; (void)n++) {} return n; }' cast-void-for-expression
-check 1 'int main(void) { int x = 42; return *(1 ? &x : (void *)0) == 42 && *(0 ? (void *)0 : &x) == 42; }' cast-void-null-conditional-type
-check 42 'int f(int *p) { return *p; } int main(void) { int x = 42; return f((int *)(void *)&x); }' cast-cast-argument
-check 42 'int *f(void *p) { return (int *)p; } int main(void) { int x = 42; return *f(&x); }' cast-cast-return
-check 1 'unsigned long x = (unsigned long)(int)-1; int main(void) { return x == 18446744073709551615UL; }' cast-global-integer
-check 1 'unsigned char x = (unsigned char)511; int main(void) { return x == 255; }' cast-global-narrowing
-check 1 'int *p = (int *)16; int main(void) { return (unsigned long)p == 16; }' cast-global-numeric-pointer
-check 1 'void *p = (void *)18446744073709551615ULL; int main(void) { return (unsigned long)p == 18446744073709551615UL; }' cast-global-high-pointer-bits
-check 1 'int *p = (int *)-1; int main(void) { return (unsigned long)p == 18446744073709551615UL; }' cast-global-signed-pointer
-check 1 'int *p = (int *)4294967295U; int main(void) { return (unsigned long)p == 4294967295UL; }' cast-global-unsigned-pointer
-check 1 'int *p = (int *)(char)255; int main(void) { return (unsigned long)p == 18446744073709551615UL; }' cast-global-signed-byte-pointer
-check 1 'int *p = (void *)0; int main(void) { return p == 0; }' cast-global-void-null
-check 1 'int *p = (void *)(1-1); int main(void) { return p == 0; }' cast-global-void-constant-null
-check 42 'int x = 42; char *p = (char *)&x; int main(void) { return *(int *)p; }' cast-global-pointer-reinterpretation
-check 1 'int a[3]; char *p = (char *)a + 4; int main(void) { return (int *)p == &a[1]; }' cast-global-byte-offset
-check 1 'struct S { char c; long n; }; struct S s; char *p = (char *)&s.n; int main(void) { return (long *)p == &s.n; }' cast-global-member-address
-check 65 'unsigned char *p = (unsigned char *)"A"; int main(void) { return *p; }' cast-global-string-pointer
-check 16 'int main(void) { int a[(unsigned char)260]; return sizeof(a); }' cast-array-bound
-check 255 'enum { N = (unsigned char)511 }; int main(void) { return N; }' cast-enum-initializer
-check 42 'int main(void) { switch (255) { case (unsigned char)511: return 42; } return 0; }' cast-case-label
-check 1 'int main(void) { int x = 0; return (int)(x = 1) == 1 && x == 1; }' cast-operand-evaluated-once
+check cast-signed-char 1 'int main(void) { return (char)255 == -1; }'
+check cast-unsigned-char 1 'int main(void) { return (unsigned char)511 == 255; }'
+check cast-signed-short 1 'int main(void) { return (short)65535 == -1; }'
+check cast-unsigned-short 1 'int main(void) { return (unsigned short)-1 == 65535; }'
+check cast-signed-int 1 'int main(void) { return (int)4294967295U == -1; }'
+check cast-unsigned-int 1 'int main(void) { return (unsigned)-1 == 4294967295U; }'
+check cast-signed-long 1 'int main(void) { return (long)-1 == -1L; }'
+check cast-unsigned-long 1 'int main(void) { return (unsigned long)-1 == 18446744073709551615UL; }'
+check cast-signed-long-long 1 'int main(void) { return (long long)-1 == -1LL; }'
+check cast-unsigned-long-long 1 'int main(void) { return (unsigned long long)-1 == 18446744073709551615ULL; }'
+check cast-signed-widening 1 'int main(void) { return (long)(int)4294967295U == -1L; }'
+check cast-unsigned-widening 1 'int main(void) { return (unsigned long)(unsigned)-1 == 4294967295UL; }'
+check cast-signed-byte-widening 1 'int main(void) { return (unsigned long)(char)255 == 18446744073709551615UL; }'
+check cast-signed-short-widening 1 'int main(void) { return (long long)(short)65535 == -1LL; }'
+check cast-nested-right-association 1 'int main(void) { return (char)(unsigned char)511 == -1; }'
+check cast-unary-negation 1 'int main(void) { return -(char)255 == 1; }'
+check cast-unary-complement 1 'int main(void) { return ~(unsigned char)0 == -1; }'
+check cast-unary-not 1 'int main(void) { return !(int *)0 == 1; }'
+check cast-multiplication-precedence 1 'int main(void) { return 3 * (unsigned char)257 == 3; }'
+check cast-division-precedence 1 'int main(void) { return (int)257 / (char)2 == 128; }'
+check cast-parenthesized-operand 1 'int main(void) { return (char)(255 + 2) == 1; }'
+check cast-conditional-operand 1 'int main(void) { return (int)(1 ? 42 : 0) == 42; }'
+check cast-sizeof-result-type 1 'int main(void) { return sizeof((unsigned char)1000) == 1 && sizeof((long)1) == 8; }'
+check cast-typedef-name 42 'typedef unsigned long U; int main(void) { U n = (U)42; return n; }'
+check cast-shadowed-typedef-grouping 42 'typedef int T; int main(void) { int T = 42; return (T) + 0; }'
+check cast-enum-type 42 'enum E { A = 42 }; int main(void) { enum E e = (enum E)42; return (int)e; }'
+check cast-dereference-cast 42 'int main(void) { int x = 42; void *p = &x; return *(int *)p; }'
+check cast-pointer-typedef 42 'typedef int *P; int main(void) { int x = 42; void *p = &x; return *((P)p); }'
+check cast-unrelated-pointer-types 1 'int main(void) { int x = 42; char *p = (char *)&x; return (int *)p == &x; }'
+check cast-pointer-integer-roundtrip 1 'int main(void) { int x = 42; unsigned long n = (unsigned long)&x; int *p = (int *)n; return p == &x && *p == 42; }'
+check cast-signed-int-to-pointer 1 'int main(void) { return (unsigned long)(int *)-1 == 18446744073709551615UL; }'
+check cast-unsigned-int-to-pointer 1 'int main(void) { return (unsigned long)(int *)4294967295U == 4294967295UL; }'
+check cast-signed-char-to-pointer 1 'int main(void) { return (unsigned long)(void *)(char)255 == 18446744073709551615UL; }'
+check cast-unsigned-char-to-pointer 1 'int main(void) { return (unsigned long)(void *)(unsigned char)511 == 255UL; }'
+check cast-pointer-to-int-truncation 1 'int main(void) { return (int)(void *)4294967338UL == 42; }'
+check cast-pointer-to-byte 1 'int main(void) { return (unsigned char)(void *)511 == 255; }'
+check cast-array-decay 42 'int main(void) { int a[2]; int *p = (int *)a; p[1] = 42; return a[1]; }'
+check cast-object-representation 120 'int main(void) { int x = 305419896; return *(unsigned char *)&x; }'
+check cast-string-decay 98 'int main(void) { return ((char *)"abc")[1]; }'
+check cast-struct-pointer 42 'int main(void) { struct S { int x; }; struct S s; void *p = &s; ((struct S *)p)->x = 42; return s.x; }'
+check cast-void-typedef 42 'int main(void) { typedef void V; int x = 0; (V)(x = 42); return x; }'
+check cast-void-side-effect 42 'int main(void) { int x = 41; (void)x++; return x; }'
+check cast-void-call 42 'int x; void f(void) { x = 42; } int main(void) { (void)f(); return x; }'
+check cast-void-to-void 42 'int main(void) { (void)(void)0; return 42; }'
+check cast-discard-struct 42 'int main(void) { struct S { int x; }; struct S s; s.x = 42; (void)s; return 42; }'
+check cast-discard-array 42 'int main(void) { char s[] = "abc"; (void)s; return 42; }'
+check cast-void-for-expression 42 'int main(void) { int n = 0; for ((void)(n = 42); 0; (void)n++) {} return n; }'
+check cast-void-null-conditional-type 1 'int main(void) { int x = 42; return *(1 ? &x : (void *)0) == 42 && *(0 ? (void *)0 : &x) == 42; }'
+check cast-cast-argument 42 'int f(int *p) { return *p; } int main(void) { int x = 42; return f((int *)(void *)&x); }'
+check cast-cast-return 42 'int *f(void *p) { return (int *)p; } int main(void) { int x = 42; return *f(&x); }'
+check cast-global-integer 1 'unsigned long x = (unsigned long)(int)-1; int main(void) { return x == 18446744073709551615UL; }'
+check cast-global-narrowing 1 'unsigned char x = (unsigned char)511; int main(void) { return x == 255; }'
+check cast-global-numeric-pointer 1 'int *p = (int *)16; int main(void) { return (unsigned long)p == 16; }'
+check cast-global-high-pointer-bits 1 'void *p = (void *)18446744073709551615ULL; int main(void) { return (unsigned long)p == 18446744073709551615UL; }'
+check cast-global-signed-pointer 1 'int *p = (int *)-1; int main(void) { return (unsigned long)p == 18446744073709551615UL; }'
+check cast-global-unsigned-pointer 1 'int *p = (int *)4294967295U; int main(void) { return (unsigned long)p == 4294967295UL; }'
+check cast-global-signed-byte-pointer 1 'int *p = (int *)(char)255; int main(void) { return (unsigned long)p == 18446744073709551615UL; }'
+check cast-global-void-null 1 'int *p = (void *)0; int main(void) { return p == 0; }'
+check cast-global-void-constant-null 1 'int *p = (void *)(1-1); int main(void) { return p == 0; }'
+check cast-global-pointer-reinterpretation 42 'int x = 42; char *p = (char *)&x; int main(void) { return *(int *)p; }'
+check cast-global-byte-offset 1 'int a[3]; char *p = (char *)a + 4; int main(void) { return (int *)p == &a[1]; }'
+check cast-global-member-address 1 'struct S { char c; long n; }; struct S s; char *p = (char *)&s.n; int main(void) { return (long *)p == &s.n; }'
+check cast-global-string-pointer 65 'unsigned char *p = (unsigned char *)"A"; int main(void) { return *p; }'
+check cast-array-bound 16 'int main(void) { int a[(unsigned char)260]; return sizeof(a); }'
+check cast-enum-initializer 255 'enum { N = (unsigned char)511 }; int main(void) { return N; }'
+check cast-case-label 42 'int main(void) { switch (255) { case (unsigned char)511: return 42; } return 0; }'
+check cast-operand-evaluated-once 1 'int main(void) { int x = 0; return (int)(x = 1) == 1 && x == 1; }'
 check_error cast-struct-target 'struct S { int x; }; int main(void) { struct S s; (struct S)s; }' "1:51: error: cast target must be a scalar type or void"
 check_error cast-array-target 'int main(void) { (int[3])0; }' "1:18: error: cast target must be a scalar type or void"
 check_error cast-typedef-array-target 'typedef int A[3]; int main(void) { (A)0; }' "1:36: error: cast target must be a scalar type or void"
@@ -635,19 +761,19 @@ check_error cast-pointer-cast-enumerator 'enum { A = (int)(void *)1 };' "1:27: e
 check_error cast-pointer-cast-case 'int main(void) { switch (1) { case (int)(void *)1: return 0; } }' "1:50: error: not an integer constant expression"
 
 # Stack layout visits declarations after parsing each complete function.
-check 42 'int main(void) { { char s[] = "abc"; long n = 42; return s[3] + n; } }' stack-layout-nested-block
-check 42 'int main(void) { int n = 0; if (n) { char a[] = "a"; n = a[0]; } else { char b[] = "b"; long x = 42; n = x + b[1]; } return n; }' stack-layout-if-and-else
-check 42 'int main(void) { int n = 0; while (n < 42) { char a[16] = "abc"; long x = 1; n += x + a[15]; } return n; }' stack-layout-while-body
-check 42 'int main(void) { int n = 0; for (char a[] = "abc"; n < 42; n++) { short b = 42; if (a[3] || b != 42) return 0; } return n; }' stack-layout-for-init-and-body
-check 42 'int main(void) { int n = 0; do { char a[] = "abc"; long x = 42; n = x + a[3]; } while (0); return n; }' stack-layout-do-body
-check 42 'int main(void) { switch (2) { case 1: { char a[] = "a"; return a[0]; } case 2: { char b[8] = "abc"; long x = 42; return x + b[7]; } default: { short n = 0; return n; } } return 0; }' stack-layout-switch-cases
-check 42 'int main(void) { switch (2) { case 1: case 2: { char a[] = "abc"; long x = 42; return x + a[3]; } } return 0; }' stack-layout-stacked-cases
-check 42 'int main(void) { goto label; label: { char a[16] = "abc"; long x = 42; return x + a[15]; } }' stack-layout-label-body
-check 42 'int main(void) { typedef char A[]; struct S { long x; }; enum E { N = 42 }; A a = "abc"; struct S s; s.x = N; return s.x + a[3]; }' stack-layout-declaration-only-nodes
-check 42 'long f(char a,short b,int c,long d,char e,short f,int g,long h) { char s[] = "abc"; long x = a+b+c+d+e+f+g+h; return x+s[3]; } int main(void) { return f(1,2,3,4,5,6,7,14); }' stack-layout-parameter-homes-and-locals
-check 42 'int f(int n) { char a[16] = "abc"; if (n) return f(n-1) + a[15]; return 42; } int g(void) { short n = 7; return n; } int main(void) { return f(g()); }' stack-layout-separate-function-frames
-check 42 'int huge(void) { char a[2147483632]; return 0; } int main(void) { return 42; }' stack-layout-maximum-aligned-frame
-check 42 'int huge(int a,int b,int c,int d,int e,int f,int g,int h) { char buffer[2147483568]; return 0; } int main(void) { return 42; }' stack-layout-maximum-frame-with-parameters
+check stack-layout-nested-block 42 'int main(void) { { char s[] = "abc"; long n = 42; return s[3] + n; } }'
+check stack-layout-if-and-else 42 'int main(void) { int n = 0; if (n) { char a[] = "a"; n = a[0]; } else { char b[] = "b"; long x = 42; n = x + b[1]; } return n; }'
+check stack-layout-while-body 42 'int main(void) { int n = 0; while (n < 42) { char a[16] = "abc"; long x = 1; n += x + a[15]; } return n; }'
+check stack-layout-for-init-and-body 42 'int main(void) { int n = 0; for (char a[] = "abc"; n < 42; n++) { short b = 42; if (a[3] || b != 42) return 0; } return n; }'
+check stack-layout-do-body 42 'int main(void) { int n = 0; do { char a[] = "abc"; long x = 42; n = x + a[3]; } while (0); return n; }'
+check stack-layout-switch-cases 42 'int main(void) { switch (2) { case 1: { char a[] = "a"; return a[0]; } case 2: { char b[8] = "abc"; long x = 42; return x + b[7]; } default: { short n = 0; return n; } } return 0; }'
+check stack-layout-stacked-cases 42 'int main(void) { switch (2) { case 1: case 2: { char a[] = "abc"; long x = 42; return x + a[3]; } } return 0; }'
+check stack-layout-label-body 42 'int main(void) { goto label; label: { char a[16] = "abc"; long x = 42; return x + a[15]; } }'
+check stack-layout-declaration-only-nodes 42 'int main(void) { typedef char A[]; struct S { long x; }; enum E { N = 42 }; A a = "abc"; struct S s; s.x = N; return s.x + a[3]; }'
+check stack-layout-parameter-homes-and-locals 42 'long f(char a,short b,int c,long d,char e,short f,int g,long h) { char s[] = "abc"; long x = a+b+c+d+e+f+g+h; return x+s[3]; } int main(void) { return f(1,2,3,4,5,6,7,14); }'
+check stack-layout-separate-function-frames 42 'int f(int n) { char a[16] = "abc"; if (n) return f(n-1) + a[15]; return 42; } int g(void) { short n = 7; return n; } int main(void) { return f(g()); }'
+check stack-layout-maximum-aligned-frame 42 'int huge(void) { char a[2147483632]; return 0; } int main(void) { return 42; }'
+check stack-layout-maximum-frame-with-parameters 42 'int huge(int a,int b,int c,int d,int e,int f,int g,int h) { char buffer[2147483568]; return 0; } int main(void) { return 42; }'
 check_error stack-layout-second-function-overflow 'int first(void) { return 42; } int second(void) { char a[2147483647]; return 0; }' "1:56: error: local variables exceed supported stack size"
 check_error stack-layout-parameter-and-local-overflow 'int f(int a,int b,int c,int d,int e,int f,int g,int h) { char buffer[2147483569]; return 0; }' "1:63: error: local variables exceed supported stack size"
 check_error stack-layout-alignment-overflow 'int f(void) { char a[2147483625]; long b; return 0; }' "1:40: error: local variables exceed supported stack size"
@@ -656,69 +782,69 @@ check_error stack-layout-unreachable-branch-overflow 'int f(void) { if (0) { cha
 check_error stack-layout-switch-no-double-allocation 'int f(void) { switch (0) { case 0: { char a[1073741816]; } case 1: { char b[1073741817]; } } return 0; }' "1:75: error: local variables exceed supported stack size"
 
 # Character arrays initialized by strings, with inferred or explicit bounds.
-check 1 'int main(void) { char a[] = "abc"; return sizeof(a) == 4 && a[0] == 97 && a[2] == 99 && a[3] == 0; }' string-array-local-char-inferred
-check 1 'int main(void) { char a[3] = "abc"; return sizeof(a) == 3 && a[0] == 97 && a[2] == 99; }' string-array-local-char-exact
-check 1 'int main(void) { char a[4] = "abc"; return a[2] == 99 && a[3] == 0; }' string-array-local-char-terminated
-check 1 'int main(void) { char a[16] = "abc"; for (int i = 3; i < 16; i++) if (a[i]) return 0; return a[0] == 97; }' string-array-local-char-padding
-check 1 'int main(void) { unsigned char a[] = "abc"; return sizeof(a) == 4 && a[0] == 97 && a[2] == 99 && a[3] == 0; }' string-array-local-unsigned-char-inferred
-check 1 'int main(void) { unsigned char a[3] = "abc"; return sizeof(a) == 3 && a[0] == 97 && a[2] == 99; }' string-array-local-unsigned-char-exact
-check 1 'int main(void) { unsigned char a[4] = "abc"; return a[2] == 99 && a[3] == 0; }' string-array-local-unsigned-char-terminated
-check 1 'int main(void) { unsigned char a[16] = "abc"; for (int i = 3; i < 16; i++) if (a[i]) return 0; return a[0] == 97; }' string-array-local-unsigned-char-padding
-check 1 'int main(void) { char a[] = ""; return sizeof(a) == 1 && a[0] == 0; }' string-array-local-empty-inferred
-check 1 'int main(void) { char a[8] = ""; for (int i = 0; i < 8; i++) if (a[i]) return 0; return 1; }' string-array-local-empty-padded
-check 1 'int main(void) { char a[] = "ab" "cd"; return sizeof(a) == 5 && a[3] == 100 && a[4] == 0; }' string-array-local-concatenated
-check 1 'int main(void) { char a[] = "A\0B"; return sizeof(a) == 4 && a[0] == 65 && a[1] == 0 && a[2] == 66 && a[3] == 0; }' string-array-local-embedded-zero
-check 1 'int main(void) { char a[3] = "A\0B"; return sizeof(a) == 3 && a[1] == 0 && a[2] == 66; }' string-array-local-embedded-zero-exact
-check 1 'int main(void) { char a[8] = "\0\0"; for (int i = 0; i < 8; i++) if (a[i]) return 0; return 1; }' string-array-local-all-zero-string
-check 1 'int main(void) { char a[] = "\377\200"; return a[0] == -1 && a[1] == -128 && a[2] == 0; }' string-array-local-signed-bytes
-check 1 'int main(void) { unsigned char a[] = "\377\200"; return a[0] == 255 && a[1] == 128 && a[2] == 0; }' string-array-local-unsigned-bytes
-check 1 'int main(void) { char a[] = {"abc"}; return sizeof(a) == 4 && a[2] == 99 && a[3] == 0; }' string-array-local-braced
-check 1 'int main(void) { char a[8] = {"ab" "cd",}; return a[3] == 100 && a[4] == 0 && a[7] == 0; }' string-array-local-braced-trailing-comma
-check 1 'int main(void) { char a[] = "123456789abcdefg123456789abcdefgZ"; return sizeof(a) == 34 && a[32] == 90 && a[33] == 0; }' string-array-local-long-string
-check 1 'int main(void) { char a[] = "abc"; a[0] = 42; return a[0] == 42 && a[1] == 98; }' string-array-local-writable
-check 1 'int main(void) { char a[] = "abc"; char *p = a; p[1] = 42; return a[1] == 42; }' string-array-local-decay-and-store
-check 1 'char a[] = "abc"; int main(void) { return sizeof(a) == 4 && a[0] == 97 && a[2] == 99 && a[3] == 0; }' string-array-global-char-inferred
-check 1 'char a[3] = "abc"; int main(void) { return sizeof(a) == 3 && a[0] == 97 && a[2] == 99; }' string-array-global-char-exact
-check 1 'char a[4] = "abc"; int main(void) { return a[2] == 99 && a[3] == 0; }' string-array-global-char-terminated
-check 1 'char a[16] = "abc"; int main(void) { for (int i = 3; i < 16; i++) if (a[i]) return 0; return a[0] == 97; }' string-array-global-char-padding
-check 1 'unsigned char a[] = "abc"; int main(void) { return sizeof(a) == 4 && a[0] == 97 && a[2] == 99 && a[3] == 0; }' string-array-global-unsigned-char-inferred
-check 1 'unsigned char a[3] = "abc"; int main(void) { return sizeof(a) == 3 && a[0] == 97 && a[2] == 99; }' string-array-global-unsigned-char-exact
-check 1 'unsigned char a[4] = "abc"; int main(void) { return a[2] == 99 && a[3] == 0; }' string-array-global-unsigned-char-terminated
-check 1 'unsigned char a[16] = "abc"; int main(void) { for (int i = 3; i < 16; i++) if (a[i]) return 0; return a[0] == 97; }' string-array-global-unsigned-char-padding
-check 1 'char a[] = ""; int main(void) { return sizeof(a) == 1 && a[0] == 0; }' string-array-global-empty-inferred
-check 1 'char a[8] = ""; int main(void) { for (int i = 0; i < 8; i++) if (a[i]) return 0; return 1; }' string-array-global-empty-padded
-check 1 'char a[] = "ab" "cd"; int main(void) { return sizeof(a) == 5 && a[3] == 100 && a[4] == 0; }' string-array-global-concatenated
-check 1 'char a[] = "A\0B"; int main(void) { return sizeof(a) == 4 && a[0] == 65 && a[1] == 0 && a[2] == 66 && a[3] == 0; }' string-array-global-embedded-zero
-check 1 'char a[3] = "A\0B"; int main(void) { return sizeof(a) == 3 && a[1] == 0 && a[2] == 66; }' string-array-global-embedded-zero-exact
-check 1 'char a[8] = "\0\0"; int main(void) { for (int i = 0; i < 8; i++) if (a[i]) return 0; return 1; }' string-array-global-all-zero-string
-check 1 'char a[] = "\377\200"; int main(void) { return a[0] == -1 && a[1] == -128 && a[2] == 0; }' string-array-global-signed-bytes
-check 1 'unsigned char a[] = "\377\200"; int main(void) { return a[0] == 255 && a[1] == 128 && a[2] == 0; }' string-array-global-unsigned-bytes
-check 1 'char a[] = {"abc"}; int main(void) { return sizeof(a) == 4 && a[2] == 99 && a[3] == 0; }' string-array-global-braced
-check 1 'char a[8] = {"ab" "cd",}; int main(void) { return a[3] == 100 && a[4] == 0 && a[7] == 0; }' string-array-global-braced-trailing-comma
-check 1 'char a[] = "123456789abcdefg123456789abcdefgZ"; int main(void) { return sizeof(a) == 34 && a[32] == 90 && a[33] == 0; }' string-array-global-long-string
-check 1 'char a[] = "abc"; int main(void) { a[0] = 42; return a[0] == 42 && a[1] == 98; }' string-array-global-writable
-check 1 'char a[] = "abc"; int main(void) { char *p = a; p[1] = 42; return a[1] == 42; }' string-array-global-decay-and-store
-check 1 'typedef char A[]; A a = "abc"; A b = "x"; int main(void) { A c = "hello"; return sizeof(a) == 4 && sizeof(b) == 2 && sizeof(c) == 6; }' string-array-typedef-inferred-independent-bounds
-check 1 'typedef unsigned char A[8]; A a = "abc"; int main(void) { A b = "x"; return sizeof(a) == 8 && sizeof(b) == 8 && a[7] == 0 && b[7] == 0; }' string-array-typedef-fixed-bounds
-check 42 'char a[]; char *p = a; char a[] = "abc"; int main(void) { p[1] = 42; return a[1]; }' string-array-global-initializer-after-pointer
-check 1 'char a[]; char a[8]; char a[] = "abc"; int main(void) { return sizeof(a) == 8 && a[2] == 99 && a[7] == 0; }' string-array-global-composite-bound-before-initializer
-check 1 'char a[8]; char a[] = "abc"; char a[]; int main(void) { return sizeof(a) == 8 && a[7] == 0; }' string-array-global-repeated-unknown-bound
-check 1 'char a[] = "abc"; char a[4]; int main(void) { return sizeof(a) == 4 && a[3] == 0; }' string-array-global-compatible-known-bound
-check 1 'char a[] = "abc", b[8] = "x", c[] = "yz"; int main(void) { return sizeof(a) == 4 && sizeof(b) == 8 && sizeof(c) == 3 && b[7] == 0; }' string-array-global-multiple-arrays
-check 1 'char a[] = "abc", *p = a + 1; int main(void) { return p[0] == 98 && p[2] == 0; }' string-array-global-array-and-pointer
-check 1 'char a[] = "abc"; char *p = "abc"; int main(void) { a[0] = 42; return p[0] == 97 && a[0] == 42; }' string-array-array-and-literal-independent
-check 1 'int main(void) { char a[] = "abc"; char b[] = "abc"; a[0] = 42; return b[0] == 97 && a[0] == 42; }' string-array-local-independent-copies
-check 42 'int f(char a[]) { a[0] = 42; return a[0]; } int main(void) { char a[] = "abc"; return f(a); }' string-array-unknown-bound-parameter
-check 1 'int main(void) { long x = 1099511627776L; char a[3] = "abc"; long y = 1099511627777L; return a[2] == 99 && x == 1099511627776L && y == 1099511627777L; }' string-array-local-neighbor-layout
-check 1 'int main(void) { for (char a[] = "abc"; a[0] != 42; a[0] = 42) { if (a[3]) return 0; } return 1; }' string-array-for-initializer
-check 1 'int main(void) { for (int i = 0; i < 3; i++) { char a[64] = "abc"; if (a[0] != 97 || a[63]) return 0; a[0] = 1; a[63] = 1; } return 1; }' string-array-local-reinitialization
-check 1 'int f(int n) { char a[16] = "abc"; a[0] = n; if (n) f(n - 1); return a[0] == n && a[15] == 0; } int main(void) { return f(3); }' string-array-recursive-local-storage
-check 1 'int f(int a,int b,int c,int d,int e,int f,int g,int h) { char s[32] = "abc"; return a+b+c+d+e+f+g+h == 36 && s[0] == 97 && s[31] == 0; } int main(void) { return f(1,2,3,4,5,6,7,8); }' string-array-local-with-eight-parameters
-check 1 'int main(void) { char a[4096] = "abc"; for (int i = 3; i < 4096; i++) if (a[i]) return 0; return a[2] == 99; }' string-array-large-local-padding
-check 1 'char a[4096] = "abc"; int main(void) { for (int i = 3; i < 4096; i++) if (a[i]) return 0; return a[2] == 99; }' string-array-large-global-padding
-check 42 'char a[] = "A"; int f(void) { char b[] = "B"; return b[0] - a[0]; } char z[8] = ""; char *p = "C"; int x = 40; int main(void) { return x + f() + z[7] + p[0] - 66; }' string-array-interleaved-sections
-check 1 'char a[]; int main(void) { return a[0] == 0; }' string-array-tentative-unknown-bound
-check 1 'typedef char A[]; A a; A b = "abc"; int main(void) { return a[0] == 0 && sizeof(b) == 4; }' string-array-tentative-typedef-independent-bound
+check string-array-local-char-inferred 1 'int main(void) { char a[] = "abc"; return sizeof(a) == 4 && a[0] == 97 && a[2] == 99 && a[3] == 0; }'
+check string-array-local-char-exact 1 'int main(void) { char a[3] = "abc"; return sizeof(a) == 3 && a[0] == 97 && a[2] == 99; }'
+check string-array-local-char-terminated 1 'int main(void) { char a[4] = "abc"; return a[2] == 99 && a[3] == 0; }'
+check string-array-local-char-padding 1 'int main(void) { char a[16] = "abc"; for (int i = 3; i < 16; i++) if (a[i]) return 0; return a[0] == 97; }'
+check string-array-local-unsigned-char-inferred 1 'int main(void) { unsigned char a[] = "abc"; return sizeof(a) == 4 && a[0] == 97 && a[2] == 99 && a[3] == 0; }'
+check string-array-local-unsigned-char-exact 1 'int main(void) { unsigned char a[3] = "abc"; return sizeof(a) == 3 && a[0] == 97 && a[2] == 99; }'
+check string-array-local-unsigned-char-terminated 1 'int main(void) { unsigned char a[4] = "abc"; return a[2] == 99 && a[3] == 0; }'
+check string-array-local-unsigned-char-padding 1 'int main(void) { unsigned char a[16] = "abc"; for (int i = 3; i < 16; i++) if (a[i]) return 0; return a[0] == 97; }'
+check string-array-local-empty-inferred 1 'int main(void) { char a[] = ""; return sizeof(a) == 1 && a[0] == 0; }'
+check string-array-local-empty-padded 1 'int main(void) { char a[8] = ""; for (int i = 0; i < 8; i++) if (a[i]) return 0; return 1; }'
+check string-array-local-concatenated 1 'int main(void) { char a[] = "ab" "cd"; return sizeof(a) == 5 && a[3] == 100 && a[4] == 0; }'
+check string-array-local-embedded-zero 1 'int main(void) { char a[] = "A\0B"; return sizeof(a) == 4 && a[0] == 65 && a[1] == 0 && a[2] == 66 && a[3] == 0; }'
+check string-array-local-embedded-zero-exact 1 'int main(void) { char a[3] = "A\0B"; return sizeof(a) == 3 && a[1] == 0 && a[2] == 66; }'
+check string-array-local-all-zero-string 1 'int main(void) { char a[8] = "\0\0"; for (int i = 0; i < 8; i++) if (a[i]) return 0; return 1; }'
+check string-array-local-signed-bytes 1 'int main(void) { char a[] = "\377\200"; return a[0] == -1 && a[1] == -128 && a[2] == 0; }'
+check string-array-local-unsigned-bytes 1 'int main(void) { unsigned char a[] = "\377\200"; return a[0] == 255 && a[1] == 128 && a[2] == 0; }'
+check string-array-local-braced 1 'int main(void) { char a[] = {"abc"}; return sizeof(a) == 4 && a[2] == 99 && a[3] == 0; }'
+check string-array-local-braced-trailing-comma 1 'int main(void) { char a[8] = {"ab" "cd",}; return a[3] == 100 && a[4] == 0 && a[7] == 0; }'
+check string-array-local-long-string 1 'int main(void) { char a[] = "123456789abcdefg123456789abcdefgZ"; return sizeof(a) == 34 && a[32] == 90 && a[33] == 0; }'
+check string-array-local-writable 1 'int main(void) { char a[] = "abc"; a[0] = 42; return a[0] == 42 && a[1] == 98; }'
+check string-array-local-decay-and-store 1 'int main(void) { char a[] = "abc"; char *p = a; p[1] = 42; return a[1] == 42; }'
+check string-array-global-char-inferred 1 'char a[] = "abc"; int main(void) { return sizeof(a) == 4 && a[0] == 97 && a[2] == 99 && a[3] == 0; }'
+check string-array-global-char-exact 1 'char a[3] = "abc"; int main(void) { return sizeof(a) == 3 && a[0] == 97 && a[2] == 99; }'
+check string-array-global-char-terminated 1 'char a[4] = "abc"; int main(void) { return a[2] == 99 && a[3] == 0; }'
+check string-array-global-char-padding 1 'char a[16] = "abc"; int main(void) { for (int i = 3; i < 16; i++) if (a[i]) return 0; return a[0] == 97; }'
+check string-array-global-unsigned-char-inferred 1 'unsigned char a[] = "abc"; int main(void) { return sizeof(a) == 4 && a[0] == 97 && a[2] == 99 && a[3] == 0; }'
+check string-array-global-unsigned-char-exact 1 'unsigned char a[3] = "abc"; int main(void) { return sizeof(a) == 3 && a[0] == 97 && a[2] == 99; }'
+check string-array-global-unsigned-char-terminated 1 'unsigned char a[4] = "abc"; int main(void) { return a[2] == 99 && a[3] == 0; }'
+check string-array-global-unsigned-char-padding 1 'unsigned char a[16] = "abc"; int main(void) { for (int i = 3; i < 16; i++) if (a[i]) return 0; return a[0] == 97; }'
+check string-array-global-empty-inferred 1 'char a[] = ""; int main(void) { return sizeof(a) == 1 && a[0] == 0; }'
+check string-array-global-empty-padded 1 'char a[8] = ""; int main(void) { for (int i = 0; i < 8; i++) if (a[i]) return 0; return 1; }'
+check string-array-global-concatenated 1 'char a[] = "ab" "cd"; int main(void) { return sizeof(a) == 5 && a[3] == 100 && a[4] == 0; }'
+check string-array-global-embedded-zero 1 'char a[] = "A\0B"; int main(void) { return sizeof(a) == 4 && a[0] == 65 && a[1] == 0 && a[2] == 66 && a[3] == 0; }'
+check string-array-global-embedded-zero-exact 1 'char a[3] = "A\0B"; int main(void) { return sizeof(a) == 3 && a[1] == 0 && a[2] == 66; }'
+check string-array-global-all-zero-string 1 'char a[8] = "\0\0"; int main(void) { for (int i = 0; i < 8; i++) if (a[i]) return 0; return 1; }'
+check string-array-global-signed-bytes 1 'char a[] = "\377\200"; int main(void) { return a[0] == -1 && a[1] == -128 && a[2] == 0; }'
+check string-array-global-unsigned-bytes 1 'unsigned char a[] = "\377\200"; int main(void) { return a[0] == 255 && a[1] == 128 && a[2] == 0; }'
+check string-array-global-braced 1 'char a[] = {"abc"}; int main(void) { return sizeof(a) == 4 && a[2] == 99 && a[3] == 0; }'
+check string-array-global-braced-trailing-comma 1 'char a[8] = {"ab" "cd",}; int main(void) { return a[3] == 100 && a[4] == 0 && a[7] == 0; }'
+check string-array-global-long-string 1 'char a[] = "123456789abcdefg123456789abcdefgZ"; int main(void) { return sizeof(a) == 34 && a[32] == 90 && a[33] == 0; }'
+check string-array-global-writable 1 'char a[] = "abc"; int main(void) { a[0] = 42; return a[0] == 42 && a[1] == 98; }'
+check string-array-global-decay-and-store 1 'char a[] = "abc"; int main(void) { char *p = a; p[1] = 42; return a[1] == 42; }'
+check string-array-typedef-inferred-independent-bounds 1 'typedef char A[]; A a = "abc"; A b = "x"; int main(void) { A c = "hello"; return sizeof(a) == 4 && sizeof(b) == 2 && sizeof(c) == 6; }'
+check string-array-typedef-fixed-bounds 1 'typedef unsigned char A[8]; A a = "abc"; int main(void) { A b = "x"; return sizeof(a) == 8 && sizeof(b) == 8 && a[7] == 0 && b[7] == 0; }'
+check string-array-global-initializer-after-pointer 42 'char a[]; char *p = a; char a[] = "abc"; int main(void) { p[1] = 42; return a[1]; }'
+check string-array-global-composite-bound-before-initializer 1 'char a[]; char a[8]; char a[] = "abc"; int main(void) { return sizeof(a) == 8 && a[2] == 99 && a[7] == 0; }'
+check string-array-global-repeated-unknown-bound 1 'char a[8]; char a[] = "abc"; char a[]; int main(void) { return sizeof(a) == 8 && a[7] == 0; }'
+check string-array-global-compatible-known-bound 1 'char a[] = "abc"; char a[4]; int main(void) { return sizeof(a) == 4 && a[3] == 0; }'
+check string-array-global-multiple-arrays 1 'char a[] = "abc", b[8] = "x", c[] = "yz"; int main(void) { return sizeof(a) == 4 && sizeof(b) == 8 && sizeof(c) == 3 && b[7] == 0; }'
+check string-array-global-array-and-pointer 1 'char a[] = "abc", *p = a + 1; int main(void) { return p[0] == 98 && p[2] == 0; }'
+check string-array-array-and-literal-independent 1 'char a[] = "abc"; char *p = "abc"; int main(void) { a[0] = 42; return p[0] == 97 && a[0] == 42; }'
+check string-array-local-independent-copies 1 'int main(void) { char a[] = "abc"; char b[] = "abc"; a[0] = 42; return b[0] == 97 && a[0] == 42; }'
+check string-array-unknown-bound-parameter 42 'int f(char a[]) { a[0] = 42; return a[0]; } int main(void) { char a[] = "abc"; return f(a); }'
+check string-array-local-neighbor-layout 1 'int main(void) { long x = 1099511627776L; char a[3] = "abc"; long y = 1099511627777L; return a[2] == 99 && x == 1099511627776L && y == 1099511627777L; }'
+check string-array-for-initializer 1 'int main(void) { for (char a[] = "abc"; a[0] != 42; a[0] = 42) { if (a[3]) return 0; } return 1; }'
+check string-array-local-reinitialization 1 'int main(void) { for (int i = 0; i < 3; i++) { char a[64] = "abc"; if (a[0] != 97 || a[63]) return 0; a[0] = 1; a[63] = 1; } return 1; }'
+check string-array-recursive-local-storage 1 'int f(int n) { char a[16] = "abc"; a[0] = n; if (n) f(n - 1); return a[0] == n && a[15] == 0; } int main(void) { return f(3); }'
+check string-array-local-with-eight-parameters 1 'int f(int a,int b,int c,int d,int e,int f,int g,int h) { char s[32] = "abc"; return a+b+c+d+e+f+g+h == 36 && s[0] == 97 && s[31] == 0; } int main(void) { return f(1,2,3,4,5,6,7,8); }'
+check string-array-large-local-padding 1 'int main(void) { char a[4096] = "abc"; for (int i = 3; i < 4096; i++) if (a[i]) return 0; return a[2] == 99; }'
+check string-array-large-global-padding 1 'char a[4096] = "abc"; int main(void) { for (int i = 3; i < 4096; i++) if (a[i]) return 0; return a[2] == 99; }'
+check string-array-interleaved-sections 42 'char a[] = "A"; int f(void) { char b[] = "B"; return b[0] - a[0]; } char z[8] = ""; char *p = "C"; int x = 40; int main(void) { return x + f() + z[7] + p[0] - 66; }'
+check string-array-tentative-unknown-bound 1 'char a[]; int main(void) { return a[0] == 0; }'
+check string-array-tentative-typedef-independent-bound 1 'typedef char A[]; A a; A b = "abc"; int main(void) { return a[0] == 0 && sizeof(b) == 4; }'
 check_error string-array-local-too-long 'int main(void) { char a[2] = "abc"; return 0; }' "1:30: error: string literal is too long for character array"
 check_error string-array-local-concat-too-long 'int main(void) { char a[2] = "ab" "cd"; return 0; }' "1:30: error: string literal is too long for character array"
 check_error string-array-local-embedded-zero-too-long 'int main(void) { char a[2] = "A\0B"; return 0; }' "1:30: error: string literal is too long for character array"
@@ -753,70 +879,70 @@ check_error string-array-local-self-sizeof 'int main(void) { char a[] = sizeof(a
 check_error string-array-flexible-member-unsupported 'struct S { char a[]; };' "1:17: error: member has incomplete type"
 
 # Global pointer addresses are emitted as relocations with byte offsets.
-check 42 'int x = 42; int *p = &x; int main(void) { return *p; }' global-pointer-integer-address
-check 1 'char x = -1; char *p = &x; int main(void) { return *p == -1; }' global-pointer-char-address
-check 1 'unsigned char x = 255; unsigned char *p = &x; int main(void) { return *p == 255; }' global-pointer-unsigned-char-address
-check 1 'short x = -32768; short *p = &x; int main(void) { return *p == -32768; }' global-pointer-short-address
-check 1 'unsigned short x = 65535; unsigned short *p = &x; int main(void) { return *p == 65535; }' global-pointer-unsigned-short-address
-check 1 'unsigned x = 4294967295U; unsigned *p = &x; int main(void) { return *p == 4294967295U; }' global-pointer-unsigned-address
-check 1 'long x = 1099511627776L; long *p = &x; int main(void) { return *p == 1099511627776L; }' global-pointer-long-address
-check 1 'unsigned long long x = 18446744073709551615ULL; unsigned long long *p = &x; int main(void) { return *p == 18446744073709551615ULL; }' global-pointer-unsigned-long-long-address
-check 42 'enum E { ANSWER = 42 }; enum E x = ANSWER; enum E *p = &x; int main(void) { return *p; }' global-pointer-enum-address
-check 42 'int x = 42; void *p = &x; int main(void) { int *q = p; return *q; }' global-pointer-void-address
-check 42 'int x = 42, *p = &x, **q = &p; int main(void) { return **q; }' global-pointer-pointer-object-address
-check 1 'void *p = &p; int main(void) { return p == &p; }' global-pointer-self-address
-check 42 'typedef int I; I x = 42; I *p = &x; int main(void) { return *p; }' global-pointer-typedef-address
-check 42 'int a[4]; int *p = a; int main(void) { a[0] = 42; return *p; }' global-pointer-array-decay-initializer
-check 42 'int a[4]; int *p = &a[2]; int main(void) { *p = 42; return a[2]; }' global-pointer-array-element-address
-check 42 'int a[4]; int *p = 2 + a; int main(void) { a[2] = 42; return *p; }' global-pointer-reversed-add-initializer
-check 4 'int a[4]; int *p = a + 4; int main(void) { return p - a; }' global-pointer-one-past-initializer
-check 42 'int a[4]; int *p = a + 3 - 2; int main(void) { a[1] = 42; return *p; }' global-pointer-folded-offset-initializer
-check 42 'int a[4]; int *p = &2[a]; int main(void) { a[2] = 42; return *p; }' global-pointer-reversed-subscript-initializer
-check 42 'int a[4]; int *p = &*(a + 2); int main(void) { a[2] = 42; return *p; }' global-pointer-address-deref-initializer
-check 42 'char a[4]; char *p = a + 2; int main(void) { a[2] = 42; return *p; }' global-pointer-byte-offset-initializer
-check 42 'short a[4]; short *p = a + 2; int main(void) { a[2] = 42; return *p; }' global-pointer-short-offset-initializer
-check 1 'long a[4]; long *p = a + 2; int main(void) { a[2] = 1099511627776L; return *p == 1099511627776L; }' global-pointer-long-offset-initializer
-check 42 'struct S { char c; long n; }; struct S s; long *p = &s.n; int main(void) { s.n = 42; return *p; }' global-pointer-member-address
-check 42 'struct S { char c; long n; }; struct S s; long *p = &(&s)->n; int main(void) { s.n = 42; return *p; }' global-pointer-arrow-member-address
-check 42 'struct I { char c; short n; }; struct O { char c; struct I i; }; struct O s; short *p = &s.i.n; int main(void) { s.i.n = 42; return *p; }' global-pointer-nested-member-address
-check 42 'struct S { char c; int a[3]; }; struct S s; int *p = s.a + 2; int main(void) { s.a[2] = 42; return *p; }' global-pointer-array-member-decay
-check 42 'struct S { char c; long n; }; struct S a[3]; long *p = &a[2].n; int main(void) { a[2].n = 42; return *p; }' global-pointer-struct-array-member-address
-check 42 'struct S; struct S s; struct S *p = &s; struct S { int n; }; int main(void) { p->n = 42; return s.n; }' global-pointer-completed-struct-address
-check 101 'char *p = "hello"; int main(void) { return p[1]; }' global-pointer-string-initializer
-check 0 'char *p = ""; int main(void) { return p[0]; }' global-pointer-empty-string-initializer
-check 1 'char *p = "he" "llo"; int main(void) { return p[4] == 111 && p[5] == 0; }' global-pointer-concatenated-string-initializer
-check 1 'char *p = "A\0B"; int main(void) { return p[0] == 65 && p[1] == 0 && p[2] == 66 && p[3] == 0; }' global-pointer-embedded-zero-string-initializer
-check 1 'char *p = "\377B"; int main(void) { return p[0] == -1 && p[1] == 66 && p[2] == 0; }' global-pointer-escaped-byte-string-initializer
-check 1 'char *p = "123456789abcdef"; int main(void) { return p[14] == 102 && p[15] == 0; }' global-pointer-string-full-byte-line
-check 1 'char *p = "123456789abcdefg"; int main(void) { return p[15] == 103 && p[16] == 0; }' global-pointer-string-next-byte-line
-check 1 'char *p = "123456789abcdefg123456789abcdefgZ"; int main(void) { return p[32] == 90 && p[33] == 0; }' global-pointer-string-multiple-byte-lines
-check 108 'char *p = "hello" + 2; int main(void) { return *p; }' global-pointer-string-offset-initializer
-check 111 'char *p = &"hello"[4]; int main(void) { return *p; }' global-pointer-string-subscript-initializer
-check 65 'void *p = "A"; int main(void) { char *q = p; return *q; }' global-pointer-void-string-initializer
-check 133 'char *p = "AB", *q = "CD"; int main(void) { return p[0] + q[1]; }' global-pointer-multiple-string-initializers
-check 42 'int x = 42; int *p = 1 ? &x : 0; int main(void) { return *p; }' global-pointer-conditional-address-initializer
-check 42 'int *f(void); int x = 42; int *p = 1 ? &x : f(); int main(void) { return *p; }' global-pointer-unevaluated-call-address-initializer
-check 42 'int x = 42; int *p; int *p = &x; int *p; int main(void) { return *p; }' global-pointer-address-tentative-definition
-check 42 'int x = 42; int *p; int *f(void) { return p; } int *p = &x; int main(void) { return *f(); }' global-pointer-initializer-after-function-reference
-check 42 'int x; int *p = &x; int x = 42; int main(void) { return *p; }' global-pointer-later-object-definition
-check 42 'int x = 10, y = 42; int *p = &x; int main(void) { p = &y; return *p; }' global-pointer-initialized-pointer-writable
-check 42 'int x = 0; int *p = &x; int main(void) { *p = 42; return x; }' global-pointer-initialized-target-writable
-check 42 'char *p = "A"; int z; int f(void) { char *q = "B"; return q[0] - p[0]; } char *r = "C"; int x = 40; int main(void) { return x + z + f() + r[0] - 66; }' global-pointer-data-bss-rodata-text-sections
+check global-pointer-integer-address 42 'int x = 42; int *p = &x; int main(void) { return *p; }'
+check global-pointer-char-address 1 'char x = -1; char *p = &x; int main(void) { return *p == -1; }'
+check global-pointer-unsigned-char-address 1 'unsigned char x = 255; unsigned char *p = &x; int main(void) { return *p == 255; }'
+check global-pointer-short-address 1 'short x = -32768; short *p = &x; int main(void) { return *p == -32768; }'
+check global-pointer-unsigned-short-address 1 'unsigned short x = 65535; unsigned short *p = &x; int main(void) { return *p == 65535; }'
+check global-pointer-unsigned-address 1 'unsigned x = 4294967295U; unsigned *p = &x; int main(void) { return *p == 4294967295U; }'
+check global-pointer-long-address 1 'long x = 1099511627776L; long *p = &x; int main(void) { return *p == 1099511627776L; }'
+check global-pointer-unsigned-long-long-address 1 'unsigned long long x = 18446744073709551615ULL; unsigned long long *p = &x; int main(void) { return *p == 18446744073709551615ULL; }'
+check global-pointer-enum-address 42 'enum E { ANSWER = 42 }; enum E x = ANSWER; enum E *p = &x; int main(void) { return *p; }'
+check global-pointer-void-address 42 'int x = 42; void *p = &x; int main(void) { int *q = p; return *q; }'
+check global-pointer-pointer-object-address 42 'int x = 42, *p = &x, **q = &p; int main(void) { return **q; }'
+check global-pointer-self-address 1 'void *p = &p; int main(void) { return p == &p; }'
+check global-pointer-typedef-address 42 'typedef int I; I x = 42; I *p = &x; int main(void) { return *p; }'
+check global-pointer-array-decay-initializer 42 'int a[4]; int *p = a; int main(void) { a[0] = 42; return *p; }'
+check global-pointer-array-element-address 42 'int a[4]; int *p = &a[2]; int main(void) { *p = 42; return a[2]; }'
+check global-pointer-reversed-add-initializer 42 'int a[4]; int *p = 2 + a; int main(void) { a[2] = 42; return *p; }'
+check global-pointer-one-past-initializer 4 'int a[4]; int *p = a + 4; int main(void) { return p - a; }'
+check global-pointer-folded-offset-initializer 42 'int a[4]; int *p = a + 3 - 2; int main(void) { a[1] = 42; return *p; }'
+check global-pointer-reversed-subscript-initializer 42 'int a[4]; int *p = &2[a]; int main(void) { a[2] = 42; return *p; }'
+check global-pointer-address-deref-initializer 42 'int a[4]; int *p = &*(a + 2); int main(void) { a[2] = 42; return *p; }'
+check global-pointer-byte-offset-initializer 42 'char a[4]; char *p = a + 2; int main(void) { a[2] = 42; return *p; }'
+check global-pointer-short-offset-initializer 42 'short a[4]; short *p = a + 2; int main(void) { a[2] = 42; return *p; }'
+check global-pointer-long-offset-initializer 1 'long a[4]; long *p = a + 2; int main(void) { a[2] = 1099511627776L; return *p == 1099511627776L; }'
+check global-pointer-member-address 42 'struct S { char c; long n; }; struct S s; long *p = &s.n; int main(void) { s.n = 42; return *p; }'
+check global-pointer-arrow-member-address 42 'struct S { char c; long n; }; struct S s; long *p = &(&s)->n; int main(void) { s.n = 42; return *p; }'
+check global-pointer-nested-member-address 42 'struct I { char c; short n; }; struct O { char c; struct I i; }; struct O s; short *p = &s.i.n; int main(void) { s.i.n = 42; return *p; }'
+check global-pointer-array-member-decay 42 'struct S { char c; int a[3]; }; struct S s; int *p = s.a + 2; int main(void) { s.a[2] = 42; return *p; }'
+check global-pointer-struct-array-member-address 42 'struct S { char c; long n; }; struct S a[3]; long *p = &a[2].n; int main(void) { a[2].n = 42; return *p; }'
+check global-pointer-completed-struct-address 42 'struct S; struct S s; struct S *p = &s; struct S { int n; }; int main(void) { p->n = 42; return s.n; }'
+check global-pointer-string-initializer 101 'char *p = "hello"; int main(void) { return p[1]; }'
+check global-pointer-empty-string-initializer 0 'char *p = ""; int main(void) { return p[0]; }'
+check global-pointer-concatenated-string-initializer 1 'char *p = "he" "llo"; int main(void) { return p[4] == 111 && p[5] == 0; }'
+check global-pointer-embedded-zero-string-initializer 1 'char *p = "A\0B"; int main(void) { return p[0] == 65 && p[1] == 0 && p[2] == 66 && p[3] == 0; }'
+check global-pointer-escaped-byte-string-initializer 1 'char *p = "\377B"; int main(void) { return p[0] == -1 && p[1] == 66 && p[2] == 0; }'
+check global-pointer-string-full-byte-line 1 'char *p = "123456789abcdef"; int main(void) { return p[14] == 102 && p[15] == 0; }'
+check global-pointer-string-next-byte-line 1 'char *p = "123456789abcdefg"; int main(void) { return p[15] == 103 && p[16] == 0; }'
+check global-pointer-string-multiple-byte-lines 1 'char *p = "123456789abcdefg123456789abcdefgZ"; int main(void) { return p[32] == 90 && p[33] == 0; }'
+check global-pointer-string-offset-initializer 108 'char *p = "hello" + 2; int main(void) { return *p; }'
+check global-pointer-string-subscript-initializer 111 'char *p = &"hello"[4]; int main(void) { return *p; }'
+check global-pointer-void-string-initializer 65 'void *p = "A"; int main(void) { char *q = p; return *q; }'
+check global-pointer-multiple-string-initializers 133 'char *p = "AB", *q = "CD"; int main(void) { return p[0] + q[1]; }'
+check global-pointer-conditional-address-initializer 42 'int x = 42; int *p = 1 ? &x : 0; int main(void) { return *p; }'
+check global-pointer-unevaluated-call-address-initializer 42 'int *f(void); int x = 42; int *p = 1 ? &x : f(); int main(void) { return *p; }'
+check global-pointer-address-tentative-definition 42 'int x = 42; int *p; int *p = &x; int *p; int main(void) { return *p; }'
+check global-pointer-initializer-after-function-reference 42 'int x = 42; int *p; int *f(void) { return p; } int *p = &x; int main(void) { return *f(); }'
+check global-pointer-later-object-definition 42 'int x; int *p = &x; int x = 42; int main(void) { return *p; }'
+check global-pointer-initialized-pointer-writable 42 'int x = 10, y = 42; int *p = &x; int main(void) { p = &y; return *p; }'
+check global-pointer-initialized-target-writable 42 'int x = 0; int *p = &x; int main(void) { *p = 42; return x; }'
+check global-pointer-data-bss-rodata-text-sections 42 'char *p = "A"; int z; int f(void) { char *q = "B"; return q[0] - p[0]; } char *r = "C"; int x = 40; int main(void) { return x + z + f() + r[0] - 66; }'
 
 # Null pointer initializers and constant-expression diagnostics.
-check 1 'int *p = 0; int main(void) { return p == 0; }' global-pointer-null-initializer
-check 1 'void *p = 0; int main(void) { return p == 0; }' global-void-pointer-null-initializer
-check 1 'int **p = 0; int main(void) { return p == 0; }' global-pointer-to-pointer-null-initializer
-check 1 'struct S; struct S *p = 0; int main(void) { return p == 0; }' global-incomplete-pointer-null-initializer
-check 1 'int *p = 1 - 1; int main(void) { return p == 0; }' global-pointer-constant-null-initializer
-check 1 'int *p = 0ULL; int main(void) { return p == 0; }' global-pointer-unsigned-null-initializer
-check 1 'enum { ZERO }; int *p = ZERO; int main(void) { return p == 0; }' global-pointer-enum-null-initializer
-check 1 'typedef int *P; P p = 0; int main(void) { return p == 0; }' global-pointer-typedef-null-initializer
-check 1 'int *p; int *p = 0; int *p; int main(void) { return p == 0; }' global-pointer-null-tentative-definition
-check 1 'int x; int *p = 0 ? &x : 0; int main(void) { return p == 0; }' global-pointer-null-conditional-initializer
-check 1 'int *f(void); int *p = 0 ? f() : 0; int main(void) { return p == 0; }' global-pointer-null-unevaluated-call
-check 1 'int x; int *p = &*(0 ? &x : 0); int main(void) { return p == 0; }' global-pointer-null-address-deref
-check 42 'int x = 42; int *p = 0; int main(void) { p = &x; return *p; }' global-pointer-null-then-store
+check global-pointer-null-initializer 1 'int *p = 0; int main(void) { return p == 0; }'
+check global-void-pointer-null-initializer 1 'void *p = 0; int main(void) { return p == 0; }'
+check global-pointer-to-pointer-null-initializer 1 'int **p = 0; int main(void) { return p == 0; }'
+check global-incomplete-pointer-null-initializer 1 'struct S; struct S *p = 0; int main(void) { return p == 0; }'
+check global-pointer-constant-null-initializer 1 'int *p = 1 - 1; int main(void) { return p == 0; }'
+check global-pointer-unsigned-null-initializer 1 'int *p = 0ULL; int main(void) { return p == 0; }'
+check global-pointer-enum-null-initializer 1 'enum { ZERO }; int *p = ZERO; int main(void) { return p == 0; }'
+check global-pointer-typedef-null-initializer 1 'typedef int *P; P p = 0; int main(void) { return p == 0; }'
+check global-pointer-null-tentative-definition 1 'int *p; int *p = 0; int *p; int main(void) { return p == 0; }'
+check global-pointer-null-conditional-initializer 1 'int x; int *p = 0 ? &x : 0; int main(void) { return p == 0; }'
+check global-pointer-null-unevaluated-call 1 'int *f(void); int *p = 0 ? f() : 0; int main(void) { return p == 0; }'
+check global-pointer-null-address-deref 1 'int x; int *p = &*(0 ? &x : 0); int main(void) { return p == 0; }'
+check global-pointer-null-then-store 42 'int x = 42; int *p = 0; int main(void) { p = &x; return *p; }'
 check_error global-initializer-nonzero-integer 'int *p = 1;' "1:6: error: incompatible initializer type"
 check_error global-initializer-incompatible-pointer 'long x; int *p = &x;' "1:14: error: incompatible initializer type"
 check_error global-initializer-incompatible-string 'unsigned char *p = "A";' "1:16: error: incompatible initializer type"
@@ -846,45 +972,45 @@ check_error global-initializer-pointer-negative-offset-overflow 'long a[2]; long
 check_error global-initializer-pointer-offset-division-zero 'int a[2]; int *p = a + (1 / 0);' "1:31: error: division by zero in constant expression"
 
 # Scalar global initializers use the converted value at the object's width.
-check 42 'int x = 42; int main(void) { return x; }' global-int-initializer
-check 1 'char x = -1; int main(void) { return x == -1; }' global-char-negative-initializer
-check 1 'unsigned char x = 255; int main(void) { return x == 255; }' global-unsigned-char-initializer
-check 1 'char x = 511; int main(void) { return x == -1; }' global-char-narrow-initializer
-check 1 'unsigned char x = -1; int main(void) { return x == 255; }' global-unsigned-char-narrow-initializer
-check 1 'short x = -32768; int main(void) { return x == -32768; }' global-short-negative-initializer
-check 1 'unsigned short x = 65535; int main(void) { return x == 65535; }' global-unsigned-short-initializer
-check 1 'short x = 65535; int main(void) { return x == -1; }' global-short-narrow-initializer
-check 1 'unsigned short x = -1; int main(void) { return x == 65535; }' global-unsigned-short-narrow-initializer
-check 1 'int x = -2147483647 - 1; int main(void) { return x == -2147483647 - 1; }' global-int-min-initializer
-check 1 'unsigned x = 4294967295U; int main(void) { return x == 4294967295U; }' global-unsigned-initializer
-check 1 'int x = 4294967295U; int main(void) { return x == -1; }' global-int-narrow-initializer
-check 1 'unsigned x = -1; int main(void) { return x == 4294967295U; }' global-unsigned-negative-initializer
-check 1 'long x = 1099511627776L; int main(void) { return x == 1099511627776L; }' global-long-initializer
-check 1 'long x = -1099511627776L; int main(void) { return x == -1099511627776L; }' global-long-negative-initializer
-check 1 'unsigned long x = 18446744073709551615UL; int main(void) { return x == 18446744073709551615UL; }' global-unsigned-long-initializer
-check 1 'long long x = -9223372036854775807LL - 1; int main(void) { return x == -9223372036854775807LL - 1; }' global-long-long-min-initializer
-check 1 'unsigned long long x = 18446744073709551615ULL; int main(void) { return x == 18446744073709551615ULL; }' global-unsigned-long-long-initializer
-check 42 'enum E { ANSWER = 42 }; enum E x = ANSWER; int main(void) { return x; }' global-enum-initializer
-check 1 'enum E { NEG = -1 }; enum E x = NEG; int main(void) { return x == -1; }' global-enum-negative-initializer
-check 42 'typedef unsigned long U; U x = 42; int main(void) { return x; }' global-typedef-initializer
-check 42 'int x = 6 * 7; int main(void) { return x; }' global-constant-expression-initializer
-check 8 'unsigned long x = sizeof(long); int main(void) { return x; }' global-sizeof-initializer
-check 65 'int x = '\''A'\''; int main(void) { return x; }' global-character-initializer
-check 42 'int x = 1 ? 42 : 1 / 0; int main(void) { return x; }' global-conditional-initializer
-check 42 'int f(void); int x = 1 ? 42 : f(); int main(void) { return x; }' global-unevaluated-call-initializer
-check 42 'int x; int x = 42; int x; int main(void) { return x; }' global-nonzero-tentative-definition
-check 42 'int x = 42; int x; int main(void) { return x; }' global-nonzero-followed-by-tentative
-check 42 'int x; int f(void) { return x; } int x = 42; int main(void) { return f(); }' global-initializer-after-reference
-check 42 'int x = 20, y = 22; int main(void) { return x + y; }' global-multiple-initializers
-check 42 'int x = 20; int main(void) { x += 22; return x; }' global-initialized-object-writable
-check 42 'int x = 21; int main(void) { int *p = &x; *p *= 2; return x; }' global-initialized-object-address
-check 1 'char a = 1, b = 2; short c = 3, d = 4; int main(void) { a = 7; c = 8; return a == 7 && b == 2 && c == 8 && d == 4; }' global-initialized-neighbor-storage
-check 42 'int a = 10, z, b = 12; int f(void) { char *p = "A"; return p[0] - 45; } int c = 0; int main(void) { return a + z + b + f() + c; }' global-data-bss-text-rodata-sections
-check 0 'int x = 0; int main(void) { return x; }' global-zero-initializer
-check 0 'int x; int x = 0; int x; int main(void) { return x; }' global-zero-tentative-definition
-check 0 'int x = 0, y = 0; int main(void) { return x + y; }' global-zero-multiple-definitions
-check 0 'int f(void); int x = 0 && f(); int main(void) { return x; }' global-zero-unevaluated-call
-check 0 'unsigned char x = 256; int main(void) { return x; }' global-zero-after-narrowing
+check global-int-initializer 42 'int x = 42; int main(void) { return x; }'
+check global-char-negative-initializer 1 'char x = -1; int main(void) { return x == -1; }'
+check global-unsigned-char-initializer 1 'unsigned char x = 255; int main(void) { return x == 255; }'
+check global-char-narrow-initializer 1 'char x = 511; int main(void) { return x == -1; }'
+check global-unsigned-char-narrow-initializer 1 'unsigned char x = -1; int main(void) { return x == 255; }'
+check global-short-negative-initializer 1 'short x = -32768; int main(void) { return x == -32768; }'
+check global-unsigned-short-initializer 1 'unsigned short x = 65535; int main(void) { return x == 65535; }'
+check global-short-narrow-initializer 1 'short x = 65535; int main(void) { return x == -1; }'
+check global-unsigned-short-narrow-initializer 1 'unsigned short x = -1; int main(void) { return x == 65535; }'
+check global-int-min-initializer 1 'int x = -2147483647 - 1; int main(void) { return x == -2147483647 - 1; }'
+check global-unsigned-initializer 1 'unsigned x = 4294967295U; int main(void) { return x == 4294967295U; }'
+check global-int-narrow-initializer 1 'int x = 4294967295U; int main(void) { return x == -1; }'
+check global-unsigned-negative-initializer 1 'unsigned x = -1; int main(void) { return x == 4294967295U; }'
+check global-long-initializer 1 'long x = 1099511627776L; int main(void) { return x == 1099511627776L; }'
+check global-long-negative-initializer 1 'long x = -1099511627776L; int main(void) { return x == -1099511627776L; }'
+check global-unsigned-long-initializer 1 'unsigned long x = 18446744073709551615UL; int main(void) { return x == 18446744073709551615UL; }'
+check global-long-long-min-initializer 1 'long long x = -9223372036854775807LL - 1; int main(void) { return x == -9223372036854775807LL - 1; }'
+check global-unsigned-long-long-initializer 1 'unsigned long long x = 18446744073709551615ULL; int main(void) { return x == 18446744073709551615ULL; }'
+check global-enum-initializer 42 'enum E { ANSWER = 42 }; enum E x = ANSWER; int main(void) { return x; }'
+check global-enum-negative-initializer 1 'enum E { NEG = -1 }; enum E x = NEG; int main(void) { return x == -1; }'
+check global-typedef-initializer 42 'typedef unsigned long U; U x = 42; int main(void) { return x; }'
+check global-constant-expression-initializer 42 'int x = 6 * 7; int main(void) { return x; }'
+check global-sizeof-initializer 8 'unsigned long x = sizeof(long); int main(void) { return x; }'
+check global-character-initializer 65 'int x = '\''A'\''; int main(void) { return x; }'
+check global-conditional-initializer 42 'int x = 1 ? 42 : 1 / 0; int main(void) { return x; }'
+check global-unevaluated-call-initializer 42 'int f(void); int x = 1 ? 42 : f(); int main(void) { return x; }'
+check global-nonzero-tentative-definition 42 'int x; int x = 42; int x; int main(void) { return x; }'
+check global-nonzero-followed-by-tentative 42 'int x = 42; int x; int main(void) { return x; }'
+check global-initializer-after-reference 42 'int x; int f(void) { return x; } int x = 42; int main(void) { return f(); }'
+check global-multiple-initializers 42 'int x = 20, y = 22; int main(void) { return x + y; }'
+check global-initialized-object-writable 42 'int x = 20; int main(void) { x += 22; return x; }'
+check global-initialized-object-address 42 'int x = 21; int main(void) { int *p = &x; *p *= 2; return x; }'
+check global-initialized-neighbor-storage 1 'char a = 1, b = 2; short c = 3, d = 4; int main(void) { a = 7; c = 8; return a == 7 && b == 2 && c == 8 && d == 4; }'
+check global-data-bss-text-rodata-sections 42 'int a = 10, z, b = 12; int f(void) { char *p = "A"; return p[0] - 45; } int c = 0; int main(void) { return a + z + b + f() + c; }'
+check global-zero-initializer 0 'int x = 0; int main(void) { return x; }'
+check global-zero-tentative-definition 0 'int x; int x = 0; int x; int main(void) { return x; }'
+check global-zero-multiple-definitions 0 'int x = 0, y = 0; int main(void) { return x + y; }'
+check global-zero-unevaluated-call 0 'int f(void); int x = 0 && f(); int main(void) { return x; }'
+check global-zero-after-narrowing 0 'unsigned char x = 256; int main(void) { return x; }'
 check_error global-initializer-redefinition 'int x = 1; int x = 2;' "1:16: error: redefinition of variable 'x'"
 check_error global-initializer-zero-redefinition 'int x = 0; int x = 0;' "1:16: error: redefinition of variable 'x'"
 check_error global-initializer-tentative-redefinition 'int x; int x = 0; int x = 1;' "1:23: error: redefinition of variable 'x'"
@@ -908,55 +1034,55 @@ check_error global-initializer-invalid-shift 'int x = 1 << 32;' "1:16: error: in
 check_error global-initializer-missing-expression 'int x = ;' "1:9: error: expect expr"
 
 # Global objects use zero-filled storage and RIP-relative addresses.
-check 1 'char value; int main(void) { if (value != 0) return 0; value = -1; return value == -1; }' global-char-zero-and-store
-check 1 'unsigned char value; int main(void) { if (value != 0) return 0; value = 255; return value == 255; }' global-unsigned-char-zero-and-store
-check 1 'short value; int main(void) { if (value != 0) return 0; value = -1; return value == -1; }' global-short-zero-and-store
-check 1 'unsigned short value; int main(void) { if (value != 0) return 0; value = 65535; return value == 65535; }' global-unsigned-short-zero-and-store
-check 1 'int value; int main(void) { if (value != 0) return 0; value = -1; return value == -1; }' global-int-zero-and-store
-check 1 'unsigned value; int main(void) { if (value != 0) return 0; value = 4294967295U; return value == 4294967295U; }' global-unsigned-zero-and-store
-check 1 'long value; int main(void) { if (value != 0) return 0; value = 1099511627776L; return value == 1099511627776L; }' global-long-zero-and-store
-check 1 'unsigned long value; int main(void) { if (value != 0) return 0; value = 18446744073709551615UL; return value == 18446744073709551615UL; }' global-unsigned-long-zero-and-store
-check 1 'long long value; int main(void) { if (value != 0) return 0; value = -9223372036854775807LL; return value == -9223372036854775807LL; }' global-long-long-zero-and-store
-check 1 'unsigned long long value; int main(void) { if (value != 0) return 0; value = 18446744073709551615ULL; return value == 18446744073709551615ULL; }' global-unsigned-long-long-zero-and-store
-check 42 'int x; int main(void) { x = 42; return x; }' global-assignment
-check 1 'int *p; int main(void) { return p == 0; }' global-pointer-zero
-check 42 'int x, *p; int main(void) { p = &x; *p = 42; return x; }' global-pointer-store
-check 42 'int x, *p, **pp; int main(void) { pp = &p; p = &x; **pp = 42; return x; }' global-pointer-to-pointer
-check 42 'int a[3]; int main(void) { if (a[0] || a[1] || a[2]) return 0; a[2] = 42; return a[2]; }' global-array-zero-and-store
-check 42 'char a[5]; int main(void) { a[0] = 1; a[4] = 42; if (a[1] || a[2] || a[3]) return 0; return a[4]; }' global-char-array
-check 1 'unsigned short a[3]; int main(void) { a[1] = 65535; return a[0] == 0 && a[1] == 65535 && a[2] == 0; }' global-short-array
-check 1 'long a[3]; int main(void) { a[1] = 1099511627776L; return a[0] == 0 && a[1] == 1099511627776L && a[2] == 0; }' global-long-array
-check 3 'int a[3]; int main(void) { return (a + 3) - a; }' global-pointer-difference
-check 42 'int a[3], *p; int main(void) { p = a; p++; *p = 42; return a[1]; }' global-pointer-increment
-check 42 'struct S { char c; long value; }; struct S s; int main(void) { if (s.c || s.value) return 0; s.c = 7; s.value = 42; return s.value; }' global-struct-members
-check 42 'struct S { int a[3]; }; struct S s; int main(void) { s.a[2] = 42; return s.a[2]; }' global-struct-array-member
-check 42 'struct I { short x; }; struct O { char c; struct I i; long n; }; struct O o; int main(void) { o.i.x = 42; o.n = 1099511627776L; if (o.n != 1099511627776L) return 0; return o.i.x; }' global-nested-struct
-check 42 'struct S s; struct S { int value; struct S *next; }; int main(void) { s.value = 42; s.next = &s; return s.next->value; }' global-completed-struct
-check 1 'struct S { char c; long n; }; struct S s; int main(void) { void *raw = &s; unsigned char *bytes = raw; unsigned long i; for (i = 0; i < sizeof(s); i++) if (bytes[i] != 0) return 0; return 1; }' global-struct-storage-zero
-check 42 'enum E { ANSWER = 42 }; enum E e; int main(void) { if (e != 0) return 0; e = ANSWER; return e; }' global-enum
-check 42 'typedef unsigned long Counter; Counter count; int main(void) { count = 42; return count; }' global-typedef
-check 42 'typedef int A[3]; A a; int main(void) { a[2] = 42; return a[2]; }' global-typedef-array
-check 42 'int x; int x; int main(void) { x = 42; return x; }' global-repeated-declaration
-check 42 'int a, b, a, c; int main(void) { a = 10; b = 12; c = 20; return a + b + c; }' global-multiple-and-repeated
-check 42 'int a; int a, b; int main(void) { a = 20; b = 22; return a + b; }' global-new-after-repeated
-check 42 'typedef int I; I x; int x; int main(void) { x = 42; return x; }' global-compatible-alias-redeclaration
-check 42 'int x; int f(void) { x = 42; return 0; } int main(void) { f(); return x; }' global-cross-function-store
-check 42 'int count; int f(int n) { if (n == 0) return count; count++; return f(n - 1); } int main(void) { return f(42); }' global-recursive-state
-check 42 'int x; int f(int x) { x = 7; return x; } int main(void) { x = 42; f(1); return x; }' global-parameter-shadow
-check 42 'int x; int main(void) { x = 42; { int x = 7; if (x != 7) return 0; } return x; }' global-block-shadow
-check 42 'int x; int main(void) { x = 42; for (int x = 0; x < 3; x++) {} return x; }' global-for-shadow
-check 42 'int f(void) { return 20; } int x; int main(void) { x = 22; return f() + x; }' global-object-after-function
-check 98 'int f(void) { char *p = "abc"; return p[1]; } int x; int main(void) { x = f(); return x; }' global-sections-after-string
-check 65 'char *p; int main(void) { p = "A"; return p[0]; }' global-pointer-to-string
-check 42 'int a[3]; int *f(void) { return a; } int main(void) { f()[1] = 42; return a[1]; }' global-return-array-pointer
-check 42 'struct S { int x; }; struct S s; struct S *f(void) { return &s; } int main(void) { f()->x = 42; return s.x; }' global-return-struct-pointer
-check 42 'int x; int f(int a,int b,int c,int d,int e,int f,int g,int *p) { *p = a+b+c+d+e+f+g; return 0; } int main(void) { f(1,2,3,4,5,6,21,&x); return x; }' global-eighth-pointer-argument
-check 42 'int x; int main(void) { x = 20; x += 22; return x; }' global-compound-assignment
-check 42 'int x; int main(void) { x = 40; ++x; x++; return x; }' global-increment
-check 1 'unsigned char c; int main(void) { c = 255; c++; return c == 0; }' global-narrow-increment
-check 1 'char a, b; int main(void) { b = 7; a = 1; return a == 1 && b == 7; }' global-byte-store-neighbor
-check 1 'short a, b; int main(void) { b = 7; a = 1; return a == 1 && b == 7; }' global-short-store-neighbor
-check 12 'int a[3]; int main(void) { return sizeof(a); }' global-sizeof-array
+check global-char-zero-and-store 1 'char value; int main(void) { if (value != 0) return 0; value = -1; return value == -1; }'
+check global-unsigned-char-zero-and-store 1 'unsigned char value; int main(void) { if (value != 0) return 0; value = 255; return value == 255; }'
+check global-short-zero-and-store 1 'short value; int main(void) { if (value != 0) return 0; value = -1; return value == -1; }'
+check global-unsigned-short-zero-and-store 1 'unsigned short value; int main(void) { if (value != 0) return 0; value = 65535; return value == 65535; }'
+check global-int-zero-and-store 1 'int value; int main(void) { if (value != 0) return 0; value = -1; return value == -1; }'
+check global-unsigned-zero-and-store 1 'unsigned value; int main(void) { if (value != 0) return 0; value = 4294967295U; return value == 4294967295U; }'
+check global-long-zero-and-store 1 'long value; int main(void) { if (value != 0) return 0; value = 1099511627776L; return value == 1099511627776L; }'
+check global-unsigned-long-zero-and-store 1 'unsigned long value; int main(void) { if (value != 0) return 0; value = 18446744073709551615UL; return value == 18446744073709551615UL; }'
+check global-long-long-zero-and-store 1 'long long value; int main(void) { if (value != 0) return 0; value = -9223372036854775807LL; return value == -9223372036854775807LL; }'
+check global-unsigned-long-long-zero-and-store 1 'unsigned long long value; int main(void) { if (value != 0) return 0; value = 18446744073709551615ULL; return value == 18446744073709551615ULL; }'
+check global-assignment 42 'int x; int main(void) { x = 42; return x; }'
+check global-pointer-zero 1 'int *p; int main(void) { return p == 0; }'
+check global-pointer-store 42 'int x, *p; int main(void) { p = &x; *p = 42; return x; }'
+check global-pointer-to-pointer 42 'int x, *p, **pp; int main(void) { pp = &p; p = &x; **pp = 42; return x; }'
+check global-array-zero-and-store 42 'int a[3]; int main(void) { if (a[0] || a[1] || a[2]) return 0; a[2] = 42; return a[2]; }'
+check global-char-array 42 'char a[5]; int main(void) { a[0] = 1; a[4] = 42; if (a[1] || a[2] || a[3]) return 0; return a[4]; }'
+check global-short-array 1 'unsigned short a[3]; int main(void) { a[1] = 65535; return a[0] == 0 && a[1] == 65535 && a[2] == 0; }'
+check global-long-array 1 'long a[3]; int main(void) { a[1] = 1099511627776L; return a[0] == 0 && a[1] == 1099511627776L && a[2] == 0; }'
+check global-pointer-difference 3 'int a[3]; int main(void) { return (a + 3) - a; }'
+check global-pointer-increment 42 'int a[3], *p; int main(void) { p = a; p++; *p = 42; return a[1]; }'
+check global-struct-members 42 'struct S { char c; long value; }; struct S s; int main(void) { if (s.c || s.value) return 0; s.c = 7; s.value = 42; return s.value; }'
+check global-struct-array-member 42 'struct S { int a[3]; }; struct S s; int main(void) { s.a[2] = 42; return s.a[2]; }'
+check global-nested-struct 42 'struct I { short x; }; struct O { char c; struct I i; long n; }; struct O o; int main(void) { o.i.x = 42; o.n = 1099511627776L; if (o.n != 1099511627776L) return 0; return o.i.x; }'
+check global-completed-struct 42 'struct S s; struct S { int value; struct S *next; }; int main(void) { s.value = 42; s.next = &s; return s.next->value; }'
+check global-struct-storage-zero 1 'struct S { char c; long n; }; struct S s; int main(void) { void *raw = &s; unsigned char *bytes = raw; unsigned long i; for (i = 0; i < sizeof(s); i++) if (bytes[i] != 0) return 0; return 1; }'
+check global-enum 42 'enum E { ANSWER = 42 }; enum E e; int main(void) { if (e != 0) return 0; e = ANSWER; return e; }'
+check global-typedef 42 'typedef unsigned long Counter; Counter count; int main(void) { count = 42; return count; }'
+check global-typedef-array 42 'typedef int A[3]; A a; int main(void) { a[2] = 42; return a[2]; }'
+check global-repeated-declaration 42 'int x; int x; int main(void) { x = 42; return x; }'
+check global-multiple-and-repeated 42 'int a, b, a, c; int main(void) { a = 10; b = 12; c = 20; return a + b + c; }'
+check global-new-after-repeated 42 'int a; int a, b; int main(void) { a = 20; b = 22; return a + b; }'
+check global-compatible-alias-redeclaration 42 'typedef int I; I x; int x; int main(void) { x = 42; return x; }'
+check global-cross-function-store 42 'int x; int f(void) { x = 42; return 0; } int main(void) { f(); return x; }'
+check global-recursive-state 42 'int count; int f(int n) { if (n == 0) return count; count++; return f(n - 1); } int main(void) { return f(42); }'
+check global-parameter-shadow 42 'int x; int f(int x) { x = 7; return x; } int main(void) { x = 42; f(1); return x; }'
+check global-block-shadow 42 'int x; int main(void) { x = 42; { int x = 7; if (x != 7) return 0; } return x; }'
+check global-for-shadow 42 'int x; int main(void) { x = 42; for (int x = 0; x < 3; x++) {} return x; }'
+check global-object-after-function 42 'int f(void) { return 20; } int x; int main(void) { x = 22; return f() + x; }'
+check global-sections-after-string 98 'int f(void) { char *p = "abc"; return p[1]; } int x; int main(void) { x = f(); return x; }'
+check global-pointer-to-string 65 'char *p; int main(void) { p = "A"; return p[0]; }'
+check global-return-array-pointer 42 'int a[3]; int *f(void) { return a; } int main(void) { f()[1] = 42; return a[1]; }'
+check global-return-struct-pointer 42 'struct S { int x; }; struct S s; struct S *f(void) { return &s; } int main(void) { f()->x = 42; return s.x; }'
+check global-eighth-pointer-argument 42 'int x; int f(int a,int b,int c,int d,int e,int f,int g,int *p) { *p = a+b+c+d+e+f+g; return 0; } int main(void) { f(1,2,3,4,5,6,21,&x); return x; }'
+check global-compound-assignment 42 'int x; int main(void) { x = 20; x += 22; return x; }'
+check global-increment 42 'int x; int main(void) { x = 40; ++x; x++; return x; }'
+check global-narrow-increment 1 'unsigned char c; int main(void) { c = 255; c++; return c == 0; }'
+check global-byte-store-neighbor 1 'char a, b; int main(void) { b = 7; a = 1; return a == 1 && b == 7; }'
+check global-short-store-neighbor 1 'short a, b; int main(void) { b = 7; a = 1; return a == 1 && b == 7; }'
+check global-sizeof-array 12 'int a[3]; int main(void) { return sizeof(a); }'
 
 # File-scope object declaration diagnostics.
 check_error global-void 'void x;' "1:6: error: variable has void type"
@@ -981,9 +1107,9 @@ check_error global-use-before-declaration 'int f(void) { return x; } int x;' "1:
 check_error global-nonconstant-array-bound 'int n; int a[n];' "1:15: error: not an integer constant expression"
 
 # Declaration specifiers use one bitmask for built-in and named types.
-check 42 'typedef int T; int main(void) { unsigned T = 42; return T; }' declspec-unsigned-shadows-typedef
-check 42 'typedef struct { int x; } S; int main(void) { S S; S.x = 42; return S.x; }' declspec-struct-alias-as-declarator
-check 42 'typedef enum { A = 42 } E; int main(void) { E E = A; return E; }' declspec-enum-alias-as-declarator
+check declspec-unsigned-shadows-typedef 42 'typedef int T; int main(void) { unsigned T = 42; return T; }'
+check declspec-struct-alias-as-declarator 42 'typedef struct { int x; } S; int main(void) { S S; S.x = 42; return S.x; }'
+check declspec-enum-alias-as-declarator 42 'typedef enum { A = 42 } E; int main(void) { E E = A; return E; }'
 check_error declspec-unsigned-struct 'int main(void) { unsigned struct S x; }' "1:27: error: invalid combination of type specifiers"
 check_error declspec-struct-unsigned 'int main(void) { struct S unsigned x; }' "1:27: error: invalid combination of type specifiers"
 check_error declspec-unsigned-enum 'int main(void) { unsigned enum E x; }' "1:27: error: invalid combination of type specifiers"
@@ -995,66 +1121,66 @@ check_error declspec-duplicate-void 'typedef void void V;' "1:14: error: duplica
 check_error declspec-struct-enum 'struct S { int x; }; struct S enum E x;' "1:31: error: invalid combination of type specifiers"
 
 # Ordinary identifier bindings preserve shadowing and file-scope functions.
-check 42 'int f(int f); int main(void) { return f(42); } int f(int f) { return f; }' symbol-function-binding-below-parameter
-check 42 'int X(void) { return 42; } int main(void) { { enum { X = 7 }; { typedef char X; { int X = 9; if (X != 9) return 0; } if (sizeof(X) != 1) return 0; } if (X != 7) return 0; } return X(); }' symbol-nested-kind-shadowing
-check 42 'typedef int T; int f(enum { T = 42 } x) { return T + x; } int main(void) { T x = 0; return f(x); }' symbol-parameter-enum-restores-typedef
-check 42 'int f(int n) { if (n == 0) return 42; { typedef char T; T x = 1; if (x != 1) return 0; } return f(n - 1); } int main(void) { return f(3); }' symbol-recursive-binding-after-block
+check symbol-function-binding-below-parameter 42 'int f(int f); int main(void) { return f(42); } int f(int f) { return f; }'
+check symbol-nested-kind-shadowing 42 'int X(void) { return 42; } int main(void) { { enum { X = 7 }; { typedef char X; { int X = 9; if (X != 9) return 0; } if (sizeof(X) != 1) return 0; } if (X != 7) return 0; } return X(); }'
+check symbol-parameter-enum-restores-typedef 42 'typedef int T; int f(enum { T = 42 } x) { return T + x; } int main(void) { T x = 0; return f(x); }'
+check symbol-recursive-binding-after-block 42 'int f(int n) { if (n == 0) return 42; { typedef char T; T x = 1; if (x != 1) return 0; } return f(n - 1); } int main(void) { return f(3); }'
 check_error symbol-parameter-hides-function-call 'int f(int f) { return f(); }' "1:23: error: called object is not a function"
 check_error symbol-file-conflict-hidden-by-parameter-enum 'typedef int f; int f(enum { f = 1 } x);' "1:20: error: function conflicts with typedef 'f'"
 check_error symbol-file-enum-conflict-hidden-by-parameter 'enum { f }; int f(int f);' "1:17: error: function conflicts with enumerator 'f'"
 
 # Typedef declarations and ordinary identifier scope.
-check 42 'typedef struct S; typedef struct S S; struct S { int x; }; int main(void) { S s; s.x = 42; return s.x; }' typedef-tag-only
-check 42 'typedef enum { A = 42 }; int main(void) { return A; }' typedef-enum-only
-check 42 'typedef int I; int main(void) { I x = 42; return x; }' typedef-integer
-check 42 'int main(void) { typedef int I; I x = 42; return x; }' typedef-local
-check 1 'typedef unsigned U; int main(void) { U x = 4294967295U; return x > 0; }' typedef-unsigned
-check 255 'typedef char C; int main(void) { C x = 255; return x; }' typedef-char
-check 1 'typedef unsigned char C; int main(void) { C x = 255; return x == 255; }' typedef-unsigned-char
-check 255 'typedef short S; int main(void) { S x = 65535; return x; }' typedef-short
-check 1 'typedef unsigned short S; int main(void) { S x = 65535; return x == 65535; }' typedef-unsigned-short
-check 8 'typedef long L; int main(void) { return sizeof(L); }' typedef-long
-check 1 'typedef unsigned long long U; int main(void) { U x = 18446744073709551615ULL; return x > 0; }' typedef-unsigned-long-long
-check 42 'typedef int I; typedef I J; int main(void) { J x = 42; return x; }' typedef-chain
-check 42 'typedef int *P; int main(void) { int x = 42; P p = &x; return *p; }' typedef-pointer
-check 42 'typedef int I; int main(void) { I x = 42; I *p = &x; return *p; }' typedef-pointer-declarator
-check 42 'typedef int A[3]; int main(void) { A a; a[2] = 42; return a[2]; }' typedef-array
-check 12 'typedef int A[3]; int main(void) { return sizeof(A); }' typedef-array-sizeof
-check 42 'typedef int A[3]; int f(A a) { return a[2]; } int main(void) { A a; a[2] = 42; return f(a); }' typedef-array-parameter
-check 42 'typedef struct { int x; } S; int main(void) { S s; s.x = 42; return s.x; }' typedef-anonymous-struct
-check 42 'typedef struct Node Node; struct Node { int value; Node *next; }; int main(void) { Node n; n.value = 42; n.next = &n; return n.next->value; }' typedef-forward-struct
-check 42 'typedef enum { ANSWER = 42 } E; int main(void) { E e = ANSWER; return e; }' typedef-enum
-check 42 'typedef int I; struct S { I x; }; int main(void) { struct S s; s.x = 42; return s.x; }' typedef-struct-member
-check 42 'typedef int I; I f(I x); I f(I x) { return x; } int main(void) { return f(42); }' typedef-function-signature
-check 42 'typedef void V; V f(V) { return; } int main(V) { f(); return 42; }' typedef-void
-check 42 'typedef int I; typedef I I; int main(void) { I x = 42; return x; }' typedef-repeat
-check 8 'typedef int *P; typedef int *P; int main(void) { return sizeof(P); }' typedef-repeat-pointer
-check 12 'typedef int A[3]; typedef int A[3]; int main(void) { return sizeof(A); }' typedef-repeat-array
-check 4 'typedef enum E { A } E; typedef enum E E; int main(void) { return sizeof(E); }' typedef-repeat-enum
-check 42 'int main(void) { int T = 42; { typedef char T; T x = 1; if (sizeof(x) != 1) return 0; } return T; }' typedef-hides-variable
-check 42 'enum { T = 42 }; int main(void) { { typedef char T; T x; if (sizeof(x) != 1) return 0; } return T; }' typedef-hides-enumerator
-check 42 'int T(void) { return 42; } int main(void) { { typedef char T; T x; if (sizeof(x) != 1) return 0; } return T(); }' typedef-hides-function
-check 42 'typedef int T; int main(void) { { int T = 42; return T; } }' typedef-variable-hides-alias
-check 42 'typedef int T; int main(void) { enum { T = 42 }; return T; }' typedef-enumerator-hides-alias
-check 42 'typedef int T; int f(int T) { return T; } int main(void) { return f(42); }' typedef-parameter-hides-alias
-check 42 'typedef int T; int f(int T); int main(void) { T x = 42; return x; }' typedef-prototype-restores-alias
-check 42 'typedef int T; int f(int T) { return T; } int main(void) { T x = 42; return f(x); }' typedef-definition-restores-alias
-check 4 'typedef int T; int main(void) { { typedef char T; if (sizeof(T) != 1) return 0; } return sizeof(T); }' typedef-block-restores-alias
-check 42 'typedef int T; int main(void) { int sum = 0; for (T i = 0; i < 7; i++) sum += 6; return sum; }' typedef-for-type
-check 4 'typedef int T; int main(void) { for (int T = 0; T < 1; T++) {} return sizeof(T); }' typedef-for-restores-alias
-check 4 'typedef int T; int main(void) { for (int i = 0; i < 1; i++) { typedef char T; if (sizeof(T) != 1) return 0; } return sizeof(T); }' typedef-for-body-restores-alias
-check 42 'typedef int T; int main(void) { goto T; T: return 42; }' typedef-label-namespace
-check 42 'typedef int T; struct T { int T; }; int main(void) { struct T t; t.T = 42; return t.T; }' typedef-tag-member-namespace
-check 42 'typedef int I, *P, A[2]; int main(void) { A a; P p = a; I x = 42; p[1] = x; return a[1]; }' typedef-multiple-declarators
-check 42 'typedef int I, A[sizeof(I)]; int main(void) { A a; a[3] = 42; return a[3]; }' typedef-earlier-declarator-visible
-check 42 'int typedef I; int main(void) { I x = 42; return x; }' typedef-storage-after-type
-check 42 'unsigned typedef long U; int main(void) { U x = 42; return x; }' typedef-storage-between-types
-check 42 'typedef int I; I typedef J; int main(void) { J x = 42; return x; }' typedef-storage-after-alias
-check 42 'struct S { int x; } typedef S; int main(void) { S s; s.x = 42; return s.x; }' typedef-storage-after-struct
-check 42 'typedef int T; int main(void) { int T = 42; return sizeof(T) + T - 4; }' typedef-sizeof-hidden-alias
-check 42 'typedef int T; int main(void) { T T = 42; return T; }' typedef-alias-as-variable-name
-check 42 'typedef int T; int f(T T) { return T; } int main(void) { return f(42); }' typedef-alias-as-parameter-name
-check 42 'typedef int T; int main(void) { T: ; T x = 42; return x; }' typedef-label-preserves-alias
+check typedef-tag-only 42 'typedef struct S; typedef struct S S; struct S { int x; }; int main(void) { S s; s.x = 42; return s.x; }'
+check typedef-enum-only 42 'typedef enum { A = 42 }; int main(void) { return A; }'
+check typedef-integer 42 'typedef int I; int main(void) { I x = 42; return x; }'
+check typedef-local 42 'int main(void) { typedef int I; I x = 42; return x; }'
+check typedef-unsigned 1 'typedef unsigned U; int main(void) { U x = 4294967295U; return x > 0; }'
+check typedef-char 255 'typedef char C; int main(void) { C x = 255; return x; }'
+check typedef-unsigned-char 1 'typedef unsigned char C; int main(void) { C x = 255; return x == 255; }'
+check typedef-short 255 'typedef short S; int main(void) { S x = 65535; return x; }'
+check typedef-unsigned-short 1 'typedef unsigned short S; int main(void) { S x = 65535; return x == 65535; }'
+check typedef-long 8 'typedef long L; int main(void) { return sizeof(L); }'
+check typedef-unsigned-long-long 1 'typedef unsigned long long U; int main(void) { U x = 18446744073709551615ULL; return x > 0; }'
+check typedef-chain 42 'typedef int I; typedef I J; int main(void) { J x = 42; return x; }'
+check typedef-pointer 42 'typedef int *P; int main(void) { int x = 42; P p = &x; return *p; }'
+check typedef-pointer-declarator 42 'typedef int I; int main(void) { I x = 42; I *p = &x; return *p; }'
+check typedef-array 42 'typedef int A[3]; int main(void) { A a; a[2] = 42; return a[2]; }'
+check typedef-array-sizeof 12 'typedef int A[3]; int main(void) { return sizeof(A); }'
+check typedef-array-parameter 42 'typedef int A[3]; int f(A a) { return a[2]; } int main(void) { A a; a[2] = 42; return f(a); }'
+check typedef-anonymous-struct 42 'typedef struct { int x; } S; int main(void) { S s; s.x = 42; return s.x; }'
+check typedef-forward-struct 42 'typedef struct Node Node; struct Node { int value; Node *next; }; int main(void) { Node n; n.value = 42; n.next = &n; return n.next->value; }'
+check typedef-enum 42 'typedef enum { ANSWER = 42 } E; int main(void) { E e = ANSWER; return e; }'
+check typedef-struct-member 42 'typedef int I; struct S { I x; }; int main(void) { struct S s; s.x = 42; return s.x; }'
+check typedef-function-signature 42 'typedef int I; I f(I x); I f(I x) { return x; } int main(void) { return f(42); }'
+check typedef-void 42 'typedef void V; V f(V) { return; } int main(V) { f(); return 42; }'
+check typedef-repeat 42 'typedef int I; typedef I I; int main(void) { I x = 42; return x; }'
+check typedef-repeat-pointer 8 'typedef int *P; typedef int *P; int main(void) { return sizeof(P); }'
+check typedef-repeat-array 12 'typedef int A[3]; typedef int A[3]; int main(void) { return sizeof(A); }'
+check typedef-repeat-enum 4 'typedef enum E { A } E; typedef enum E E; int main(void) { return sizeof(E); }'
+check typedef-hides-variable 42 'int main(void) { int T = 42; { typedef char T; T x = 1; if (sizeof(x) != 1) return 0; } return T; }'
+check typedef-hides-enumerator 42 'enum { T = 42 }; int main(void) { { typedef char T; T x; if (sizeof(x) != 1) return 0; } return T; }'
+check typedef-hides-function 42 'int T(void) { return 42; } int main(void) { { typedef char T; T x; if (sizeof(x) != 1) return 0; } return T(); }'
+check typedef-variable-hides-alias 42 'typedef int T; int main(void) { { int T = 42; return T; } }'
+check typedef-enumerator-hides-alias 42 'typedef int T; int main(void) { enum { T = 42 }; return T; }'
+check typedef-parameter-hides-alias 42 'typedef int T; int f(int T) { return T; } int main(void) { return f(42); }'
+check typedef-prototype-restores-alias 42 'typedef int T; int f(int T); int main(void) { T x = 42; return x; }'
+check typedef-definition-restores-alias 42 'typedef int T; int f(int T) { return T; } int main(void) { T x = 42; return f(x); }'
+check typedef-block-restores-alias 4 'typedef int T; int main(void) { { typedef char T; if (sizeof(T) != 1) return 0; } return sizeof(T); }'
+check typedef-for-type 42 'typedef int T; int main(void) { int sum = 0; for (T i = 0; i < 7; i++) sum += 6; return sum; }'
+check typedef-for-restores-alias 4 'typedef int T; int main(void) { for (int T = 0; T < 1; T++) {} return sizeof(T); }'
+check typedef-for-body-restores-alias 4 'typedef int T; int main(void) { for (int i = 0; i < 1; i++) { typedef char T; if (sizeof(T) != 1) return 0; } return sizeof(T); }'
+check typedef-label-namespace 42 'typedef int T; int main(void) { goto T; T: return 42; }'
+check typedef-tag-member-namespace 42 'typedef int T; struct T { int T; }; int main(void) { struct T t; t.T = 42; return t.T; }'
+check typedef-multiple-declarators 42 'typedef int I, *P, A[2]; int main(void) { A a; P p = a; I x = 42; p[1] = x; return a[1]; }'
+check typedef-earlier-declarator-visible 42 'typedef int I, A[sizeof(I)]; int main(void) { A a; a[3] = 42; return a[3]; }'
+check typedef-storage-after-type 42 'int typedef I; int main(void) { I x = 42; return x; }'
+check typedef-storage-between-types 42 'unsigned typedef long U; int main(void) { U x = 42; return x; }'
+check typedef-storage-after-alias 42 'typedef int I; I typedef J; int main(void) { J x = 42; return x; }'
+check typedef-storage-after-struct 42 'struct S { int x; } typedef S; int main(void) { S s; s.x = 42; return s.x; }'
+check typedef-sizeof-hidden-alias 42 'typedef int T; int main(void) { int T = 42; return sizeof(T) + T - 4; }'
+check typedef-alias-as-variable-name 42 'typedef int T; int main(void) { T T = 42; return T; }'
+check typedef-alias-as-parameter-name 42 'typedef int T; int f(T T) { return T; } int main(void) { return f(42); }'
+check typedef-label-preserves-alias 42 'typedef int T; int main(void) { T: ; T x = 42; return x; }'
 
 check_error typedef-conflicting-type 'typedef int T; typedef long T;' "1:29: error: conflicting typedef for 'T'"
 check_error typedef-conflicting-array 'typedef int A[2]; typedef int A[3];' "1:31: error: conflicting typedef for 'A'"
@@ -1084,66 +1210,66 @@ check_error typedef-function-scope-restored 'int f(void) { typedef int T; return
 check_error typedef-hidden-parameter-type 'typedef int T; int f(int T, T x);' "1:29: error: expect type specifier"
 check_error typedef-function-type-unsupported 'typedef int F(int);' "1:14: error: function typedefs are not supported yet"
 
-check 0 'int main() {}'
-check 42 'int main() { return 42; }'
-check 3  'int main() { return 1+2; }'
-check 4 'int main() { return 1 +        1 +1+1; }'
-check 3 'int main() { return (1+2); }'
-check 2 'int main() { return 1 * 2; }'
-check 9 'int main() { return 3 * (1+2); }'
-check 1 'int main() { return (1+2) / 3; }'
-check 255 'int main() { return -1; }'
-check 0 'int main() { return !1; }'
-check 245 'int main() { return ~10; }'
-check 1 'int main() { return !!10; }'
-check 42 'int main() { return (((42))); }'
-check 42 'int main() { return -(-6) * 7; }'
-check 42 'int main() { return 2 * -3 + 48; }'
-check 42 $'int main() { return (\n6 * 7\n)\n;\n }'
-check 42 'int main() { int a = 42; return a; }'
-check 42 'int main() { int a; a = 42; return a; }'
-check 42 'int main() { int a; int b; a = 6; b = 7; return a * b; }'
-check 49 'int main() { int a = 6; a = a + 1; return a * 7; }'
-check 42 'int main() { int a = 1; { int a = 42; return a; } }'
-check 42 'int main() { int a = 42; { int a = 41; } return a; }'
-check 0 'int main() { int a = 1; int b = 2; }'
-check 42 'int main() { int a = 40; { int b = 2; a = a + b; } return a; }'
-check 12 'int main() { int a = 4; { int a = 9; a = a + 3; } return a + 8; }'
-check 42 'int main() { int a = 21; int b = 3; return (a + b) + (a - b); }'
-check 42 'int main() { int a; int b = 4; a = (b = 6) * 7; return a; }'
-check 42 'int main() { int a = 12; int b  = -5; return a - b * 6; }'
-check 42 'int main() { int a; a = 4 + 2 * 7; a = a * 2 + 6; return a; }'
-check 42 'int main() { int a; (a ) = 42; return a; }'
-check 42 'int main() { int a = 42; ; a; return a; }'
-check 42 'int main() { { int x = 3; } int x = 42; return x; }'
-check 42 'int main() { int a=0; int b=1; int c=2; int d=3; int e=4; int f=5; int g=6; int h=7; int i=14; return a+b+c+d+e+f+g+h+i; }'
-check 0 'int main() { int a = 42; a = 24; }'
-check 42 'int main() { int a = 42; return a; a = 7; }'
-check 2 'int main() { int a = 1; { a = 2; int a = 3; a = 4; } return a; }'
-check 5 'int main() { int a = 5; { int a = 4; } { int a = 7; a = 9; } return a; }'
-check 42 'int main() { int a = 10; int aa = 32; return a + aa; }'
-check 42 'int main() { int _a = 20; int A1 = 22; return _a + A1; }'
-check 42 'int main() { int longer = 20; int long_ = 21; int long1 = 1; return longer + long_ + long1; }' long-keyword-prefix-identifiers
-check 42 'int main() { int shorter = 20; int short_ = 21; int short1 = 1; return shorter + short_ + short1; }' short-keyword-prefix-identifiers
-check 42 'int main() { int a = 0; int b = (a = 40) + 2; return b; }'
-check 42 'int main() { int a; return a = 6 * 7; }'
-check 42 'int main() { int while_count = 40; int return_value = 2; int _Boolish = 0; return while_count + return_value + _Boolish; }'
-check 42 'int main() { return 2147483647 - 2147483605; }'
-check 1 'int main() { return 2147483647 / 2147483647; }'
-check 1 'int main() { return - 2147483647 + 2147483647 + 1; }'
-check 7 'int main() { return 000000000000000000000000000000007; }'
-check 0 'int main() { return 0; }' octal-zero
-check 0 'int main() { return 000; }' octal-zeros
-check 7 'int main() { return 07; }' octal-seven
-check 8 'int main() { return 010; }' octal-ten
-check 42 'int main() { return 052; }' octal-fifty-two
+check main-empty-body 0 'int main() {}'
+check return-integer-literal 42 'int main() { return 42; }'
+check addition-adjacent-tokens 3 'int main() { return 1+2; }'
+check addition-extra-whitespace 4 'int main() { return 1 +        1 +1+1; }'
+check addition-parenthesized 3 'int main() { return (1+2); }'
+check multiplication-literals 2 'int main() { return 1 * 2; }'
+check multiplication-parenthesized-sum 9 'int main() { return 3 * (1+2); }'
+check division-parenthesized-sum 1 'int main() { return (1+2) / 3; }'
+check unary-negation-literal 255 'int main() { return -1; }'
+check logical-not-nonzero-literal 0 'int main() { return !1; }'
+check bitwise-not-literal 245 'int main() { return ~10; }'
+check logical-not-repeated 1 'int main() { return !!10; }'
+check parentheses-nested-literal 42 'int main() { return (((42))); }'
+check negation-parenthesized-negative 42 'int main() { return -(-6) * 7; }'
+check arithmetic-negative-factor 42 'int main() { return 2 * -3 + 48; }'
+check expression-multiline-whitespace 42 $'int main() { return (\n6 * 7\n)\n;\n }'
+check local-initializer-read 42 'int main() { int a = 42; return a; }'
+check local-assignment-read 42 'int main() { int a; a = 42; return a; }'
+check locals-multiply 42 'int main() { int a; int b; a = 6; b = 7; return a * b; }'
+check local-reassignment-arithmetic 49 'int main() { int a = 6; a = a + 1; return a * 7; }'
+check local-shadow-inner-return 42 'int main() { int a = 1; { int a = 42; return a; } }'
+check local-shadow-restores-outer 42 'int main() { int a = 42; { int a = 41; } return a; }'
+check main-fallthrough-with-locals 0 'int main() { int a = 1; int b = 2; }'
+check nested-block-updates-outer 42 'int main() { int a = 40; { int b = 2; a = a + b; } return a; }'
+check local-shadow-inner-assignment 12 'int main() { int a = 4; { int a = 9; a = a + 3; } return a + 8; }'
+check arithmetic-parenthesized-local-operands 42 'int main() { int a = 21; int b = 3; return (a + b) + (a - b); }'
+check assignment-nested-in-product 42 'int main() { int a; int b = 4; a = (b = 6) * 7; return a; }'
+check subtraction-negative-product 42 'int main() { int a = 12; int b  = -5; return a - b * 6; }'
+check local-repeated-arithmetic-assignment 42 'int main() { int a; a = 4 + 2 * 7; a = a * 2 + 6; return a; }'
+check assignment-parenthesized-lvalue 42 'int main() { int a; (a ) = 42; return a; }'
+check empty-and-value-expression-statements 42 'int main() { int a = 42; ; a; return a; }'
+check local-name-reused-after-block 42 'int main() { { int x = 3; } int x = 42; return x; }'
+check locals-nine-variable-sum 42 'int main() { int a=0; int b=1; int c=2; int d=3; int e=4; int f=5; int g=6; int h=7; int i=14; return a+b+c+d+e+f+g+h+i; }'
+check main-fallthrough-after-assignment 0 'int main() { int a = 42; a = 24; }'
+check return-skips-later-assignment 42 'int main() { int a = 42; return a; a = 7; }'
+check shadowing-begins-at-declaration 2 'int main() { int a = 1; { a = 2; int a = 3; a = 4; } return a; }'
+check local-shadow-sibling-blocks 5 'int main() { int a = 5; { int a = 4; } { int a = 7; a = 9; } return a; }'
+check identifier-distinct-prefixes 42 'int main() { int a = 10; int aa = 32; return a + aa; }'
+check identifier-underscore-and-uppercase 42 'int main() { int _a = 20; int A1 = 22; return _a + A1; }'
+check long-keyword-prefix-identifiers 42 'int main() { int longer = 20; int long_ = 21; int long1 = 1; return longer + long_ + long1; }'
+check short-keyword-prefix-identifiers 42 'int main() { int shorter = 20; int short_ = 21; int short1 = 1; return shorter + short_ + short1; }'
+check assignment-in-local-initializer 42 'int main() { int a = 0; int b = (a = 40) + 2; return b; }'
+check return-assignment-expression 42 'int main() { int a; return a = 6 * 7; }'
+check identifier-containing-keyword 42 'int main() { int while_count = 40; int return_value = 2; int _Boolish = 0; return while_count + return_value + _Boolish; }'
+check integer-max-subtraction 42 'int main() { return 2147483647 - 2147483605; }'
+check integer-max-division 1 'int main() { return 2147483647 / 2147483647; }'
+check integer-max-negation-cancellation 1 'int main() { return - 2147483647 + 2147483647 + 1; }'
+check octal-many-leading-zeros 7 'int main() { return 000000000000000000000000000000007; }'
+check octal-zero 0 'int main() { return 0; }'
+check octal-zeros 0 'int main() { return 000; }'
+check octal-seven 7 'int main() { return 07; }'
+check octal-ten 8 'int main() { return 010; }'
+check octal-fifty-two 42 'int main() { return 052; }'
 # Integer suffix spelling and token boundaries.
 for suffix in U u L l UL Ul uL ul LU Lu lU lu LL ll ULL Ull uLL ull LLU LLu llU llu; do
-    check 42 "int main(void) { return 42$suffix; }" "integer-suffix-decimal-$suffix"
-    check 42 "int main(void) { return 052$suffix; }" "integer-suffix-octal-$suffix"
+    check "integer-suffix-decimal-$suffix" 42 "int main(void) { return 42$suffix; }"
+    check "integer-suffix-octal-$suffix" 42 "int main(void) { return 052$suffix; }"
 done
-check 42 'int main(void) { return 1U+051L; }' integer-suffix-before-operator
-check 0 'int main(void) { return 0uL; }' integer-suffix-zero
+check integer-suffix-before-operator 42 'int main(void) { return 1U+051L; }'
+check integer-suffix-zero 0 'int main(void) { return 0uL; }'
 check_error integer-suffix-duplicate-unsigned 'int main(void) { return 42UU; }' '1:25: error: invalid integer suffix'
 check_error integer-suffix-duplicate-unsigned-case 'int main(void) { return 42Uu; }' '1:25: error: invalid integer suffix'
 check_error integer-suffix-duplicate-unsigned-after-long 'int main(void) { return 42ULU; }' '1:25: error: invalid integer suffix'
@@ -1156,284 +1282,284 @@ check_error integer-suffix-trailing-digit 'int main(void) { return 42U2; }' '1:2
 check_error integer-suffix-trailing-underscore 'int main(void) { return 42L_name; }' '1:25: error: invalid integer suffix'
 check_error integer-suffix-invalid-octal 'int main(void) { return 08U; }' '1:25: error: invalid digit in octal integer literal'
 
-check 42 'int main() { int a = 41; return ++a; }'
-check 41 'int main() { int a = 41; return a++; }'
-check 42 'int main() { int a = 43; return --a; }'
-check 42 'int main() { int a = 42; return a--; }'
-check 42 'int main() { int a = 41; a++; return a; }'
-check 42 'int main() { int a = 43; --a; return a; }'
-check 42 'int main() { int a = 40; ++a; a++; return a; }'
-check 1 'int main() { return 1 == 1; }'
-check 0 'int main() { return 1 == 2; }'
-check 1 'int main() { return 1 != 2; }'
-check 0 'int main() { return 1 != 1; }'
-check 1 'int main() { return 1 < 2; }'
-check 0 'int main() { return 2 < 1; }'
-check 1 'int main() { return 1 <= 1; }'
-check 0 'int main() { return 2 <= 1; }'
-check 1 'int main() { return 2 > 1; }'
-check 0 'int main() { return 1 > 2; }'
-check 1 'int main() { return 2 >= 2; }'
-check 0 'int main() { return 1 >= 2; }'
-check 1 'int main() { return 1 < 2 == 1; }'
-check 0 'int main() { return 1 < 2 != 1; }'
-check 1 'int main() { int a = 41; return a + 1 == 42; }'
-check 1 'int main() { return 1 + 1 < 3; }'
-check 1 'int main() { return 7 % 3; }'
-check 2 'int main() { return 10 % 4; }'
-check 255 'int main() { return -7 % 3; }'
-check 0 'int main() { return 6 % 2; }'
-check 2 'int main() { return 4 * 3 % 5; }'
-check 42 'int main() { int a = 40; a += 2; return a; }'
-check 42 'int main() { int a = 44; a -= 2; return a; }'
-check 42 'int main() { int a = 14; a *= 3; return a; }'
-check 42 'int main() { int a = 84; a /= 2; return a; }'
-check 42 'int main() { int a = 85; a %= 43; return a; }'
-check 42 'int main() { int a = 40; return a += 2; }'
-check 42 'int main() { int a = 6; int b = 7; a *= b; return a; }'
-check 0 'int main() { int a = 42; a %= 7; return a; }'
-check 8 'int main() { return 1 << 3; }'
-check 2 'int main() { return 8 >> 2; }'
-check 32 'int main() { return 1 << 2 + 3; }'
-check 2 'int main() { return 16 >> 3; }'
-check 8 'int main() { return 8 >> 1 << 1; }'
-check 252 'int main() { return -8 >> 1; }'
-check 1 'int main() { return 1 << 0; }'
-check 21 'int main() { return 42 >> 1; }'
-check 42 'int main() { int a = 42; return a << 2 >> 2; }'
-check 40 'int main() { int a = 5; a <<= 3; return a; }'
-check 10 'int main() { int a = 40; a >>= 2; return a; }'
-check 16 'int main() { int a = 1; return a <<= 4; }'
-check 42 'int main() { if (1) return 42; return 24; }'
-check 24 'int main() { if (0) return 42; return 24; }'
-check 42 'int main() { if (1) return 42; else return 24; }'
-check 24 'int main() { if (0) return 42; else return 24; }'
-check 42 'int main() { if (1) { return 42; } else { return 24; } }'
-check 24 'int main() { if (0) { return 42; } else { return 24; } }'
-check 42 'int main() { int a = 1; if (a == 1) return 42; return 0; }'
-check 42 'int main() { int a = 0; if (a) return 24; else return 42; }'
-check 42 'int main() { if (2 < 1) return 24; else if (1 < 2) return 42; else return 0; }'
-check 42 'int main() { int a = 1; if (a == 1) a = 42; return a; }'
-check 1 'int main() { int a = 1; if (a == 0) a = 42; return a; }'
-check 42 'int main() { int a = 1; int b = 0; if (a) if (b) return 24; else return 42; return 0; }'
-check 0 'int main() { int a = 0; int b = 0; if (a) if (b) return 24; else return 42; return 0; }'
-check 42 'int main() { if (0) ; else return 42; return 0; }'
-check 42 'int main() { int a = 1; if (a++) return 42; return 0; }'
-check 1 'int main() { int a = 0; if (a++) return 42; return a; }'
-check 42 'int main() { if (1) { int a = 42; return a; } return 0; }'
-check 42 'int main() { if (0) return 24; else ; return 42; }'
-check 6 'int main() { int i = 3; int sum = 0; while (i) { sum = sum + 2; i = i - 1; } return sum; }'
-check 0 'int main() { int i = 0; int sum = 0; while (i) sum = sum + 1; return sum; }'
-check 3 'int main() { int i = 0; while (i < 3) i = i + 1; return i; }'
-check 0 'int main() { int i = 3; while (i) i = i - 1; return i; }'
-check 42 'int main() { int i = 5; while (i) { if (i == 2) return 42; i = i - 1; } return 0; }'
-check 4 'int main() { int i = 0; while (i++ < 3) ; return i; }'
-check 0 'int main() { while (0) ; return 0; }'
-check 9 'int main() { int i = 3; int j; int n = 0; while (i) { j = 3; while (j) { n = n + 1; j = j - 1; } i = i - 1; } return n; }'
-check 3 'int main() { int i; for (i = 0; i < 3; i = i + 1) ; return i; }'
-check 6 'int main() { int i; int sum = 0; for (i = 0; i < 4; i = i + 1) sum = sum + i; return sum; }'
-check 42 'int main() { int i; for (i = 0; i < 10; i = i + 1) if (i == 5) return 42; return 0; }'
-check 6 'int main() { int sum = 0; for (int i = 0; i < 4; i = i + 1) sum = sum + i; return sum; }'
-check 42 'int main() { for (int i = 0; i < 3; i = i + 1) ; int i = 42; return i; }'
-check 42 'int main() { int i = 0; for (;;) { i = i + 1; if (i == 42) return i; } }'
-check 1 'int main() { int i = 0; for (; i < 3; i = i + 1) ; return i == 3; }'
-check 9 'int main() { int i; int j; int n = 0; for (i = 0; i < 3; i = i + 1) for (j = 0; j < 3; j = j + 1) n = n + 1; return n; }'
-check 1 'int main() { return 1 && 1; }'
-check 0 'int main() { return 1 && 0; }'
-check 0 'int main() { return 0 && 1; }'
-check 1 'int main() { return 1 || 0; }'
-check 1 'int main() { return 0 || 1; }'
-check 0 'int main() { return 0 || 0; }'
-check 42 'int main() { int a = 42; 0 && (a = 1); return a; }'
-check 42 'int main() { int a = 42; 1 || (a = 1); return a; }'
-check 1 'int main() { int a = 0; 1 && (a = 1); return a; }'
-check 1 'int main() { int a = 0; 0 || (a = 1); return a; }'
-check 1 'int main() { return 2 && 3; }'
-check 1 'int main() { int a = 2; return a && a; }'
-check 1 'int main() { return 1 || 0 && 0; }'
-check 0 'int main() { return (1 || 0) && 0; }'
-check 42 'int main() { int a = 1; int b = 2; if (a == 1 && b == 2) return 42; return 0; }'
-check 3 'int main() { int i = 0; while (i < 3 && i != 0 || i == 0) i = i + 1; return i; }'
-check 1 'int main() { return 1 & 1; }'
-check 0 'int main() { return 1 & 2; }'
-check 3 'int main() { return 1 | 2; }'
-check 0 'int main() { return 0 | 0; }'
-check 3 'int main() { return 1 ^ 2; }'
-check 0 'int main() { return 5 ^ 5; }'
-check 12 'int main() { return 12 & 15; }'
-check 15 'int main() { return 12 | 3; }'
-check 3 'int main() { return 1 | 2 & 2; }'
-check 7 'int main() { return 2 | 4 ^ 3; }'
-check 4 'int main() { return 2 & 4 ^ 4; }'
-check 1 'int main() { return 1 & 2 == 2; }'
-check 1 'int main() { return 5 & 3 && 5 | 3; }'
-check 6 'int main() { int a = 4; a |= 2; return a; }'
-check 8 'int main() { int a = 12; a &= 10; return a; }'
-check 7 'int main() { int a = 3; a ^= 4; return a; }'
-check 5 'int main() { int a = 1; return a |= 4; }'
-check 24 'int main() { int a = 42; int b = 24; a ^= b; b ^= a; a ^= b; return a; }'
-check 1 'int main() { int i = 0; do { i = i + 1; } while (0); return i; }'
-check 3 'int main() { int i = 0; do { i = i + 1; } while (i < 3); return i; }'
-check 42 'int main() { int i = 0; do { i = i + 1; if (i == 42) return i; } while (1); }'
-check 6 'int main() { int i = 3; int sum = 0; do { sum = sum + i; i = i - 1; } while (i); return sum; }'
-check 4 'int main() { int i = 0; do { i = i + 1; } while (i++ < 3); return i; }'
-check 1 'int main() { int i = 0; do i = i + 1; while (0); return i; }'
-check 9 'int main() { int i = 0; int j; int n = 0; do { j = 0; do { n = n + 1; j = j + 1; } while (j < 3); i = i + 1; } while (i < 3); return n; }'
-check 42 $'int main() { // comment\n return 42; }'
-check 42 'int main() { /* comment */ return 42; }'
-check 42 $'int main() { /* multi\nline\ncomment */ return 42; }'
-check 42 'int main() { return /* inline */ 42; }'
-check 7 'int main() { /* a */ return /* b */ 3 /* c */ + /* d */ 4; }'
-check 0 $'int main() { return 0; } // trailing comment'
-check 42 'int main() { int i = 0; while (1) { i = i + 1; if (i == 42) break; } return i; }'
-check 0 'int main() { while (1) break; return 0; }'
-check 5 'int main() { int i = 0; int n = 0; while (i < 10) { i = i + 1; if (i % 2) continue; n = n + 1; } return n; }'
-check 5 'int main() { int i; int n = 0; for (i = 0; i < 10; i = i + 1) { if (i % 2) continue; n = n + 1; } return n; }'
-check 5 'int main() { int i = 0; int n = 0; do { i = i + 1; if (i % 2) continue; n = n + 1; } while (i < 10); return n; }'
-check 3 'int main() { int i = 0; do { i = i + 1; if (i == 3) break; } while (1); return i; }'
-check 9 'int main() { int i; int j; int n = 0; for (i = 0; i < 3; i = i + 1) for (j = 0; j < 10; j = j + 1) { if (j == 3) break; n = n + 1; } return n; }'
-check 6 'int main() { int i; int j; int n = 0; for (i = 0; i < 3; i = i + 1) for (j = 0; j < 3; j = j + 1) { if (j == 1) continue; n = n + 1; } return n; }'
-check 42 'int main() { goto end; return 24; end: return 42; }'
-check 6 'int main() { int i = 0; int sum = 0; loop: sum = sum + i; i = i + 1; if (i <= 3) goto loop; return sum; }'
-check 42 'int main() { int i = 0; L: ; i = i + 1; if (i < 2) goto L; return 42; }'
-check 42 'int main() { int i = 0; while (i < 2) { i = i + 1; if (i == 2) goto done; } return 0; done: return 42; }'
-check 42 'int main() { if (1) goto L; return 24; L: return 42; }'
-check 42 'int main() { int x = 2; switch (x) { case 1: return 24; case 2: return 42; case 3: return 0; } return 0; }'
-check 42 'int main() { int x = 9; switch (x) { case 1: return 24; default: return 42; } }'
-check 7 'int main() { int x = 9; switch (x) { case 1: x = 1; case 2: x = 2; } return 7; }'
-check 42 'int main() { int x = 2; switch (x) { case 1: x = 24; break; case 2: x = 42; break; default: x = 0; } return x; }'
-check 42 'int main() { int x = 1; int n = 0; switch (x) { case 1: n = n + 40; case 2: n = n + 2; } return n; }'
-check 42 'int main() { int x = 5; switch (x) { case 2 + 3: return 42; default: return 0; } }'
-check 42 'int main() { int x = -1; switch (x) { case -1: return 42; default: return 0; } }'
-check 42 'int main() { int i; for (i = 0; i < 3; i = i + 1) { switch (i) { case 0: break; case 1: break; case 2: return 42; } } return 0; }'
-check 42 'int main() { int a = 1; int b = 2; switch (a) { case 1: switch (b) { case 2: return 42; } } return 0; }'
-check 42 'int main() { int x = 2; switch (x) { { case 2: return 42; } } return 0; }'
-check 42 'int foo() { return 24; } int main() { return 42; }'
-check 42 'int main() { return 42; } int foo() { return 24; }'
-check 42 'int foo() { L: ; return 24; } int main() { L: ; return 42; }'
-check 42 'int foo() { int x = 0; while (x < 3) x = x + 1; switch (x) { case 3: return 42; } return 0; } int main() { return 42; }'
-check 42 'int foo() { return 42; } int main() { return foo(); }'
-check 42 'int foo() { return 40; } int main() { return foo() + 2; }'
-check 42 'int foo() { return 42; } int main() { foo(); return 42; }'
-check 42 'int foo() { return 21; } int main() { return foo() + foo(); }'
-check 42 'int foo() { return 42; } int bar() { return foo(); } int main() { return bar(); }'
-check 3 'int one() { return 1; } int main() { return one() + one() + one(); }'
-check 127 'int foo() { return 40; } int main() { return 1 + (2 + foo()) * 3; }'
-check 42 'int add(int a, int b) { return a + b; } int main() { return add(40, 2); }'
-check 42 'int add1(int a) { return a + 1; } int main() { return add1(41); }'
-check 120 'int fact(int n) { if (n == 0) return 1; return n * fact(n - 1); } int main() { return fact(5); }'
-check 55 'int fib(int n) { if (n < 2) return n; return fib(n - 1) + fib(n - 2); } int main() { return fib(10); }'
-check 21 'int sum6(int a, int b, int c, int d, int e, int f) { return a + b + c + d + e + f; } int main() { return sum6(1, 2, 3, 4, 5, 6); }'
-check 42 'int pick(int a, int b) { return b; } int main() { int x = 42; return pick(0, x); }'
-check 42 'int foo(int a); int foo(int a) { return a + 41; } int main() { return foo(1); }'
-check 42 'int foo(int a) { return a + 41; } int foo(int a); int main() { return foo(1); }'
-check 42 'int foo(int a); int foo(int a); int main() { return foo(1); } int foo(int a) { return a + 41; }'
-check 42 'int is_even(int n); int is_odd(int n) { if (n == 0) return 0; return is_even(n - 1); } int is_even(int n) { if (n == 0) return 1; return is_odd(n - 1); } int main() { if (is_even(10)) return 42; return 0; }'
-check 42 'int main() { return 1 ? 42 : 24; }'
-check 24 'int main() { return 0 ? 42 : 24; }'
-check 42 'int main() { return 5 ? 42 : 24; }'
-check 42 'int main() { int a = 42; 1 ? a : (a = 0); return a; }'
-check 42 'int main() { int a = 42; 0 ? (a = 0) : 1; return a; }'
-check 42 'int main() { return 0 ? 24 : 1 ? 42 : 0; }'
-check 42 'int main() { return 1 ? 0 ? 24 : 42 : 0; }'
-check 84 'int main() { return (1 ? 2 : 3) * 42; }'
-check 42 'int main() { if (1 ? 1 : 0) return 42; return 0; }'
-check 42 'int main() { int a = 1; return a++ ? 42 : 24; }'
-check 42 'int one() { return 1; } int main() { return one() ? 42 : 24; }'
-check 42 'int main() { int x = 42; int *p; p = &x; return *p; }'
-check 42 'int main() { int x = 42; int *p = &x; return *p; }' pointer-init-address
-check 42 'int main() { int x = 42; int *p = &x; int *q = p; return *q; }' pointer-init-copy
-check 7 'int main() { int x = 42; int *p = &x; int **pp = &p; **pp = 7; return x; }' pointer-init-indirect-store
-check 42 'int main() { int x = 42; int *p = &x; return *(p += 0); }' pointer-init-compound
-check 24 'int main() { int x = 42; int *p; p = &x; *p = 24; return x; }'
-check 42 'int main() { int x = 42; int *p; int *q; p = &x; q = p; return *q; }'
-check 42 'int main() { int a = 24; int b = 42; int *p; p = &a; p = &b; return *p; }'
-check 7 'int main() { int x = 42; int *p; int *q; p = &x; q = &x; *q = 7; return *p; }'
-check 2 'int main() { int x = 1; int *p; p = &x; *p = *p + 1; return x; }'
-check 42 'int main() { int x = 42; int *p; int **pp; p = &x; pp = &p; return **pp; }'
-check 42 'int main() { int x = 42; int *p; p = &x; return *(&x); }'
-check 42 'int main() { int x = 42; int *p; p = &x; *p = *p; return x; }'
+check prefix-increment-result 42 'int main() { int a = 41; return ++a; }'
+check postfix-increment-original-value 41 'int main() { int a = 41; return a++; }'
+check prefix-decrement-result 42 'int main() { int a = 43; return --a; }'
+check postfix-decrement-original-value 42 'int main() { int a = 42; return a--; }'
+check postfix-increment-updates-local 42 'int main() { int a = 41; a++; return a; }'
+check prefix-decrement-updates-local 42 'int main() { int a = 43; --a; return a; }'
+check prefix-and-postfix-increment-sequence 42 'int main() { int a = 40; ++a; a++; return a; }'
+check equality-equal-literals 1 'int main() { return 1 == 1; }'
+check equality-unequal-literals 0 'int main() { return 1 == 2; }'
+check inequality-unequal-literals 1 'int main() { return 1 != 2; }'
+check inequality-equal-literals 0 'int main() { return 1 != 1; }'
+check less-than-true 1 'int main() { return 1 < 2; }'
+check less-than-false 0 'int main() { return 2 < 1; }'
+check less-equal-equal-operands 1 'int main() { return 1 <= 1; }'
+check less-equal-false 0 'int main() { return 2 <= 1; }'
+check greater-than-true 1 'int main() { return 2 > 1; }'
+check greater-than-false 0 'int main() { return 1 > 2; }'
+check greater-equal-equal-operands 1 'int main() { return 2 >= 2; }'
+check greater-equal-false 0 'int main() { return 1 >= 2; }'
+check relational-before-equality 1 'int main() { return 1 < 2 == 1; }'
+check relational-before-inequality 0 'int main() { return 1 < 2 != 1; }'
+check addition-before-equality 1 'int main() { int a = 41; return a + 1 == 42; }'
+check addition-before-relational 1 'int main() { return 1 + 1 < 3; }'
+check remainder-literals 1 'int main() { return 7 % 3; }'
+check remainder-larger-dividend 2 'int main() { return 10 % 4; }'
+check remainder-negative-dividend 255 'int main() { return -7 % 3; }'
+check remainder-exact-division 0 'int main() { return 6 % 2; }'
+check multiplication-before-remainder 2 'int main() { return 4 * 3 % 5; }'
+check compound-add-local 42 'int main() { int a = 40; a += 2; return a; }'
+check compound-subtract-local 42 'int main() { int a = 44; a -= 2; return a; }'
+check compound-multiply-local 42 'int main() { int a = 14; a *= 3; return a; }'
+check compound-divide-local 42 'int main() { int a = 84; a /= 2; return a; }'
+check compound-remainder-local 42 'int main() { int a = 85; a %= 43; return a; }'
+check compound-add-expression-result 42 'int main() { int a = 40; return a += 2; }'
+check compound-multiply-local-operand 42 'int main() { int a = 6; int b = 7; a *= b; return a; }'
+check compound-remainder-zero-result 0 'int main() { int a = 42; a %= 7; return a; }'
+check left-shift-literals 8 'int main() { return 1 << 3; }'
+check right-shift-literals 2 'int main() { return 8 >> 2; }'
+check addition-before-shift 32 'int main() { return 1 << 2 + 3; }'
+check right-shift-three-bits 2 'int main() { return 16 >> 3; }'
+check shift-left-associativity 8 'int main() { return 8 >> 1 << 1; }'
+check signed-right-shift-negative 252 'int main() { return -8 >> 1; }'
+check left-shift-zero-count 1 'int main() { return 1 << 0; }'
+check right-shift-non-power-of-two 21 'int main() { return 42 >> 1; }'
+check left-right-shift-sequence 42 'int main() { int a = 42; return a << 2 >> 2; }'
+check compound-left-shift-local 40 'int main() { int a = 5; a <<= 3; return a; }'
+check compound-right-shift-local 10 'int main() { int a = 40; a >>= 2; return a; }'
+check compound-left-shift-expression-result 16 'int main() { int a = 1; return a <<= 4; }'
+check if-true-return 42 'int main() { if (1) return 42; return 24; }'
+check if-false-falls-through 24 'int main() { if (0) return 42; return 24; }'
+check if-else-true-return 42 'int main() { if (1) return 42; else return 24; }'
+check if-else-false-return 24 'int main() { if (0) return 42; else return 24; }'
+check if-else-compound-true 42 'int main() { if (1) { return 42; } else { return 24; } }'
+check if-else-compound-false 24 'int main() { if (0) { return 42; } else { return 24; } }'
+check if-local-equality-condition 42 'int main() { int a = 1; if (a == 1) return 42; return 0; }'
+check if-local-zero-condition 42 'int main() { int a = 0; if (a) return 24; else return 42; }'
+check if-else-if-chain 42 'int main() { if (2 < 1) return 24; else if (1 < 2) return 42; else return 0; }'
+check if-true-assignment 42 'int main() { int a = 1; if (a == 1) a = 42; return a; }'
+check if-false-skips-assignment 1 'int main() { int a = 1; if (a == 0) a = 42; return a; }'
+check dangling-else-inner-false 42 'int main() { int a = 1; int b = 0; if (a) if (b) return 24; else return 42; return 0; }'
+check dangling-else-outer-false 0 'int main() { int a = 0; int b = 0; if (a) if (b) return 24; else return 42; return 0; }'
+check if-empty-then-else-return 42 'int main() { if (0) ; else return 42; return 0; }'
+check if-postincrement-true-condition 42 'int main() { int a = 1; if (a++) return 42; return 0; }'
+check if-postincrement-false-side-effect 1 'int main() { int a = 0; if (a++) return 42; return a; }'
+check if-block-local-return 42 'int main() { if (1) { int a = 42; return a; } return 0; }'
+check if-empty-else-falls-through 42 'int main() { if (0) return 24; else ; return 42; }'
+check while-countdown-sum 6 'int main() { int i = 3; int sum = 0; while (i) { sum = sum + 2; i = i - 1; } return sum; }'
+check while-zero-skips-body 0 'int main() { int i = 0; int sum = 0; while (i) sum = sum + 1; return sum; }'
+check while-counts-to-limit 3 'int main() { int i = 0; while (i < 3) i = i + 1; return i; }'
+check while-local-countdown 0 'int main() { int i = 3; while (i) i = i - 1; return i; }'
+check while-early-return 42 'int main() { int i = 5; while (i) { if (i == 2) return 42; i = i - 1; } return 0; }'
+check while-empty-body-postincrement 4 'int main() { int i = 0; while (i++ < 3) ; return i; }'
+check while-zero-empty-body 0 'int main() { while (0) ; return 0; }'
+check while-nested-loop-count 9 'int main() { int i = 3; int j; int n = 0; while (i) { j = 3; while (j) { n = n + 1; j = j - 1; } i = i - 1; } return n; }'
+check for-empty-body-count 3 'int main() { int i; for (i = 0; i < 3; i = i + 1) ; return i; }'
+check for-accumulates-sum 6 'int main() { int i; int sum = 0; for (i = 0; i < 4; i = i + 1) sum = sum + i; return sum; }'
+check for-early-return 42 'int main() { int i; for (i = 0; i < 10; i = i + 1) if (i == 5) return 42; return 0; }'
+check for-declaration-accumulates-sum 6 'int main() { int sum = 0; for (int i = 0; i < 4; i = i + 1) sum = sum + i; return sum; }'
+check for-declaration-scope-exit 42 'int main() { for (int i = 0; i < 3; i = i + 1) ; int i = 42; return i; }'
+check for-omitted-clauses 42 'int main() { int i = 0; for (;;) { i = i + 1; if (i == 42) return i; } }'
+check for-omitted-initializer 1 'int main() { int i = 0; for (; i < 3; i = i + 1) ; return i == 3; }'
+check for-nested-loop-count 9 'int main() { int i; int j; int n = 0; for (i = 0; i < 3; i = i + 1) for (j = 0; j < 3; j = j + 1) n = n + 1; return n; }'
+check logical-and-both-true 1 'int main() { return 1 && 1; }'
+check logical-and-right-false 0 'int main() { return 1 && 0; }'
+check logical-and-left-false 0 'int main() { return 0 && 1; }'
+check logical-or-left-true 1 'int main() { return 1 || 0; }'
+check logical-or-right-true 1 'int main() { return 0 || 1; }'
+check logical-or-both-false 0 'int main() { return 0 || 0; }'
+check logical-and-short-circuits-assignment 42 'int main() { int a = 42; 0 && (a = 1); return a; }'
+check logical-or-short-circuits-assignment 42 'int main() { int a = 42; 1 || (a = 1); return a; }'
+check logical-and-evaluates-right-assignment 1 'int main() { int a = 0; 1 && (a = 1); return a; }'
+check logical-or-evaluates-right-assignment 1 'int main() { int a = 0; 0 || (a = 1); return a; }'
+check logical-and-normalizes-nonzero-literals 1 'int main() { return 2 && 3; }'
+check logical-and-normalizes-local 1 'int main() { int a = 2; return a && a; }'
+check logical-and-before-or 1 'int main() { return 1 || 0 && 0; }'
+check logical-parentheses-override-precedence 0 'int main() { return (1 || 0) && 0; }'
+check if-logical-and-equality-conditions 42 'int main() { int a = 1; int b = 2; if (a == 1 && b == 2) return 42; return 0; }'
+check while-mixed-logical-condition 3 'int main() { int i = 0; while (i < 3 && i != 0 || i == 0) i = i + 1; return i; }'
+check bitwise-and-shared-bit 1 'int main() { return 1 & 1; }'
+check bitwise-and-disjoint-bits 0 'int main() { return 1 & 2; }'
+check bitwise-or-disjoint-bits 3 'int main() { return 1 | 2; }'
+check bitwise-or-zero-operands 0 'int main() { return 0 | 0; }'
+check bitwise-xor-disjoint-bits 3 'int main() { return 1 ^ 2; }'
+check bitwise-xor-identical-operands 0 'int main() { return 5 ^ 5; }'
+check bitwise-and-mask 12 'int main() { return 12 & 15; }'
+check bitwise-or-merge 15 'int main() { return 12 | 3; }'
+check bitwise-and-before-or 3 'int main() { return 1 | 2 & 2; }'
+check bitwise-xor-before-or 7 'int main() { return 2 | 4 ^ 3; }'
+check bitwise-and-before-xor 4 'int main() { return 2 & 4 ^ 4; }'
+check equality-before-bitwise-and 1 'int main() { return 1 & 2 == 2; }'
+check bitwise-operators-before-logical-and 1 'int main() { return 5 & 3 && 5 | 3; }'
+check compound-bitwise-or-local 6 'int main() { int a = 4; a |= 2; return a; }'
+check compound-bitwise-and-local 8 'int main() { int a = 12; a &= 10; return a; }'
+check compound-bitwise-xor-local 7 'int main() { int a = 3; a ^= 4; return a; }'
+check compound-bitwise-or-expression-result 5 'int main() { int a = 1; return a |= 4; }'
+check compound-xor-swap 24 'int main() { int a = 42; int b = 24; a ^= b; b ^= a; a ^= b; return a; }'
+check do-while-zero-runs-once 1 'int main() { int i = 0; do { i = i + 1; } while (0); return i; }'
+check do-while-counts-to-limit 3 'int main() { int i = 0; do { i = i + 1; } while (i < 3); return i; }'
+check do-while-early-return 42 'int main() { int i = 0; do { i = i + 1; if (i == 42) return i; } while (1); }'
+check do-while-countdown-sum 6 'int main() { int i = 3; int sum = 0; do { sum = sum + i; i = i - 1; } while (i); return sum; }'
+check do-while-postincrement-condition 4 'int main() { int i = 0; do { i = i + 1; } while (i++ < 3); return i; }'
+check do-while-single-statement-body 1 'int main() { int i = 0; do i = i + 1; while (0); return i; }'
+check do-while-nested-loop-count 9 'int main() { int i = 0; int j; int n = 0; do { j = 0; do { n = n + 1; j = j + 1; } while (j < 3); i = i + 1; } while (i < 3); return n; }'
+check comment-line-before-return 42 $'int main() { // comment\n return 42; }'
+check comment-block-before-return 42 'int main() { /* comment */ return 42; }'
+check comment-block-multiline 42 $'int main() { /* multi\nline\ncomment */ return 42; }'
+check comment-between-return-and-operand 42 'int main() { return /* inline */ 42; }'
+check comments-between-arithmetic-tokens 7 'int main() { /* a */ return /* b */ 3 /* c */ + /* d */ 4; }'
+check comment-line-at-end-of-file 0 $'int main() { return 0; } // trailing comment'
+check while-break-at-limit 42 'int main() { int i = 0; while (1) { i = i + 1; if (i == 42) break; } return i; }'
+check while-immediate-break 0 'int main() { while (1) break; return 0; }'
+check while-continue-skips-odd-values 5 'int main() { int i = 0; int n = 0; while (i < 10) { i = i + 1; if (i % 2) continue; n = n + 1; } return n; }'
+check for-continue-skips-odd-values 5 'int main() { int i; int n = 0; for (i = 0; i < 10; i = i + 1) { if (i % 2) continue; n = n + 1; } return n; }'
+check do-while-continue-skips-odd-values 5 'int main() { int i = 0; int n = 0; do { i = i + 1; if (i % 2) continue; n = n + 1; } while (i < 10); return n; }'
+check do-while-break-before-condition 3 'int main() { int i = 0; do { i = i + 1; if (i == 3) break; } while (1); return i; }'
+check nested-for-break-inner-loop 9 'int main() { int i; int j; int n = 0; for (i = 0; i < 3; i = i + 1) for (j = 0; j < 10; j = j + 1) { if (j == 3) break; n = n + 1; } return n; }'
+check nested-for-continue-inner-loop 6 'int main() { int i; int j; int n = 0; for (i = 0; i < 3; i = i + 1) for (j = 0; j < 3; j = j + 1) { if (j == 1) continue; n = n + 1; } return n; }'
+check goto-forward-label 42 'int main() { goto end; return 24; end: return 42; }'
+check goto-backward-loop-sum 6 'int main() { int i = 0; int sum = 0; loop: sum = sum + i; i = i + 1; if (i <= 3) goto loop; return sum; }'
+check goto-empty-labeled-statement 42 'int main() { int i = 0; L: ; i = i + 1; if (i < 2) goto L; return 42; }'
+check goto-exits-while-loop 42 'int main() { int i = 0; while (i < 2) { i = i + 1; if (i == 2) goto done; } return 0; done: return 42; }'
+check goto-from-if-branch 42 'int main() { if (1) goto L; return 24; L: return 42; }'
+check switch-selects-matching-case 42 'int main() { int x = 2; switch (x) { case 1: return 24; case 2: return 42; case 3: return 0; } return 0; }'
+check switch-selects-default 42 'int main() { int x = 9; switch (x) { case 1: return 24; default: return 42; } }'
+check switch-no-match-falls-through 7 'int main() { int x = 9; switch (x) { case 1: x = 1; case 2: x = 2; } return 7; }'
+check switch-break-after-assignment 42 'int main() { int x = 2; switch (x) { case 1: x = 24; break; case 2: x = 42; break; default: x = 0; } return x; }'
+check switch-case-fallthrough 42 'int main() { int x = 1; int n = 0; switch (x) { case 1: n = n + 40; case 2: n = n + 2; } return n; }'
+check switch-case-constant-arithmetic 42 'int main() { int x = 5; switch (x) { case 2 + 3: return 42; default: return 0; } }'
+check switch-negative-case-value 42 'int main() { int x = -1; switch (x) { case -1: return 42; default: return 0; } }'
+check switch-break-preserves-enclosing-loop 42 'int main() { int i; for (i = 0; i < 3; i = i + 1) { switch (i) { case 0: break; case 1: break; case 2: return 42; } } return 0; }'
+check switch-nested-dispatch 42 'int main() { int a = 1; int b = 2; switch (a) { case 1: switch (b) { case 2: return 42; } } return 0; }'
+check switch-case-in-nested-block 42 'int main() { int x = 2; switch (x) { { case 2: return 42; } } return 0; }'
+check function-definition-before-main 42 'int foo() { return 24; } int main() { return 42; }'
+check function-definition-after-main 42 'int main() { return 42; } int foo() { return 24; }'
+check labels-independent-between-functions 42 'int foo() { L: ; return 24; } int main() { L: ; return 42; }'
+check function-control-flow-state-reset 42 'int foo() { int x = 0; while (x < 3) x = x + 1; switch (x) { case 3: return 42; } return 0; } int main() { return 42; }'
+check call-no-argument-function 42 'int foo() { return 42; } int main() { return foo(); }'
+check call-result-in-addition 42 'int foo() { return 40; } int main() { return foo() + 2; }'
+check call-as-expression-statement 42 'int foo() { return 42; } int main() { foo(); return 42; }'
+check call-twice-in-expression 42 'int foo() { return 21; } int main() { return foo() + foo(); }'
+check call-through-another-function 42 'int foo() { return 42; } int bar() { return foo(); } int main() { return bar(); }'
+check call-three-times-in-expression 3 'int one() { return 1; } int main() { return one() + one() + one(); }'
+check call-in-nested-arithmetic 127 'int foo() { return 40; } int main() { return 1 + (2 + foo()) * 3; }'
+check call-two-integer-arguments 42 'int add(int a, int b) { return a + b; } int main() { return add(40, 2); }'
+check call-one-integer-argument 42 'int add1(int a) { return a + 1; } int main() { return add1(41); }'
+check recursion-factorial 120 'int fact(int n) { if (n == 0) return 1; return n * fact(n - 1); } int main() { return fact(5); }'
+check recursion-fibonacci 55 'int fib(int n) { if (n < 2) return n; return fib(n - 1) + fib(n - 2); } int main() { return fib(10); }'
+check call-six-integer-arguments 21 'int sum6(int a, int b, int c, int d, int e, int f) { return a + b + c + d + e + f; } int main() { return sum6(1, 2, 3, 4, 5, 6); }'
+check call-local-as-second-argument 42 'int pick(int a, int b) { return b; } int main() { int x = 42; return pick(0, x); }'
+check function-prototype-before-definition 42 'int foo(int a); int foo(int a) { return a + 41; } int main() { return foo(1); }'
+check function-prototype-after-definition 42 'int foo(int a) { return a + 41; } int foo(int a); int main() { return foo(1); }'
+check function-repeated-prototypes 42 'int foo(int a); int foo(int a); int main() { return foo(1); } int foo(int a) { return a + 41; }'
+check recursion-mutual-even-odd 42 'int is_even(int n); int is_odd(int n) { if (n == 0) return 0; return is_even(n - 1); } int is_even(int n) { if (n == 0) return 1; return is_odd(n - 1); } int main() { if (is_even(10)) return 42; return 0; }'
+check conditional-true-literal 42 'int main() { return 1 ? 42 : 24; }'
+check conditional-false-literal 24 'int main() { return 0 ? 42 : 24; }'
+check conditional-nonzero-condition 42 'int main() { return 5 ? 42 : 24; }'
+check conditional-skips-false-assignment 42 'int main() { int a = 42; 1 ? a : (a = 0); return a; }'
+check conditional-skips-true-assignment 42 'int main() { int a = 42; 0 ? (a = 0) : 1; return a; }'
+check conditional-right-associativity 42 'int main() { return 0 ? 24 : 1 ? 42 : 0; }'
+check conditional-nested-true-arm 42 'int main() { return 1 ? 0 ? 24 : 42 : 0; }'
+check conditional-parenthesized-in-product 84 'int main() { return (1 ? 2 : 3) * 42; }'
+check conditional-as-if-condition 42 'int main() { if (1 ? 1 : 0) return 42; return 0; }'
+check conditional-postincrement-condition 42 'int main() { int a = 1; return a++ ? 42 : 24; }'
+check conditional-function-call-condition 42 'int one() { return 1; } int main() { return one() ? 42 : 24; }'
+check pointer-dereference-local 42 'int main() { int x = 42; int *p; p = &x; return *p; }'
+check pointer-init-address 42 'int main() { int x = 42; int *p = &x; return *p; }'
+check pointer-init-copy 42 'int main() { int x = 42; int *p = &x; int *q = p; return *q; }'
+check pointer-init-indirect-store 7 'int main() { int x = 42; int *p = &x; int **pp = &p; **pp = 7; return x; }'
+check pointer-init-compound 42 'int main() { int x = 42; int *p = &x; return *(p += 0); }'
+check pointer-store-updates-local 24 'int main() { int x = 42; int *p; p = &x; *p = 24; return x; }'
+check pointer-assignment-copy 42 'int main() { int x = 42; int *p; int *q; p = &x; q = p; return *q; }'
+check pointer-reassignment-target 42 'int main() { int a = 24; int b = 42; int *p; p = &a; p = &b; return *p; }'
+check pointer-alias-store-visible 7 'int main() { int x = 42; int *p; int *q; p = &x; q = &x; *q = 7; return *p; }'
+check pointer-read-modify-write 2 'int main() { int x = 1; int *p; p = &x; *p = *p + 1; return x; }'
+check pointer-to-pointer-dereference 42 'int main() { int x = 42; int *p; int **pp; p = &x; pp = &p; return **pp; }'
+check dereference-address-expression 42 'int main() { int x = 42; int *p; p = &x; return *(&x); }'
+check pointer-self-assignment-through-dereference 42 'int main() { int x = 42; int *p; p = &x; *p = *p; return x; }'
 # A scalar object permits pointer arithmetic up to one past its end.
-check 24 'int main() { int a = 24; int *p = &a; return *((p + 1) - 1); }' pointer-add
-check 24 'int main() { int a = 24; int *p = &a; return *((1 + p) - 1); }' integer-add-pointer
-check 42 'int main() { int a = 42; int *p = &a + 1; return *(p - 1); }' pointer-subtract
-check 1 'int main() { int a; int *p = &a + 1; int *q = &a; return p - q; }' pointer-difference-positive
-check 255 'int main() { int a; int *p = &a + 1; int *q = &a; return q - p; }' pointer-difference-negative
-check 3 'int main() { int a; int *p = &a + 1; int *q = &a; return (p - q) * 3; }' pointer-difference-scale
-check 6 'int main() { int a; int *p = &a + 1; int *q = &a; return (p - q) * 6; }' pointer-difference-expression
-check 7 'int main() { int a = 24; int *p = &a + 1; *(p - 1) = 7; return a; }' pointer-arithmetic-store
-check 24 'int main() { int a = 24; int *p = &a; p++; p--; return *p; }' pointer-postincrement
-check 42 'int main() { int a = 42; int *p = &a + 1; p--; return *p; }' pointer-postdecrement
-check 24 'int main() { int a = 24; int *p = &a; ++p; --p; return *p; }' pointer-preincrement
-check 6 'int main() { int a = 3; int *p = &a; int s = *p; p++; p--; return s + *p; }' pointer-increment-roundtrip
-check 42 'int main() { return 1, 42; }'
-check 42 'int main() { int a = 0; a = 1, a = a + 41; return a; }'
-check 6 'int main() { int i; int j; int n = 0; for (i = 0, j = 0; i < 3; i = i + 1, j = j + 1) n = n + i + j; return n; }'
-check 1 'int main() { int a = 0; a = 1, 2; return a; }'
-check 42 'int main() { int a = 1; int b = 42; return (a, b); }'
-check 42 'int main() { int a = 0; return 1 ? a = 1, a + 41 : 0; }'
-check 42 'int main() { int a = 0; if (a = 1, a == 1) return 42; return 0; }'
-check 42 'int main() { int a = 0; return a = 41, a + 1; }'
-check 42 'int main() { switch (0) { default: return -1; case 0: return 42; } return -1; }'
-check 42 $'int main() { // comment\r\n return 42; }' comment-crlf
-check 42 $'int main() { // comment\r return 42; }' comment-cr
-check 42 $'int\fmain() { return 42; }' whitespace-ff
-check 42 $'int\vmain() { return 42; }' whitespace-vt
-check 42 'int f(int); int f(int x) {return x;} int main() { return f(42); }' prototype-unamed-name
-check 42 'int f(int y); int f(int x) {return x;} int main() { return f(42); }' prototype-different-param-name
-check 42 'int f(); int f(int x) {return x;} int main() {return f(42);}' prototype-unspecified-params
+check pointer-add 24 'int main() { int a = 24; int *p = &a; return *((p + 1) - 1); }'
+check integer-add-pointer 24 'int main() { int a = 24; int *p = &a; return *((1 + p) - 1); }'
+check pointer-subtract 42 'int main() { int a = 42; int *p = &a + 1; return *(p - 1); }'
+check pointer-difference-positive 1 'int main() { int a; int *p = &a + 1; int *q = &a; return p - q; }'
+check pointer-difference-negative 255 'int main() { int a; int *p = &a + 1; int *q = &a; return q - p; }'
+check pointer-difference-scale 3 'int main() { int a; int *p = &a + 1; int *q = &a; return (p - q) * 3; }'
+check pointer-difference-expression 6 'int main() { int a; int *p = &a + 1; int *q = &a; return (p - q) * 6; }'
+check pointer-arithmetic-store 7 'int main() { int a = 24; int *p = &a + 1; *(p - 1) = 7; return a; }'
+check pointer-postincrement 24 'int main() { int a = 24; int *p = &a; p++; p--; return *p; }'
+check pointer-postdecrement 42 'int main() { int a = 42; int *p = &a + 1; p--; return *p; }'
+check pointer-preincrement 24 'int main() { int a = 24; int *p = &a; ++p; --p; return *p; }'
+check pointer-increment-roundtrip 6 'int main() { int a = 3; int *p = &a; int s = *p; p++; p--; return s + *p; }'
+check comma-expression-right-value 42 'int main() { return 1, 42; }'
+check comma-expression-assignment-sequence 42 'int main() { int a = 0; a = 1, a = a + 41; return a; }'
+check comma-expression-for-init-and-post 6 'int main() { int i; int j; int n = 0; for (i = 0, j = 0; i < 3; i = i + 1, j = j + 1) n = n + i + j; return n; }'
+check comma-below-assignment-precedence 1 'int main() { int a = 0; a = 1, 2; return a; }'
+check comma-parenthesized-local-operands 42 'int main() { int a = 1; int b = 42; return (a, b); }'
+check comma-in-conditional-true-arm 42 'int main() { int a = 0; return 1 ? a = 1, a + 41 : 0; }'
+check comma-as-if-condition 42 'int main() { int a = 0; if (a = 1, a == 1) return 42; return 0; }'
+check comma-return-assignment-sequence 42 'int main() { int a = 0; return a = 41, a + 1; }'
+check switch-default-before-matching-case 42 'int main() { switch (0) { default: return -1; case 0: return 42; } return -1; }'
+check comment-crlf 42 $'int main() { // comment\r\n return 42; }'
+check comment-cr 42 $'int main() { // comment\r return 42; }'
+check whitespace-ff 42 $'int\fmain() { return 42; }'
+check whitespace-vt 42 $'int\vmain() { return 42; }'
+check prototype-unamed-name 42 'int f(int); int f(int x) {return x;} int main() { return f(42); }'
+check prototype-different-param-name 42 'int f(int y); int f(int x) {return x;} int main() { return f(42); }'
+check prototype-unspecified-params 42 'int f(); int f(int x) {return x;} int main() {return f(42);}'
 
 # Expression builders must preserve pointer types through nested expressions.
-check 42 'int main() { int x = 42; int y = 7; return *(1 ? &x : &y); }' conditional-pointer-type
-check 42 'int main() { int x = 42; return *(0, &x); }' comma-pointer-type
-check 42 'int main() { int x = 42; int *p; return *(p = &x); }' assignment-pointer-type
-check 42 'int main() { int x = 42; int *p; p = &x; return *(p += 0); }' compound-pointer-type
-check 42 'int main() { int x = 42; int *p; p = &x; return *p++; }' postfix-pointer-type
-check 0 'int main() { int x; return (&x + 0) - &x; }' binary-pointer-type
+check conditional-pointer-type 42 'int main() { int x = 42; int y = 7; return *(1 ? &x : &y); }'
+check comma-pointer-type 42 'int main() { int x = 42; return *(0, &x); }'
+check assignment-pointer-type 42 'int main() { int x = 42; int *p; return *(p = &x); }'
+check compound-pointer-type 42 'int main() { int x = 42; int *p; p = &x; return *(p += 0); }'
+check postfix-pointer-type 42 'int main() { int x = 42; int *p; p = &x; return *p++; }'
+check binary-pointer-type 0 'int main() { int x; return (&x + 0) - &x; }'
 
 # Compound assignments preserve one target address and the operation's type.
 for entry in '+= 20 22 42' '-= 50 8 42' '*= 6 7 42' '/= 84 2 42' \
              '%= 85 43 42' '<<= 21 1 42' '>>= 84 1 42' \
              '&= 63 42 42' '^= 43 1 42' '|= 40 2 42'; do
     read -r op initial rhs expected <<< "$entry"
-    check 1 "int main(void) { int x = $initial; int *p = &x; return (*p $op $rhs) == $expected && x == $expected; }" "compound-dereference-$op"
-    check 1 "int main(void) { int a[2]; a[0] = $initial; a[1] = 99; return (a[0] $op $rhs) == $expected && a[0] == $expected && a[1] == 99; }" "compound-subscript-$op"
+    check "compound-dereference-$op" 1 "int main(void) { int x = $initial; int *p = &x; return (*p $op $rhs) == $expected && x == $expected; }"
+    check "compound-subscript-$op" 1 "int main(void) { int a[2]; a[0] = $initial; a[1] = 99; return (a[0] $op $rhs) == $expected && a[0] == $expected && a[1] == 99; }"
     for target in s.x 'p->x'; do
-        check 1 "struct S { int x; int guard; }; int main(void) { struct S s; struct S *p = &s; s.x = $initial; s.guard = 99; return ($target $op $rhs) == $expected && s.x == $expected && s.guard == 99; }" "compound-member-$target-$op"
+        check "compound-member-$target-$op" 1 "struct S { int x; int guard; }; int main(void) { struct S s; struct S *p = &s; s.x = $initial; s.guard = 99; return ($target $op $rhs) == $expected && s.x == $expected && s.guard == 99; }"
     done
 done
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' 'long' 'unsigned long' 'long long' 'unsigned long long'; do
-    check 1 "struct S { char before; $spec x; char after; }; int main(void) { struct S s; $spec *p = &s.x; s.before = 7; s.x = 20; s.after = 9; return (*p += 22) == 42 && s.x == 42 && s.before == 7 && s.after == 9; }" "compound-store-width-$spec"
+    check "compound-store-width-$spec" 1 "struct S { char before; $spec x; char after; }; int main(void) { struct S s; $spec *p = &s.x; s.before = 7; s.x = 20; s.after = 9; return (*p += 22) == 42 && s.x == 42 && s.before == 7 && s.after == 9; }"
 done
-check 1 'struct S { char x; unsigned char y; }; int main(void) { struct S s; s.x = 127; s.y = 255; return (s.x += 1) == -128 && s.x == -128 && (s.y += 1) == 0 && s.y == 0; }' compound-member-char-narrowing
-check 1 'int main(void) { short a[2]; a[0] = 32767; a[1] = -32768; return (a[0] += 1) == -32768 && (a[1] -= 1) == 32767 && a[0] == -32768 && a[1] == 32767; }' compound-short-narrowing
-check 1 'int main(void) { unsigned short a[1]; a[0] = 65535; return (a[0] += 1) == 0 && (a[0] -= 1) == 65535; }' compound-unsigned-short-narrowing
-check 1 'struct S { int x; }; int main(void) { struct S s; s.x = -1; return (s.x /= 2U) == 2147483647 && s.x == 2147483647; }' compound-unsigned-calculation
-check 1 'struct S { long x; }; int main(void) { struct S s; s.x = -9; return (s.x /= 2U) == -4 && s.x == -4; }' compound-wide-signed-calculation
-check 1 'int main(void) { int a[1]; a[0] = 9; return (a[0] /= 4294967297L) == 0 && a[0] == 0; }' compound-widen-before-division
-check 1 'int main(void) { int a[1]; a[0] = -1; return (a[0] /= 2UL) == -1 && a[0] == -1; }' compound-wide-unsigned-before-narrowing
-check 1 'int main(void) { char a[1]; a[0] = -9; return (a[0] /= 2U) == -5 && a[0] == -5; }' compound-char-integer-promotion
-check 1 'int main(void) { short a[1]; a[0] = -9; return (a[0] /= 2UL) == -5 && a[0] == -5; }' compound-short-wide-conversion
-check 1 'int main(void) { unsigned short a[1]; a[0] = 65535; return (a[0] /= -1) == 1 && a[0] == 1; }' compound-unsigned-short-promotion
-check 1 'int main(void) { unsigned a[1]; a[0] = 2147483648U; return (a[0] <<= 1ULL) == 0 && a[0] == 0; }' compound-shift-left-type
-check 1 'int main(void) { long a[1]; a[0] = -8; return (a[0] >>= 1ULL) == -4 && a[0] == -4; }' compound-shift-independent-promotions
-check 1 'struct S { long long x; unsigned long long y; }; int main(void) { struct S s; s.x = 1LL << 40; s.y = 1ULL << 63; return (s.x *= 3) == 3LL << 40 && (s.y >>= 1) == 1ULL << 62; }' compound-wide-members
-check 1 'int main(void) { unsigned long long a[1]; a[0] = 18446744073709551615ULL; return (a[0] /= 2) == 9223372036854775807ULL && (a[0] %= 7) == 0; }' compound-wide-unsigned-divmod
-check 1 'int main(void) { int a[2]; a[0] = 20; a[1] = 99; int i = 0; int result = (a[i++] += 22); return result == 42 && i == 1 && a[0] == 42 && a[1] == 99; }' compound-index-evaluated-once
-check 1 'int main(void) { int a[2]; a[0] = 20; a[1] = 99; int *p = a; int result = (*p++ += 22); return result == 42 && p == a + 1 && a[0] == 42 && a[1] == 99; }' compound-pointer-base-evaluated-once
-check 1 'struct S { int x; }; struct S *get(struct S *p, int *n) { (*n)++; return p; } int main(void) { struct S s; s.x = 14; int n = 0; int result = (get(&s, &n)->x *= 3); return result == 42 && n == 1 && s.x == 42; }' compound-call-base-evaluated-once
-check 1 'int *get(int *p, int *n) { (*n)++; return p; } int value(int *n) { (*n)++; return 22; } int main(void) { int x = 20; int n = 0; int m = 0; int result = (*get(&x, &n) += value(&m)); return result == 42 && x == 42 && n == 1 && m == 1; }' compound-both-operands-call
-check 1 'struct S { int x; }; int main(void) { struct S s; int a[1]; s.x = 0; a[0] = 7; return (s.x += (a[0] *= 6)) == 42 && s.x == 42 && a[0] == 42; }' compound-nested-assignment
-check 1 'int main(void) { int a[1]; a[0] = 20; int *p = &(a[0]); return 10 + (*p += 22) == 52 && a[0] == 42; }' compound-result-in-binary-expression
-check 1 'struct S { int *p; }; int main(void) { struct S s; int a[3]; s.p = a; return (s.p += 2) == a + 2 && s.p == a + 2 && (s.p -= 1) == a + 1; }' compound-pointer-member-scaling
-check 42 'int main(void) { int a[3]; a[1] = 42; int *p[1]; p[0] = a; p[0] += 2; return *(p[0] -= 1); }' compound-pointer-array-element
-check 42 'int main(void) { int a[3]; a[2] = 42; int *p = a; int **pp = &p; *pp += 2; return **pp; }' compound-pointer-through-dereference
-check 1 'struct S { char c; long x; }; int main(void) { struct S a[3]; struct S *p = a; struct S **pp = &p; return (*pp += 2) == a + 2 && (*pp -= 1) == a + 1; }' compound-struct-pointer-scaling
-check 42 'int main(void) { int a[3]; a[1] = 42; int *p = a + 2; int **pp = &p; char offset = -1; *pp += offset; return *p; }' compound-negative-pointer-offset
-check 1 'struct S { int a[2]; }; int main(void) { struct S s; s.a[0] = 20; s.a[1] = 99; int i = 0; return (s.a[i++] += 22) == 42 && i == 1 && s.a[1] == 99; }' compound-array-member-index-once
-check 42 'struct S { int x; }; struct O { struct S s[2]; }; int main(void) { struct O o; o.s[1].x = 14; o.s[1].x *= 3; return o.s[1].x; }' compound-nested-array-member
-check 1 'int rhs(int a, int b, int c, int d, int e, int f, int g) { return g; } int *get(int a, int b, int c, int d, int e, int f, int *p) { return p; } int main(void) { int x = 20; return 10 + (*get(0,0,0,0,0,0,&x) += rhs(0,0,0,0,0,0,22)) == 52 && x == 42; }' compound-stack-calls-and-outer-push
-check 1 'int take(int a, int b, int c, int d, int e, int f, int g) { return a + g; } int main(void) { int a[2]; a[0] = 20; a[1] = 14; return take(a[0] += 22,0,0,0,0,0,a[1] *= 3) == 84 && a[0] == 42 && a[1] == 42; }' compound-call-arguments
+check compound-member-char-narrowing 1 'struct S { char x; unsigned char y; }; int main(void) { struct S s; s.x = 127; s.y = 255; return (s.x += 1) == -128 && s.x == -128 && (s.y += 1) == 0 && s.y == 0; }'
+check compound-short-narrowing 1 'int main(void) { short a[2]; a[0] = 32767; a[1] = -32768; return (a[0] += 1) == -32768 && (a[1] -= 1) == 32767 && a[0] == -32768 && a[1] == 32767; }'
+check compound-unsigned-short-narrowing 1 'int main(void) { unsigned short a[1]; a[0] = 65535; return (a[0] += 1) == 0 && (a[0] -= 1) == 65535; }'
+check compound-unsigned-calculation 1 'struct S { int x; }; int main(void) { struct S s; s.x = -1; return (s.x /= 2U) == 2147483647 && s.x == 2147483647; }'
+check compound-wide-signed-calculation 1 'struct S { long x; }; int main(void) { struct S s; s.x = -9; return (s.x /= 2U) == -4 && s.x == -4; }'
+check compound-widen-before-division 1 'int main(void) { int a[1]; a[0] = 9; return (a[0] /= 4294967297L) == 0 && a[0] == 0; }'
+check compound-wide-unsigned-before-narrowing 1 'int main(void) { int a[1]; a[0] = -1; return (a[0] /= 2UL) == -1 && a[0] == -1; }'
+check compound-char-integer-promotion 1 'int main(void) { char a[1]; a[0] = -9; return (a[0] /= 2U) == -5 && a[0] == -5; }'
+check compound-short-wide-conversion 1 'int main(void) { short a[1]; a[0] = -9; return (a[0] /= 2UL) == -5 && a[0] == -5; }'
+check compound-unsigned-short-promotion 1 'int main(void) { unsigned short a[1]; a[0] = 65535; return (a[0] /= -1) == 1 && a[0] == 1; }'
+check compound-shift-left-type 1 'int main(void) { unsigned a[1]; a[0] = 2147483648U; return (a[0] <<= 1ULL) == 0 && a[0] == 0; }'
+check compound-shift-independent-promotions 1 'int main(void) { long a[1]; a[0] = -8; return (a[0] >>= 1ULL) == -4 && a[0] == -4; }'
+check compound-wide-members 1 'struct S { long long x; unsigned long long y; }; int main(void) { struct S s; s.x = 1LL << 40; s.y = 1ULL << 63; return (s.x *= 3) == 3LL << 40 && (s.y >>= 1) == 1ULL << 62; }'
+check compound-wide-unsigned-divmod 1 'int main(void) { unsigned long long a[1]; a[0] = 18446744073709551615ULL; return (a[0] /= 2) == 9223372036854775807ULL && (a[0] %= 7) == 0; }'
+check compound-index-evaluated-once 1 'int main(void) { int a[2]; a[0] = 20; a[1] = 99; int i = 0; int result = (a[i++] += 22); return result == 42 && i == 1 && a[0] == 42 && a[1] == 99; }'
+check compound-pointer-base-evaluated-once 1 'int main(void) { int a[2]; a[0] = 20; a[1] = 99; int *p = a; int result = (*p++ += 22); return result == 42 && p == a + 1 && a[0] == 42 && a[1] == 99; }'
+check compound-call-base-evaluated-once 1 'struct S { int x; }; struct S *get(struct S *p, int *n) { (*n)++; return p; } int main(void) { struct S s; s.x = 14; int n = 0; int result = (get(&s, &n)->x *= 3); return result == 42 && n == 1 && s.x == 42; }'
+check compound-both-operands-call 1 'int *get(int *p, int *n) { (*n)++; return p; } int value(int *n) { (*n)++; return 22; } int main(void) { int x = 20; int n = 0; int m = 0; int result = (*get(&x, &n) += value(&m)); return result == 42 && x == 42 && n == 1 && m == 1; }'
+check compound-nested-assignment 1 'struct S { int x; }; int main(void) { struct S s; int a[1]; s.x = 0; a[0] = 7; return (s.x += (a[0] *= 6)) == 42 && s.x == 42 && a[0] == 42; }'
+check compound-result-in-binary-expression 1 'int main(void) { int a[1]; a[0] = 20; int *p = &(a[0]); return 10 + (*p += 22) == 52 && a[0] == 42; }'
+check compound-pointer-member-scaling 1 'struct S { int *p; }; int main(void) { struct S s; int a[3]; s.p = a; return (s.p += 2) == a + 2 && s.p == a + 2 && (s.p -= 1) == a + 1; }'
+check compound-pointer-array-element 42 'int main(void) { int a[3]; a[1] = 42; int *p[1]; p[0] = a; p[0] += 2; return *(p[0] -= 1); }'
+check compound-pointer-through-dereference 42 'int main(void) { int a[3]; a[2] = 42; int *p = a; int **pp = &p; *pp += 2; return **pp; }'
+check compound-struct-pointer-scaling 1 'struct S { char c; long x; }; int main(void) { struct S a[3]; struct S *p = a; struct S **pp = &p; return (*pp += 2) == a + 2 && (*pp -= 1) == a + 1; }'
+check compound-negative-pointer-offset 42 'int main(void) { int a[3]; a[1] = 42; int *p = a + 2; int **pp = &p; char offset = -1; *pp += offset; return *p; }'
+check compound-array-member-index-once 1 'struct S { int a[2]; }; int main(void) { struct S s; s.a[0] = 20; s.a[1] = 99; int i = 0; return (s.a[i++] += 22) == 42 && i == 1 && s.a[1] == 99; }'
+check compound-nested-array-member 42 'struct S { int x; }; struct O { struct S s[2]; }; int main(void) { struct O o; o.s[1].x = 14; o.s[1].x *= 3; return o.s[1].x; }'
+check compound-stack-calls-and-outer-push 1 'int rhs(int a, int b, int c, int d, int e, int f, int g) { return g; } int *get(int a, int b, int c, int d, int e, int f, int *p) { return p; } int main(void) { int x = 20; return 10 + (*get(0,0,0,0,0,0,&x) += rhs(0,0,0,0,0,0,22)) == 52 && x == 42; }'
+check compound-call-arguments 1 'int take(int a, int b, int c, int d, int e, int f, int g) { return a + g; } int main(void) { int a[2]; a[0] = 20; a[1] = 14; return take(a[0] += 22,0,0,0,0,0,a[1] *= 3) == 84 && a[0] == 42 && a[1] == 42; }'
 
 check_error compound-pointer-plus-pointer 'int main(void) { int a[2]; int *p = a; int *q = a; p += q; return 0; }' '1:54: error: invalid operands to binary +'
 check_error compound-pointer-minus-pointer 'int main(void) { int a[2]; int *p = a; int *q = a; p -= q; return 0; }' '1:54: error: incompatible assignment type'
@@ -1456,54 +1582,54 @@ for entry in 'char:1' 'unsigned char:1' 'short:2' 'short int:2' \
              'unsigned long long int:8'; do
     spec=${entry%:*}
     size=${entry##*:}
-    check "$size" "int main(void) { return sizeof($spec); }" "sizeof-type-$spec"
-    check "$size" "int main(void) { $spec x; return sizeof x; }" "sizeof-variable-$spec"
+    check "sizeof-type-$spec" "$size" "int main(void) { return sizeof($spec); }"
+    check "sizeof-variable-$spec" "$size" "int main(void) { $spec x; return sizeof x; }"
 done
-check 8 'int main(void) { return sizeof(void *); }' sizeof-void-pointer
-check 8 'int main(void) { return sizeof(int **); }' sizeof-pointer-to-pointer
-check 8 'struct S; int main(void) { return sizeof(struct S *); }' sizeof-incomplete-pointer
-check 12 'int main(void) { return sizeof(int [3]); }' sizeof-array-type
-check 24 'int main(void) { return sizeof(char *[3]); }' sizeof-array-of-pointers-type
-check 1 'int main(void) { return sizeof(char [2147483647]) == 2147483647UL; }' sizeof-large-array-type
-check 12 'int main(void) { int a[3]; return sizeof a; }' sizeof-array-expression
-check 12 'int main(void) { int a[3]; return sizeof((a)); }' sizeof-parenthesized-array
-check 12 'int main(void) { int a[3]; return sizeof *(&a); }' sizeof-dereferenced-array-address
-check 8 'int main(void) { int a[3]; return sizeof(a + 0); }' sizeof-decayed-array-expression
-check 8 'int main(void) { int a[3]; return sizeof(0, a); }' sizeof-comma-array-conversion
-check 4 'int main(void) { return sizeof "abc"; }' sizeof-string-literal
-check 4 'int main(void) { return sizeof("abc"); }' sizeof-parenthesized-string
-check 4 'int main(void) { return sizeof "a" "bc"; }' sizeof-concatenated-string
-check 4 'int main(void) { return sizeof "a\0b"; }' sizeof-string-embedded-zero
-check 1 'int main(void) { return sizeof ""; }' sizeof-empty-string
-check 4 "int main(void) { return sizeof 'a'; }" sizeof-character-constant
-check 16 'struct S { char c; long n; }; int main(void) { return sizeof(struct S); }' sizeof-struct-type
-check 16 'struct S { char c; long n; }; int main(void) { struct S s; return sizeof s; }' sizeof-struct-expression
-check 16 'int main(void) { return sizeof(struct { char c; long n; }); }' sizeof-anonymous-struct
-check 16 'int main(void) { return sizeof(struct S { char c; long n; }); }' sizeof-inline-tag-definition
-check 1 'int main(void) { sizeof(struct S { long x; }); struct S s; return sizeof s == 8; }' sizeof-type-tag-visibility
-check 1 'struct I { char c; long n; }; struct S { char c; struct I inner; int a[3]; }; int main(void) { struct S s; return sizeof s == 40 && sizeof s.inner == 16 && sizeof s.a == 12 && sizeof s.a[0] == 4; }' sizeof-struct-members
-check 1 'struct S { char c; int a[3]; }; int main(void) { struct S *p = 0; return sizeof p->c == 1 && sizeof p->a == 12 && sizeof *p == 16; }' sizeof-null-pointer-members
-check 8 'int f(int a[3]) { return sizeof a; } int main(void) { int a[3]; return f(a); }' sizeof-array-parameter-is-pointer
-check 1 'int main(void) { char c; return sizeof c == 1 && sizeof(c + 0) == 4 && sizeof ~c == 4 && sizeof !c == 4; }' sizeof-expression-promotions
-check 1 'int main(void) { int i = 0; return sizeof(i++) == 4 && i == 0; }' sizeof-postincrement-unevaluated
-check 1 'int main(void) { char c = 0; return sizeof ++c == 1 && c == 0; }' sizeof-preincrement-unevaluated
-check 1 'int main(void) { int i = 0; return sizeof(i = 42) == 4 && i == 0; }' sizeof-assignment-unevaluated
-check 1 'int main(void) { short a[2]; int i = 0; return sizeof(a[i++] += 42) == 2 && i == 0; }' sizeof-compound-assignment-unevaluated
-check 1 'int main(void) { int a[2]; int i = 0; return sizeof a[i++] == 4 && i == 0; }' sizeof-subscript-unevaluated
-check 1 'int main(void) { int a[2]; int *p = a; return sizeof *p++ == 4 && p == a; }' sizeof-pointer-increment-unevaluated
-check 1 'int main(void) { int *p = 0; return sizeof *p == 4; }' sizeof-null-dereference-unevaluated
-check 4 'int main(void) { return sizeof(1 / 0); }' sizeof-division-not-evaluated
-check 8 'int main(void) { return sizeof(9223372036854775807L + 1L); }' sizeof-overflow-not-evaluated
-check 1 'int f(int *p) { (*p)++; return 42; } int main(void) { int n = 0; return sizeof f(&n) == 4 && n == 0; }' sizeof-call-unevaluated
-check 1 'char external(void); int main(void) { return sizeof external(); }' sizeof-call-no-link-reference
-check 4 'struct S { int x; }; struct S *external(void); int main(void) { return sizeof external()->x; }' sizeof-member-call-unevaluated
-check 8 'int main(void) { return sizeof sizeof(char); }' sizeof-result-width
-check 1 'int main(void) { return sizeof(int) > 0 && sizeof(int) < -1; }' sizeof-result-unsigned
-check 6 'int main(void) { return sizeof(int) + 2; }' sizeof-type-precedence
-check 8 'int main(void) { return sizeof 1 + sizeof 2; }' sizeof-unary-precedence
-check 1 'int main(void) { int a[sizeof(int)]; a[3] = 42; return sizeof a == 16 && a[3] == 42; }' sizeof-array-bound
-check 42 'int main(void) { switch (4) { case sizeof(int): return 42; } return 0; }' sizeof-case-constant
-check 1 'int main(void) { int a[2]; return sizeof(sizeof a) == 8 && sizeof(a[0]++) == 4; }' sizeof-nested-expressions
+check sizeof-void-pointer 8 'int main(void) { return sizeof(void *); }'
+check sizeof-pointer-to-pointer 8 'int main(void) { return sizeof(int **); }'
+check sizeof-incomplete-pointer 8 'struct S; int main(void) { return sizeof(struct S *); }'
+check sizeof-array-type 12 'int main(void) { return sizeof(int [3]); }'
+check sizeof-array-of-pointers-type 24 'int main(void) { return sizeof(char *[3]); }'
+check sizeof-large-array-type 1 'int main(void) { return sizeof(char [2147483647]) == 2147483647UL; }'
+check sizeof-array-expression 12 'int main(void) { int a[3]; return sizeof a; }'
+check sizeof-parenthesized-array 12 'int main(void) { int a[3]; return sizeof((a)); }'
+check sizeof-dereferenced-array-address 12 'int main(void) { int a[3]; return sizeof *(&a); }'
+check sizeof-decayed-array-expression 8 'int main(void) { int a[3]; return sizeof(a + 0); }'
+check sizeof-comma-array-conversion 8 'int main(void) { int a[3]; return sizeof(0, a); }'
+check sizeof-string-literal 4 'int main(void) { return sizeof "abc"; }'
+check sizeof-parenthesized-string 4 'int main(void) { return sizeof("abc"); }'
+check sizeof-concatenated-string 4 'int main(void) { return sizeof "a" "bc"; }'
+check sizeof-string-embedded-zero 4 'int main(void) { return sizeof "a\0b"; }'
+check sizeof-empty-string 1 'int main(void) { return sizeof ""; }'
+check sizeof-character-constant 4 "int main(void) { return sizeof 'a'; }"
+check sizeof-struct-type 16 'struct S { char c; long n; }; int main(void) { return sizeof(struct S); }'
+check sizeof-struct-expression 16 'struct S { char c; long n; }; int main(void) { struct S s; return sizeof s; }'
+check sizeof-anonymous-struct 16 'int main(void) { return sizeof(struct { char c; long n; }); }'
+check sizeof-inline-tag-definition 16 'int main(void) { return sizeof(struct S { char c; long n; }); }'
+check sizeof-type-tag-visibility 1 'int main(void) { sizeof(struct S { long x; }); struct S s; return sizeof s == 8; }'
+check sizeof-struct-members 1 'struct I { char c; long n; }; struct S { char c; struct I inner; int a[3]; }; int main(void) { struct S s; return sizeof s == 40 && sizeof s.inner == 16 && sizeof s.a == 12 && sizeof s.a[0] == 4; }'
+check sizeof-null-pointer-members 1 'struct S { char c; int a[3]; }; int main(void) { struct S *p = 0; return sizeof p->c == 1 && sizeof p->a == 12 && sizeof *p == 16; }'
+check sizeof-array-parameter-is-pointer 8 'int f(int a[3]) { return sizeof a; } int main(void) { int a[3]; return f(a); }'
+check sizeof-expression-promotions 1 'int main(void) { char c; return sizeof c == 1 && sizeof(c + 0) == 4 && sizeof ~c == 4 && sizeof !c == 4; }'
+check sizeof-postincrement-unevaluated 1 'int main(void) { int i = 0; return sizeof(i++) == 4 && i == 0; }'
+check sizeof-preincrement-unevaluated 1 'int main(void) { char c = 0; return sizeof ++c == 1 && c == 0; }'
+check sizeof-assignment-unevaluated 1 'int main(void) { int i = 0; return sizeof(i = 42) == 4 && i == 0; }'
+check sizeof-compound-assignment-unevaluated 1 'int main(void) { short a[2]; int i = 0; return sizeof(a[i++] += 42) == 2 && i == 0; }'
+check sizeof-subscript-unevaluated 1 'int main(void) { int a[2]; int i = 0; return sizeof a[i++] == 4 && i == 0; }'
+check sizeof-pointer-increment-unevaluated 1 'int main(void) { int a[2]; int *p = a; return sizeof *p++ == 4 && p == a; }'
+check sizeof-null-dereference-unevaluated 1 'int main(void) { int *p = 0; return sizeof *p == 4; }'
+check sizeof-division-not-evaluated 4 'int main(void) { return sizeof(1 / 0); }'
+check sizeof-overflow-not-evaluated 8 'int main(void) { return sizeof(9223372036854775807L + 1L); }'
+check sizeof-call-unevaluated 1 'int f(int *p) { (*p)++; return 42; } int main(void) { int n = 0; return sizeof f(&n) == 4 && n == 0; }'
+check sizeof-call-no-link-reference 1 'char external(void); int main(void) { return sizeof external(); }'
+check sizeof-member-call-unevaluated 4 'struct S { int x; }; struct S *external(void); int main(void) { return sizeof external()->x; }'
+check sizeof-result-width 8 'int main(void) { return sizeof sizeof(char); }'
+check sizeof-result-unsigned 1 'int main(void) { return sizeof(int) > 0 && sizeof(int) < -1; }'
+check sizeof-type-precedence 6 'int main(void) { return sizeof(int) + 2; }'
+check sizeof-unary-precedence 8 'int main(void) { return sizeof 1 + sizeof 2; }'
+check sizeof-array-bound 1 'int main(void) { int a[sizeof(int)]; a[3] = 42; return sizeof a == 16 && a[3] == 42; }'
+check sizeof-case-constant 42 'int main(void) { switch (4) { case sizeof(int): return 42; } return 0; }'
+check sizeof-nested-expressions 1 'int main(void) { int a[2]; return sizeof(sizeof a) == 8 && sizeof(a[0]++) == 4; }'
 
 check_error sizeof-void 'int main(void) { return sizeof(void); }' '1:25: error: sizeof cannot be applied to void'
 check_error sizeof-void-expression 'void f(void); int main(void) { return sizeof f(); }' '1:39: error: sizeof cannot be applied to void'
@@ -1530,51 +1656,51 @@ check_error sizeof-multiline-void $'int main(void) {\n  return sizeof(void);\n}\
 check_error sizeof-multiline-type-name $'int main(void) {\n  return sizeof(int name);\n}\n' '2:21: error: type name cannot contain an identifier'
 
 # Enum constants are int; enum objects use our signed int representation.
-check 6 'enum Color { RED, GREEN = 5, BLUE }; int main(void) { enum Color color = BLUE; return color; }' enum-basic
-check 1 'enum { A, B, C }; int main(void) { return A == 0 && B == 1 && C == 2; }' enum-default-values
-check 1 'enum { A = 5, B = 5, C }; int main(void) { return A == B && C == 6; }' enum-duplicate-values
-check 1 'enum E { A = -2, B, C, D }; int main(void) { return A == -2 && B == -1 && C == 0 && D == 1; }' enum-negative-values
-check 42 'int main(void) { enum { ANSWER = 42, }; return ANSWER; }' enum-local-anonymous-trailing-comma
-check 42 'enum E { A = 1, B = (A << 5) | 10 }; int main(void) { return B; }' enum-constant-expression
-check 42 'enum { A = 2, B = A * 21, C = A ? B : 0 }; int main(void) { return C; }' enum-reference-and-conditional
-check 4 'enum { SIZE = sizeof(int) }; int main(void) { return SIZE; }' enum-sizeof-initializer
-check 1 'enum { A = 2147483647, B = -2147483648, C = 0 }; int main(void) { return A == 2147483647 && B == -2147483648 && C == 0; }' enum-int-boundaries
-check 1 'enum { A = 2147483647, }; int main(void) { return A == 2147483647; }' enum-max-final-value
-check 1 'enum { A = 0 }; int main(void) { return sizeof A == 4 && A - 1 < 0; }' enum-constant-has-int-type
-check 1 'enum { ZERO }; int main(void) { int *p = ZERO; return p == 0; }' enum-zero-null-pointer-constant
-check 42 'enum { COUNT = 3 }; int main(void) { int a[COUNT]; a[COUNT - 1] = 42; return a[2]; }' enum-array-bound
-check 42 'enum E { A = 1, B = 42 }; int main(void) { enum E e = A; switch (e) { case A: return B; default: return 0; } }' enum-switch
-check 1 'enum E { A = -1, B = 0, C = 3 }; int main(void) { int sum = 0; for (enum E e = B; e <= C; e++) sum += e; return sum == 6; }' enum-for-variable
-check 42 'enum E { A = -1, B = 42 }; enum E id(enum E x) { return x; } int main(void) { return id(B); }' enum-function-signature
-check 1 'enum E { A = -1 }; enum E f(void) { return A; } int main(void) { long x = f(); return x == -1 && f() < 0; }' enum-return-sign-extension
-check 1 'enum E { A = -1 }; enum E f(int a, int b, int c, int d, int e, int f, enum E g) { return g; } int main(void) { return f(0,0,0,0,0,0,A) == -1; }' enum-stack-parameter
-check 1 'enum E { A = -1, B = 42 }; int main(void) { enum E a[2]; a[0] = A; a[1] = B; enum E *p = a; return p[0] == -1 && p[1] == 42 && sizeof a == 8; }' enum-array-storage
-check 1 'enum E { A = -1, B = 42 }; struct S { char c; enum E e; char end; }; int main(void) { struct S s; s.c = 7; s.e = B; s.end = 9; return s.e == 42 && s.c == 7 && s.end == 9 && sizeof s == 12; }' enum-struct-member
-check 1 'enum E { A = -1, B = 42 }; int main(void) { enum E e = A; return (e += 43) == B && e-- == B && e == 41 && ++e == B; }' enum-compound-and-increment
-check 1 'enum E { A = -1 }; int main(void) { enum E e = 4294967295UL; return e == -1 && (e = 4294967295UL) == -1; }' enum-integer-conversion
-check 42 'enum E { A = -1, B = 42 }; int main(void) { enum E e = B; int *p = &e; return *p; }' enum-compatible-int-pointer
-check 42 'enum E { A = -1, B = 42 }; int f(enum E); int f(int x) { return x; } int main(void) { return f(B); }' enum-compatible-int-prototype
-check 42 'enum E { A = -1, B = 42 }; int f(); int f(enum E x) { return x; } int main(void) { enum E e = B; return f(e); }' enum-default-argument-promotion
-check 1 'enum E { A = -1 }; int f(); int main(void) { enum E e = A; return f(e); } int f(int x) { return x == -1; }' enum-unprototyped-call-promotion
-check 42 'enum E { A = 42 }; enum E; int main(void) { enum E e = A; return e; }' enum-tag-redeclaration
-check 42 'enum E { E = 42 }; int main(void) { enum E e = E; return e; }' enum-tag-and-enumerator-namespace
-check 42 'enum { A = 42 }; int main(void) { int A = 7; { enum { A = 42 }; if (A != 42) return 0; } return A == 7 ? 42 : 0; }' enum-shadow-variable
-check 42 'enum { A = 7 }; int main(void) { { enum { A = A + 35 }; if (A != 42) return 0; } return A == 7 ? 42 : 0; }' enum-initializer-sees-outer-constant
-check 42 'enum { A = 7 }; int main(void) { int A = 42; return A; }' enum-variable-shadows-constant
-check 42 'enum { A = 7 }; int f(int A) { return A; } int main(void) { return f(42); }' enum-parameter-shadows-global-constant
-check 42 'enum E { A = 7 }; int main(void) { { enum E { A = 42 }; enum E e = A; if (e != 42) return 0; } enum E e = A; return e == 7 ? 42 : 0; }' enum-tag-and-constant-shadowing
-check 42 'int main(void) { { enum E { A }; } { enum E { A = 42 }; return A; } }' enum-sibling-scopes
-check 42 'int first(void) { enum { A = 1 }; return A; } int main(void) { enum { A = 42 }; return A; }' enum-function-scope-restore
-check 42 'int main(void) { for (enum { A = 1 } e = A; e < 2; e++) {} enum { A = 42 }; return A; }' enum-for-scope-restore
-check 42 'int f(enum E { A = 42 } e) { enum E x = e; return x + A - 42; } int main(void) { enum E { A = 1 } e = A; return f(42); }' enum-parameter-definition-scope
-check 42 'int f(enum E { A = 1 } e); int main(void) { enum E { A = 42 } e = A; return e; }' enum-prototype-scope-restore
-check 42 'struct S { enum E { A = 42 } e; }; int main(void) { struct S s; enum E e = A; s.e = e; return s.e; }' enum-definition-in-struct
-check 42 'int main(void) { enum E { A = 42 } e = A; { struct E { int x; }; struct E s; s.x = e; return s.x; } }' enum-ordinary-and-member-names
-check 42 'enum { A = 42 }; struct S { int A; }; int main(void) { struct S s; s.A = A; return s.A; }' enum-member-namespace
-check 42 'enum { A = 42 }; int main(void) { goto A; return 0; A: return A; }' enum-label-namespace
-check 42 'int main(void) { return sizeof(enum E { A = 42 }) == 4 ? A : 0; }' enum-definition-in-type-name
-check 1 'enum E { A = -1, B = 42 }; int main(void) { return sizeof(enum E) == 4 && sizeof(A) == sizeof(int); }' enum-sizeof
-check 1 'enum { A = 0 && (1 / 0), B = 1 ? 42 : (1 / 0) }; int main(void) { return A == 0 && B == 42; }' enum-short-circuit-constant-expression
+check enum-basic 6 'enum Color { RED, GREEN = 5, BLUE }; int main(void) { enum Color color = BLUE; return color; }'
+check enum-default-values 1 'enum { A, B, C }; int main(void) { return A == 0 && B == 1 && C == 2; }'
+check enum-duplicate-values 1 'enum { A = 5, B = 5, C }; int main(void) { return A == B && C == 6; }'
+check enum-negative-values 1 'enum E { A = -2, B, C, D }; int main(void) { return A == -2 && B == -1 && C == 0 && D == 1; }'
+check enum-local-anonymous-trailing-comma 42 'int main(void) { enum { ANSWER = 42, }; return ANSWER; }'
+check enum-constant-expression 42 'enum E { A = 1, B = (A << 5) | 10 }; int main(void) { return B; }'
+check enum-reference-and-conditional 42 'enum { A = 2, B = A * 21, C = A ? B : 0 }; int main(void) { return C; }'
+check enum-sizeof-initializer 4 'enum { SIZE = sizeof(int) }; int main(void) { return SIZE; }'
+check enum-int-boundaries 1 'enum { A = 2147483647, B = -2147483648, C = 0 }; int main(void) { return A == 2147483647 && B == -2147483648 && C == 0; }'
+check enum-max-final-value 1 'enum { A = 2147483647, }; int main(void) { return A == 2147483647; }'
+check enum-constant-has-int-type 1 'enum { A = 0 }; int main(void) { return sizeof A == 4 && A - 1 < 0; }'
+check enum-zero-null-pointer-constant 1 'enum { ZERO }; int main(void) { int *p = ZERO; return p == 0; }'
+check enum-array-bound 42 'enum { COUNT = 3 }; int main(void) { int a[COUNT]; a[COUNT - 1] = 42; return a[2]; }'
+check enum-switch 42 'enum E { A = 1, B = 42 }; int main(void) { enum E e = A; switch (e) { case A: return B; default: return 0; } }'
+check enum-for-variable 1 'enum E { A = -1, B = 0, C = 3 }; int main(void) { int sum = 0; for (enum E e = B; e <= C; e++) sum += e; return sum == 6; }'
+check enum-function-signature 42 'enum E { A = -1, B = 42 }; enum E id(enum E x) { return x; } int main(void) { return id(B); }'
+check enum-return-sign-extension 1 'enum E { A = -1 }; enum E f(void) { return A; } int main(void) { long x = f(); return x == -1 && f() < 0; }'
+check enum-stack-parameter 1 'enum E { A = -1 }; enum E f(int a, int b, int c, int d, int e, int f, enum E g) { return g; } int main(void) { return f(0,0,0,0,0,0,A) == -1; }'
+check enum-array-storage 1 'enum E { A = -1, B = 42 }; int main(void) { enum E a[2]; a[0] = A; a[1] = B; enum E *p = a; return p[0] == -1 && p[1] == 42 && sizeof a == 8; }'
+check enum-struct-member 1 'enum E { A = -1, B = 42 }; struct S { char c; enum E e; char end; }; int main(void) { struct S s; s.c = 7; s.e = B; s.end = 9; return s.e == 42 && s.c == 7 && s.end == 9 && sizeof s == 12; }'
+check enum-compound-and-increment 1 'enum E { A = -1, B = 42 }; int main(void) { enum E e = A; return (e += 43) == B && e-- == B && e == 41 && ++e == B; }'
+check enum-integer-conversion 1 'enum E { A = -1 }; int main(void) { enum E e = 4294967295UL; return e == -1 && (e = 4294967295UL) == -1; }'
+check enum-compatible-int-pointer 42 'enum E { A = -1, B = 42 }; int main(void) { enum E e = B; int *p = &e; return *p; }'
+check enum-compatible-int-prototype 42 'enum E { A = -1, B = 42 }; int f(enum E); int f(int x) { return x; } int main(void) { return f(B); }'
+check enum-default-argument-promotion 42 'enum E { A = -1, B = 42 }; int f(); int f(enum E x) { return x; } int main(void) { enum E e = B; return f(e); }'
+check enum-unprototyped-call-promotion 1 'enum E { A = -1 }; int f(); int main(void) { enum E e = A; return f(e); } int f(int x) { return x == -1; }'
+check enum-tag-redeclaration 42 'enum E { A = 42 }; enum E; int main(void) { enum E e = A; return e; }'
+check enum-tag-and-enumerator-namespace 42 'enum E { E = 42 }; int main(void) { enum E e = E; return e; }'
+check enum-shadow-variable 42 'enum { A = 42 }; int main(void) { int A = 7; { enum { A = 42 }; if (A != 42) return 0; } return A == 7 ? 42 : 0; }'
+check enum-initializer-sees-outer-constant 42 'enum { A = 7 }; int main(void) { { enum { A = A + 35 }; if (A != 42) return 0; } return A == 7 ? 42 : 0; }'
+check enum-variable-shadows-constant 42 'enum { A = 7 }; int main(void) { int A = 42; return A; }'
+check enum-parameter-shadows-global-constant 42 'enum { A = 7 }; int f(int A) { return A; } int main(void) { return f(42); }'
+check enum-tag-and-constant-shadowing 42 'enum E { A = 7 }; int main(void) { { enum E { A = 42 }; enum E e = A; if (e != 42) return 0; } enum E e = A; return e == 7 ? 42 : 0; }'
+check enum-sibling-scopes 42 'int main(void) { { enum E { A }; } { enum E { A = 42 }; return A; } }'
+check enum-function-scope-restore 42 'int first(void) { enum { A = 1 }; return A; } int main(void) { enum { A = 42 }; return A; }'
+check enum-for-scope-restore 42 'int main(void) { for (enum { A = 1 } e = A; e < 2; e++) {} enum { A = 42 }; return A; }'
+check enum-parameter-definition-scope 42 'int f(enum E { A = 42 } e) { enum E x = e; return x + A - 42; } int main(void) { enum E { A = 1 } e = A; return f(42); }'
+check enum-prototype-scope-restore 42 'int f(enum E { A = 1 } e); int main(void) { enum E { A = 42 } e = A; return e; }'
+check enum-definition-in-struct 42 'struct S { enum E { A = 42 } e; }; int main(void) { struct S s; enum E e = A; s.e = e; return s.e; }'
+check enum-ordinary-and-member-names 42 'int main(void) { enum E { A = 42 } e = A; { struct E { int x; }; struct E s; s.x = e; return s.x; } }'
+check enum-member-namespace 42 'enum { A = 42 }; struct S { int A; }; int main(void) { struct S s; s.A = A; return s.A; }'
+check enum-label-namespace 42 'enum { A = 42 }; int main(void) { goto A; return 0; A: return A; }'
+check enum-definition-in-type-name 42 'int main(void) { return sizeof(enum E { A = 42 }) == 4 ? A : 0; }'
+check enum-sizeof 1 'enum E { A = -1, B = 42 }; int main(void) { return sizeof(enum E) == 4 && sizeof(A) == sizeof(int); }'
+check enum-short-circuit-constant-expression 1 'enum { A = 0 && (1 / 0), B = 1 ? 42 : (1 / 0) }; int main(void) { return A == 0 && B == 42; }'
 
 check_error enum-empty 'enum E {};' '1:9: error: expect enumerator name'
 check_error enum-anonymous-empty 'enum {};' '1:7: error: expect enumerator name'
@@ -1629,32 +1755,32 @@ check_error enum-duplicate-location $'enum E {\n  A,\n  A\n};\n' '3:3: error: du
 check_error enum-range-location $'enum E {\n  A = 2147483648L\n};\n' '2:3: error: enumerator value is outside the range of int'
 
 # Parameters and outermost body declarations share depth 1; nested blocks shadow.
-check 42 'int f(int x) { { int x = 7; if (x != 7) return 0; } return x; } int main(void) { return f(42); }' parameter-nested-variable-shadow
-check 42 'int f(int x) { { enum { x = 7 }; if (x != 7) return 0; } return x; } int main(void) { return f(42); }' parameter-nested-enumerator-shadow
-check 42 'int f(int x) { for (int x = 0; x < 2; x++) {} return x; } int main(void) { return f(42); }' parameter-for-variable-shadow
-check 42 'int f(enum { A = 7 } x) { { int A = 42; return A; } } int main(void) { return f(0); }' parameter-enumerator-nested-variable-shadow
-check 42 'int f(int x); enum { x = 42 }; int main(void) { return x; }' parameter-prototype-scope-restored
-check 42 'int f(int x) { int y = 0; return x + y; } enum { x = 40, y = 2 }; int main(void) { return x + y; }' parameter-definition-scope-restored
+check parameter-nested-variable-shadow 42 'int f(int x) { { int x = 7; if (x != 7) return 0; } return x; } int main(void) { return f(42); }'
+check parameter-nested-enumerator-shadow 42 'int f(int x) { { enum { x = 7 }; if (x != 7) return 0; } return x; } int main(void) { return f(42); }'
+check parameter-for-variable-shadow 42 'int f(int x) { for (int x = 0; x < 2; x++) {} return x; } int main(void) { return f(42); }'
+check parameter-enumerator-nested-variable-shadow 42 'int f(enum { A = 7 } x) { { int A = 42; return A; } } int main(void) { return f(0); }'
+check parameter-prototype-scope-restored 42 'int f(int x); enum { x = 42 }; int main(void) { return x; }'
+check parameter-definition-scope-restored 42 'int f(int x) { int y = 0; return x + y; } enum { x = 40, y = 2 }; int main(void) { return x + y; }'
 
 # Typed functions preserve pointer widths and check complete signatures.
-check 42 'int *identity(int *p) { return p; } int main(void) { int x = 42; return *identity(&x); }' typed-pointer-identity
-check 42 'int *identity(int *); int main(void) { int x = 42; return *identity(&x); } int *identity(int *p) { return p; }' typed-pointer-prototype
-check 42 'int **identity(int **p) { return p; } int main(void) { int x = 42; int *p = &x; return **identity(&p); }' typed-nested-pointer
-check 42 'int get(int *p, int n) { return *p + n; } int main(void) { int x = 43; return get(&x, -1); }' typed-mixed-parameters
-check 42 'int get(int *a, int b, int *c, int d, int *e, int f) { return *a + b + *c + d + *e + f; } int main(void) { int x = 10; return get(&x, 1, &x, 2, &x, 9); }' typed-six-registers
-check 42 'void set(int *p, int n) { *p = n; return; } int main(void) { int x = 0; set(&x, 42); return x; }' typed-void-return
-check 42 'void set(int *p) { *p = 42; } int main(void) { int x = 0; set(&x); return x; }' typed-void-fallthrough
-check 1 'int *nothing(void) { return 0; } int main(void) { return nothing() == 0; }' typed-null-return
-check 1 'int isnull(int *p) { return p == 0; } int main(void) { return isnull(1 - 1); }' typed-null-argument
-check 42 'void *identity(void *p) { return p; } int main(void) { int x = 42; int *p = identity(&x); return *p; }' typed-void-pointer-conversion
-check 42 'int *identity(int *p) { return p; } int main(void) { int x = 42; void *p = &x; return *identity(p); }' typed-void-pointer-argument
-check 42 'int *identity(int *p) { return p; } int main(void) { int x = 42; return *identity(identity(&x)); }' typed-nested-calls
-check 42 'int *walk(int *p, int n) { if (n) return walk(p, n - 1); return p; } int main(void) { int x = 42; return *walk(&x, 3); }' typed-pointer-recursion
-check 42 'int *identity(); int main(void) { int x = 42; return *identity(&x); } int *identity(int *p) { return p; }' typed-unspecified-prototype
-check 42 'int *identity(int *); int *identity(int *value); int *identity(int *p) { return p; } int main(void) { int x = 42; return *identity(&x); }' typed-compatible-redeclarations
-check 42 'int *identity(int *p) { return p; } int *identity(); int main(void) { int x = 42; return *identity(&x); }' typed-preserve-prototype
-check 42 'int *choose(int *p) { return 0 ? 0 : p; } int main(void) { int x = 42; return *choose(&x); }' typed-null-conditional
-check 42 'void noop(void) { return; } int main(void) { noop(), noop(); 1 ? noop() : noop(); return 42; }' typed-discard-void
+check typed-pointer-identity 42 'int *identity(int *p) { return p; } int main(void) { int x = 42; return *identity(&x); }'
+check typed-pointer-prototype 42 'int *identity(int *); int main(void) { int x = 42; return *identity(&x); } int *identity(int *p) { return p; }'
+check typed-nested-pointer 42 'int **identity(int **p) { return p; } int main(void) { int x = 42; int *p = &x; return **identity(&p); }'
+check typed-mixed-parameters 42 'int get(int *p, int n) { return *p + n; } int main(void) { int x = 43; return get(&x, -1); }'
+check typed-six-registers 42 'int get(int *a, int b, int *c, int d, int *e, int f) { return *a + b + *c + d + *e + f; } int main(void) { int x = 10; return get(&x, 1, &x, 2, &x, 9); }'
+check typed-void-return 42 'void set(int *p, int n) { *p = n; return; } int main(void) { int x = 0; set(&x, 42); return x; }'
+check typed-void-fallthrough 42 'void set(int *p) { *p = 42; } int main(void) { int x = 0; set(&x); return x; }'
+check typed-null-return 1 'int *nothing(void) { return 0; } int main(void) { return nothing() == 0; }'
+check typed-null-argument 1 'int isnull(int *p) { return p == 0; } int main(void) { return isnull(1 - 1); }'
+check typed-void-pointer-conversion 42 'void *identity(void *p) { return p; } int main(void) { int x = 42; int *p = identity(&x); return *p; }'
+check typed-void-pointer-argument 42 'int *identity(int *p) { return p; } int main(void) { int x = 42; void *p = &x; return *identity(p); }'
+check typed-nested-calls 42 'int *identity(int *p) { return p; } int main(void) { int x = 42; return *identity(identity(&x)); }'
+check typed-pointer-recursion 42 'int *walk(int *p, int n) { if (n) return walk(p, n - 1); return p; } int main(void) { int x = 42; return *walk(&x, 3); }'
+check typed-unspecified-prototype 42 'int *identity(); int main(void) { int x = 42; return *identity(&x); } int *identity(int *p) { return p; }'
+check typed-compatible-redeclarations 42 'int *identity(int *); int *identity(int *value); int *identity(int *p) { return p; } int main(void) { int x = 42; return *identity(&x); }'
+check typed-preserve-prototype 42 'int *identity(int *p) { return p; } int *identity(); int main(void) { int x = 42; return *identity(&x); }'
+check typed-null-conditional 42 'int *choose(int *p) { return 0 ? 0 : p; } int main(void) { int x = 42; return *choose(&x); }'
+check typed-discard-void 42 'void noop(void) { return; } int main(void) { noop(), noop(); 1 ? noop() : noop(); return 42; }'
 check_error typed-conflicting-return 'int *f(int *p); int f(int *p);' '1:21: error: conflicting declaration of function '\''f'\'''
 check_error typed-conflicting-parameter 'int f(int *p); int f(int p);' '1:20: error: conflicting declaration of function '\''f'\'''
 check_error typed-conflicting-pointer-depth 'int f(int **); int f(int *);' '1:20: error: conflicting declaration of function '\''f'\'''
@@ -1677,8 +1803,8 @@ check_error typed-deferred-argument 'int f(); int main(void) { return f(1); } in
 check_error typed-void-double-pointer 'int f(void **p) { return 0; } int main(void) { int *p = 0; return f(&p); }' '1:69: error: incompatible argument type'
 check_error typed-missing-pointer-return 'int *f(void) { return; }' '1:16: error: expect return expr'
 
-check 1 'int f(int *p) { return p == 0; } int main(void) { return f(1 ? 0 : 1 / 0); }' typed-conditional-null
-check 42 'int *f(int *p) { return p; } int main(void) { int x = 42; return *(f(&x) + 0); }' typed-call-pointer-arithmetic
+check typed-conditional-null 1 'int f(int *p) { return p == 0; } int main(void) { return f(1 ? 0 : 1 / 0); }'
+check typed-call-pointer-arithmetic 42 'int *f(int *p) { return p; } int main(void) { int x = 42; return *(f(&x) + 0); }'
 check_error typed-void-pointer-increment 'int main(void) { void *p = 0; p++; return 0; }' '1:32: error: pointer arithmetic on void pointer'
 check_error typed-void-pointer-compound 'int main(void) { void *p = 0; p += 1; return 0; }' '1:33: error: pointer arithmetic on void pointer'
 check_error typed-void-pointer-add 'int main(void) { void *p = 0; p + 1; return 0; }' '1:33: error: pointer arithmetic on void pointer'
@@ -1686,76 +1812,76 @@ check_error typed-void-pointer-deref 'int main(void) { void *p = 0; *p; return 0
 check_error typed-void-compound-value 'void f(void) {} int main(void) { int x = 0; x += f(); return x; }' '1:50: error: void expression used as a value'
 
 # Arguments beyond the sixth use the stack; signatures grow as needed.
-check 39 'int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8); int main(void) { return f(1, 2, 3, 4, 5, 6, 7, 8); } int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8) { return a1 + 2 * a7 + 3 * a8; }' stack-arguments-8
-check 42 'int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9); int main(void) { return f(1, 2, 3, 4, 5, 6, 7, 8, 9); } int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) { return a1 + 2 * a7 + 3 * a9; }' stack-arguments-9
-check 63 'int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16); int main(void) { return f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16); } int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16) { return a1 + 2 * a7 + 3 * a16; }' stack-arguments-16
-check 75 'int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20); int main(void) { return f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20); } int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20) { return a1 + 2 * a7 + 3 * a20; }' stack-arguments-20
-check 135 'int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20, int a21, int a22, int a23, int a24, int a25, int a26, int a27, int a28, int a29, int a30, int a31, int a32, int a33, int a34, int a35, int a36, int a37, int a38, int a39, int a40); int main(void) { return f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40); } int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20, int a21, int a22, int a23, int a24, int a25, int a26, int a27, int a28, int a29, int a30, int a31, int a32, int a33, int a34, int a35, int a36, int a37, int a38, int a39, int a40) { return a1 + 2 * a7 + 3 * a40; }' stack-arguments-40
-check 42 'int f(int a, int b, int c, int d, int e, int f, int g) { return -g; } int main(void) { return f(1, 2, 3, 4, 5, 6, -42); }' stack-argument-negative
-check 42 'int *f(int a, int b, int c, int d, int e, int f, int *g) { return g; } int main(void) { int x = 42; return *f(1, 2, 3, 4, 5, 6, &x); }' stack-argument-pointer
-check 42 'int **f(int a, int b, int c, int d, int e, int f, int g, int **h) { return h; } int main(void) { int x = 42; int *p = &x; return **f(1, 2, 3, 4, 5, 6, 7, &p); }' stack-argument-double-pointer
-check 1 'int f(int a, int b, int c, int d, int e, int f, int *g) { return g == 0; } int main(void) { return f(1, 2, 3, 4, 5, 6, 0); }' stack-argument-null
-check 42 'void set(int *p) { *p = 42; } int f(int a, int b, int c, int d, int e, int f, int g) { set(&g); return g; } int main(void) { return f(1, 2, 3, 4, 5, 6, 7); }' stack-argument-address
-check 42 'int f(int a, int b, int c, int d, int e, int z, int g) { if (a) return f(a - 1, b, c, d, e, z, g); return g; } int main(void) { return f(4, 2, 3, 4, 5, 6, 42); }' stack-argument-recursion
-check 42 'int f(int a, int b, int c, int d, int e, int f, int g) { return g; } int main(void) { int i; int n = 0; for (i = 0; i < 100; i++) n = f(1, 2, 3, 4, 5, 6, 42); return n; }' stack-argument-cleanup
-check 42 'int f(int a, int b, int c, int d, int e, int f, int g) { return a + g; } int main(void) { return f(1, 2, 3, 4, 5, 6, f(7, 8, 9, 10, 11, 12, 34)); }' stack-argument-nested-call
-check 42 'int f(int a, int b, int c, int d, int e, int f, int g) { return a + g; } int main(void) { int x = 20; return f(20, 2, 3, 4, 5, 6, (x += 2)); }' stack-argument-side-effect
+check stack-arguments-8 39 'int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8); int main(void) { return f(1, 2, 3, 4, 5, 6, 7, 8); } int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8) { return a1 + 2 * a7 + 3 * a8; }'
+check stack-arguments-9 42 'int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9); int main(void) { return f(1, 2, 3, 4, 5, 6, 7, 8, 9); } int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9) { return a1 + 2 * a7 + 3 * a9; }'
+check stack-arguments-16 63 'int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16); int main(void) { return f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16); } int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16) { return a1 + 2 * a7 + 3 * a16; }'
+check stack-arguments-20 75 'int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20); int main(void) { return f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20); } int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20) { return a1 + 2 * a7 + 3 * a20; }'
+check stack-arguments-40 135 'int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20, int a21, int a22, int a23, int a24, int a25, int a26, int a27, int a28, int a29, int a30, int a31, int a32, int a33, int a34, int a35, int a36, int a37, int a38, int a39, int a40); int main(void) { return f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40); } int f(int a1, int a2, int a3, int a4, int a5, int a6, int a7, int a8, int a9, int a10, int a11, int a12, int a13, int a14, int a15, int a16, int a17, int a18, int a19, int a20, int a21, int a22, int a23, int a24, int a25, int a26, int a27, int a28, int a29, int a30, int a31, int a32, int a33, int a34, int a35, int a36, int a37, int a38, int a39, int a40) { return a1 + 2 * a7 + 3 * a40; }'
+check stack-argument-negative 42 'int f(int a, int b, int c, int d, int e, int f, int g) { return -g; } int main(void) { return f(1, 2, 3, 4, 5, 6, -42); }'
+check stack-argument-pointer 42 'int *f(int a, int b, int c, int d, int e, int f, int *g) { return g; } int main(void) { int x = 42; return *f(1, 2, 3, 4, 5, 6, &x); }'
+check stack-argument-double-pointer 42 'int **f(int a, int b, int c, int d, int e, int f, int g, int **h) { return h; } int main(void) { int x = 42; int *p = &x; return **f(1, 2, 3, 4, 5, 6, 7, &p); }'
+check stack-argument-null 1 'int f(int a, int b, int c, int d, int e, int f, int *g) { return g == 0; } int main(void) { return f(1, 2, 3, 4, 5, 6, 0); }'
+check stack-argument-address 42 'void set(int *p) { *p = 42; } int f(int a, int b, int c, int d, int e, int f, int g) { set(&g); return g; } int main(void) { return f(1, 2, 3, 4, 5, 6, 7); }'
+check stack-argument-recursion 42 'int f(int a, int b, int c, int d, int e, int z, int g) { if (a) return f(a - 1, b, c, d, e, z, g); return g; } int main(void) { return f(4, 2, 3, 4, 5, 6, 42); }'
+check stack-argument-cleanup 42 'int f(int a, int b, int c, int d, int e, int f, int g) { return g; } int main(void) { int i; int n = 0; for (i = 0; i < 100; i++) n = f(1, 2, 3, 4, 5, 6, 42); return n; }'
+check stack-argument-nested-call 42 'int f(int a, int b, int c, int d, int e, int f, int g) { return a + g; } int main(void) { return f(1, 2, 3, 4, 5, 6, f(7, 8, 9, 10, 11, 12, 34)); }'
+check stack-argument-side-effect 42 'int f(int a, int b, int c, int d, int e, int f, int g) { return a + g; } int main(void) { int x = 20; return f(20, 2, 3, 4, 5, 6, (x += 2)); }'
 check_error stack-argument-too-few 'int f(int, int, int, int, int, int, int); int main(void) { return f(1,2,3,4,5,6); }' '1:67: error: wrong number of arguments to function '\''f'\'''
 check_error stack-argument-too-many 'int f(int, int, int, int, int, int, int); int main(void) { return f(1,2,3,4,5,6,7,8); }' '1:67: error: wrong number of arguments to function '\''f'\'''
 check_error stack-argument-type 'int f(int, int, int, int, int, int, int *); int main(void) { return f(1,2,3,4,5,6,42); }' '1:83: error: incompatible argument type'
 check_error stack-parameter-conflict 'int f(int, int, int, int, int, int, int); int f(int, int, int, int, int, int, int *);' '1:47: error: conflicting declaration of function '\''f'\'''
 
 # Plain char is a signed byte, promoted to int for arithmetic.
-check 42 'int main(void) { char c = 42; return c; }' 'char-local'
-check 1 'char identity(char c) { return c; } int main(void) { char x = 42; char *p = &x; *p = identity(255); return x == -1; }' 'char-identity'
-check 42 'int main(void) { char a = 42; char b = 7; return a; }' 'char-adjacent-initializers'
-check 42 'int main(void) { char a = 42; char b = 7; b = 8; return a; }' 'char-adjacent-assignment'
-check 42 'int main(void) { char a = 42; char b = 7; char *p = &b; *p = 8; return a; }' 'char-adjacent-indirect-store'
-check 1 'int main(void) { int x = 42; char a = 7; char b = -1; return x == 42 && a == 7 && b == -1; }' 'char-mixed-local-layout'
-check 254 'int main(void) { char a = 127; char b = 127; return a + b; }' 'char-addition-promotion'
-check 128 'int main(void) { char a = -128; return -a; }' 'char-negation-promotion'
-check 1 'int main(void) { char a = -1; return ~a == 0 && a < 0; }' 'char-bitwise-and-comparison'
-check 1 'int main(void) { char a = -128; char b = 1; return (a >> b) == -64; }' 'char-shift-promotion'
-check 1 'int main(void) { char a = 127; char b = 1; return (1 ? a : b) + 1 == 128; }' 'char-conditional-promotion'
-check 1 'int main(void) { char a = -1; return (0 ? 42 : a) == -1; }' 'char-mixed-conditional'
-check 1 'int main(void) { char c = 0; int x = (c = 255); return c == -1 && x == -1; }' 'char-assignment-result'
-check 1 'int main(void) { char c = 127; return (c += 1) == -128 && c == -128; }' 'char-compound-narrowing'
-check 1 'int main(void) { char c = 100; return (c *= 3) == 44; }' 'char-compound-promotion'
-check 1 'int main(void) { char c = 127; return ++c == -128 && c == -128; }' 'char-preincrement-boundary'
-check 1 'int main(void) { char c = -128; return --c == 127 && c == 127; }' 'char-predecrement-boundary'
-check 1 'int main(void) { char c = 127; int old = c++; return old == 127 && c == -128; }' 'char-postincrement-boundary'
-check 1 'int main(void) { char c = -128; int old = c--; return old == -128 && c == 127; }' 'char-postdecrement-boundary'
-check 42 'int main(void) { char a = 42; char b = 7; char *p = &b; ++*p; (*p)--; return a; }' 'char-adjacent-increments'
-check 1 'int main(void) { int x = 42; void *v = &x; char *p = v; *(p + 1) = 1; return x == 298; }' 'char-pointer-byte-stride'
-check 1 'int main(void) { int x = 42; void *v = &x; char *p = v; char *q = p; p++; return p - q == 1; }' 'char-pointer-increment'
-check 42 'int main(void) { char x = 42; char *p = &x; char **pp = &p; return **pp; }' 'char-nested-pointer-load'
-check 1 'int take(char c) { return c; } int main(void) { return take(255) == -1; }' 'char-parameter-narrowing'
-check 1 'char give(int n) { return n; } int main(void) { return give(255) == -1; }' 'char-return-narrowing'
-check 1 'char give(void) { return -128; } int main(void) { return give() < 0; }' 'char-call-sign-extension'
-check 1 'char f(char a, char b, char c, char d, char e, char f, char g, char h) { return g + h; } int main(void) { return f(1,2,3,4,5,6,255,128) == 127; }' 'char-stack-parameters'
-check 42 'int f(int a, char b, int *p, char d, int e, char f, char *g, char h) { return a + b + *p + d + e + f + *g + h; } int main(void) { int x = 10; char y = 10; return f(1,2,&x,3,4,5,&y,7); }' 'char-mixed-parameters'
-check 42 'int f(); int main(void) { char c = 42; return f(c); } int f(int n) { return n; }' 'char-default-argument-promotion'
-check 1 'int main(void) { int total = 0; for (char c = 0; c < 10; c++) total += c; return total == 45; }' 'char-for-declaration'
-check 42 'int main(void) { char c = 255; switch (c) { case -1: return 42; default: return 0; } }' 'char-switch'
-check 1 'int main(void) { char c = -1; return !c == 0 && (c || 0) && (c && 1); }' 'char-logical-operators'
-check 1 'int main(void) { char c = 0; return (c = (c = 255)) == -1; }' 'char-chained-assignment'
-check 1 'int main(void) { char c = 127; return c == 127; }' 'char-initializer-boundary-127'
-check 1 'int main(void) { char c = 128; return c == -128; }' 'char-initializer-boundary-128'
-check 1 'int main(void) { char c = 255; return c == -1; }' 'char-initializer-boundary-255'
-check 1 'int main(void) { char c = 256; return c == 0; }' 'char-initializer-boundary-256'
-check 1 'int main(void) { char c = -129; return c == 127; }' 'char-initializer-boundary--129'
-check 1 'int main(void) { char c = -128; return c == -128; }' 'char-initializer-boundary--128'
-check 1 'int main(void) { char c = -256; return c == 0; }' 'char-initializer-boundary--256'
-check 1 'int main(void) { char c = 127; c += 1; return c == -128; }' 'char-compound-+='
-check 1 'int main(void) { char c = -128; c -= 1; return c == 127; }' 'char-compound--='
-check 1 'int main(void) { char c = 100; c *= 3; return c == 44; }' 'char-compound-*='
-check 1 'int main(void) { char c = -127; c /= 2; return c == -63; }' 'char-compound-/='
-check 1 'int main(void) { char c = -127; c %= 2; return c == -1; }' 'char-compound-%='
-check 1 'int main(void) { char c = 64; c <<= 1; return c == -128; }' 'char-compound-<<='
-check 1 'int main(void) { char c = -128; c >>= 1; return c == -64; }' 'char-compound->>='
-check 1 'int main(void) { char c = -1; c &= 127; return c == 127; }' 'char-compound-&='
-check 1 'int main(void) { char c = 127; c ^= 255; return c == -128; }' 'char-compound-^='
-check 1 'int main(void) { char c = 0; c |= 255; return c == -1; }' 'char-compound-|='
+check 'char-local' 42 'int main(void) { char c = 42; return c; }'
+check 'char-identity' 1 'char identity(char c) { return c; } int main(void) { char x = 42; char *p = &x; *p = identity(255); return x == -1; }'
+check 'char-adjacent-initializers' 42 'int main(void) { char a = 42; char b = 7; return a; }'
+check 'char-adjacent-assignment' 42 'int main(void) { char a = 42; char b = 7; b = 8; return a; }'
+check 'char-adjacent-indirect-store' 42 'int main(void) { char a = 42; char b = 7; char *p = &b; *p = 8; return a; }'
+check 'char-mixed-local-layout' 1 'int main(void) { int x = 42; char a = 7; char b = -1; return x == 42 && a == 7 && b == -1; }'
+check 'char-addition-promotion' 254 'int main(void) { char a = 127; char b = 127; return a + b; }'
+check 'char-negation-promotion' 128 'int main(void) { char a = -128; return -a; }'
+check 'char-bitwise-and-comparison' 1 'int main(void) { char a = -1; return ~a == 0 && a < 0; }'
+check 'char-shift-promotion' 1 'int main(void) { char a = -128; char b = 1; return (a >> b) == -64; }'
+check 'char-conditional-promotion' 1 'int main(void) { char a = 127; char b = 1; return (1 ? a : b) + 1 == 128; }'
+check 'char-mixed-conditional' 1 'int main(void) { char a = -1; return (0 ? 42 : a) == -1; }'
+check 'char-assignment-result' 1 'int main(void) { char c = 0; int x = (c = 255); return c == -1 && x == -1; }'
+check 'char-compound-narrowing' 1 'int main(void) { char c = 127; return (c += 1) == -128 && c == -128; }'
+check 'char-compound-promotion' 1 'int main(void) { char c = 100; return (c *= 3) == 44; }'
+check 'char-preincrement-boundary' 1 'int main(void) { char c = 127; return ++c == -128 && c == -128; }'
+check 'char-predecrement-boundary' 1 'int main(void) { char c = -128; return --c == 127 && c == 127; }'
+check 'char-postincrement-boundary' 1 'int main(void) { char c = 127; int old = c++; return old == 127 && c == -128; }'
+check 'char-postdecrement-boundary' 1 'int main(void) { char c = -128; int old = c--; return old == -128 && c == 127; }'
+check 'char-adjacent-increments' 42 'int main(void) { char a = 42; char b = 7; char *p = &b; ++*p; (*p)--; return a; }'
+check 'char-pointer-byte-stride' 1 'int main(void) { int x = 42; void *v = &x; char *p = v; *(p + 1) = 1; return x == 298; }'
+check 'char-pointer-increment' 1 'int main(void) { int x = 42; void *v = &x; char *p = v; char *q = p; p++; return p - q == 1; }'
+check 'char-nested-pointer-load' 42 'int main(void) { char x = 42; char *p = &x; char **pp = &p; return **pp; }'
+check 'char-parameter-narrowing' 1 'int take(char c) { return c; } int main(void) { return take(255) == -1; }'
+check 'char-return-narrowing' 1 'char give(int n) { return n; } int main(void) { return give(255) == -1; }'
+check 'char-call-sign-extension' 1 'char give(void) { return -128; } int main(void) { return give() < 0; }'
+check 'char-stack-parameters' 1 'char f(char a, char b, char c, char d, char e, char f, char g, char h) { return g + h; } int main(void) { return f(1,2,3,4,5,6,255,128) == 127; }'
+check 'char-mixed-parameters' 42 'int f(int a, char b, int *p, char d, int e, char f, char *g, char h) { return a + b + *p + d + e + f + *g + h; } int main(void) { int x = 10; char y = 10; return f(1,2,&x,3,4,5,&y,7); }'
+check 'char-default-argument-promotion' 42 'int f(); int main(void) { char c = 42; return f(c); } int f(int n) { return n; }'
+check 'char-for-declaration' 1 'int main(void) { int total = 0; for (char c = 0; c < 10; c++) total += c; return total == 45; }'
+check 'char-switch' 42 'int main(void) { char c = 255; switch (c) { case -1: return 42; default: return 0; } }'
+check 'char-logical-operators' 1 'int main(void) { char c = -1; return !c == 0 && (c || 0) && (c && 1); }'
+check 'char-chained-assignment' 1 'int main(void) { char c = 0; return (c = (c = 255)) == -1; }'
+check 'char-initializer-boundary-127' 1 'int main(void) { char c = 127; return c == 127; }'
+check 'char-initializer-boundary-128' 1 'int main(void) { char c = 128; return c == -128; }'
+check 'char-initializer-boundary-255' 1 'int main(void) { char c = 255; return c == -1; }'
+check 'char-initializer-boundary-256' 1 'int main(void) { char c = 256; return c == 0; }'
+check 'char-initializer-boundary--129' 1 'int main(void) { char c = -129; return c == 127; }'
+check 'char-initializer-boundary--128' 1 'int main(void) { char c = -128; return c == -128; }'
+check 'char-initializer-boundary--256' 1 'int main(void) { char c = -256; return c == 0; }'
+check 'char-compound-+=' 1 'int main(void) { char c = 127; c += 1; return c == -128; }'
+check 'char-compound--=' 1 'int main(void) { char c = -128; c -= 1; return c == 127; }'
+check 'char-compound-*=' 1 'int main(void) { char c = 100; c *= 3; return c == 44; }'
+check 'char-compound-/=' 1 'int main(void) { char c = -127; c /= 2; return c == -63; }'
+check 'char-compound-%=' 1 'int main(void) { char c = -127; c %= 2; return c == -1; }'
+check 'char-compound-<<=' 1 'int main(void) { char c = 64; c <<= 1; return c == -128; }'
+check 'char-compound->>=' 1 'int main(void) { char c = -128; c >>= 1; return c == -64; }'
+check 'char-compound-&=' 1 'int main(void) { char c = -1; c &= 127; return c == 127; }'
+check 'char-compound-^=' 1 'int main(void) { char c = 127; c ^= 255; return c == -128; }'
+check 'char-compound-|=' 1 'int main(void) { char c = 0; c |= 255; return c == -1; }'
 check_error char-conflicting-parameter 'int f(char); int f(int);' '1:18: error: conflicting declaration of function '\''f'\'''
 check_error char-conflicting-return 'char f(void); int f(void);' '1:19: error: conflicting declaration of function '\''f'\'''
 check_error char-prototype-default-promotion 'int f(); int f(char);' '1:14: error: conflicting declaration of function '\''f'\'''
@@ -1765,33 +1891,33 @@ check_error char-not-null-pointer-constant 'int main(void) { char c = 0; int *p 
 check_error char-pointer-assignment 'int main(void) { char c; int *p = 0; c = p; return 0; }' '1:40: error: incompatible assignment type'
 
 # Ordinary character constants are int tokens; byte escapes follow signed char.
-check 65 "int main(void) { return 'A'; }" character-literal-letter
-check 48 "int main(void) { return '0'; }" character-literal-digit
-check 32 "int main(void) { return ' '; }" character-literal-space
-check 34 "int main(void) { return '\"'; }" character-literal-double-quote
-check 39 "int main(void) { return '\\''; }" character-literal-escaped-quote
-check 34 "int main(void) { return '\\\"'; }" character-literal-escaped-double-quote
-check 92 "int main(void) { return '\\\\'; }" character-literal-backslash
-check 63 "int main(void) { return '\\?'; }" character-literal-question
-check 7 "int main(void) { return '\\a'; }" character-literal-alert
-check 8 "int main(void) { return '\\b'; }" character-literal-backspace
-check 12 "int main(void) { return '\\f'; }" character-literal-form-feed
-check 10 "int main(void) { return '\\n'; }" character-literal-newline
-check 13 "int main(void) { return '\\r'; }" character-literal-carriage-return
-check 9 "int main(void) { return '\\t'; }" character-literal-tab
-check 11 "int main(void) { return '\\v'; }" character-literal-vertical-tab
-check 0 "int main(void) { return '\\0'; }" character-literal-null
-check 7 "int main(void) { return '\\7'; }" character-literal-octal-one-digit
-check 10 "int main(void) { return '\\12'; }" character-literal-octal-two-digits
-check 65 "int main(void) { return '\\101'; }" character-literal-octal-three-digits
-check 65 "int main(void) { return '\\x41'; }" character-literal-hex
-check 65 "int main(void) { return '\\x00000041'; }" character-literal-hex-leading-zeroes
-check 1 "int main(void) { return '\\xff' == -1 && '\\377' == -1 && '\\x80' == -128 && '\\200' == -128; }" character-literal-signed-byte
-check 1 "int main(void) { char c = 'A'; return c == 65 && 'A' + 200 == 265; }" character-literal-char-initialization
-check 42 "int main(void) { switch ('\\n') { case 10: return 42; default: return 0; } }" character-literal-switch
-check 42 "int main(void) { switch (10) { case '\\n': return 42; default: return 0; } }" character-literal-case
-check 89 "int main(void) { return '/' + '*'; }" character-literal-comment-characters
-check 1 "char identity(char c) { return c; } int main(void) { return identity('\\xff') == -1; }" character-literal-function-argument
+check character-literal-letter 65 "int main(void) { return 'A'; }"
+check character-literal-digit 48 "int main(void) { return '0'; }"
+check character-literal-space 32 "int main(void) { return ' '; }"
+check character-literal-double-quote 34 "int main(void) { return '\"'; }"
+check character-literal-escaped-quote 39 "int main(void) { return '\\''; }"
+check character-literal-escaped-double-quote 34 "int main(void) { return '\\\"'; }"
+check character-literal-backslash 92 "int main(void) { return '\\\\'; }"
+check character-literal-question 63 "int main(void) { return '\\?'; }"
+check character-literal-alert 7 "int main(void) { return '\\a'; }"
+check character-literal-backspace 8 "int main(void) { return '\\b'; }"
+check character-literal-form-feed 12 "int main(void) { return '\\f'; }"
+check character-literal-newline 10 "int main(void) { return '\\n'; }"
+check character-literal-carriage-return 13 "int main(void) { return '\\r'; }"
+check character-literal-tab 9 "int main(void) { return '\\t'; }"
+check character-literal-vertical-tab 11 "int main(void) { return '\\v'; }"
+check character-literal-null 0 "int main(void) { return '\\0'; }"
+check character-literal-octal-one-digit 7 "int main(void) { return '\\7'; }"
+check character-literal-octal-two-digits 10 "int main(void) { return '\\12'; }"
+check character-literal-octal-three-digits 65 "int main(void) { return '\\101'; }"
+check character-literal-hex 65 "int main(void) { return '\\x41'; }"
+check character-literal-hex-leading-zeroes 65 "int main(void) { return '\\x00000041'; }"
+check character-literal-signed-byte 1 "int main(void) { return '\\xff' == -1 && '\\377' == -1 && '\\x80' == -128 && '\\200' == -128; }"
+check character-literal-char-initialization 1 "int main(void) { char c = 'A'; return c == 65 && 'A' + 200 == 265; }"
+check character-literal-switch 42 "int main(void) { switch ('\\n') { case 10: return 42; default: return 0; } }"
+check character-literal-case 42 "int main(void) { switch (10) { case '\\n': return 42; default: return 0; } }"
+check character-literal-comment-characters 89 "int main(void) { return '/' + '*'; }"
+check character-literal-function-argument 1 "char identity(char c) { return c; } int main(void) { return identity('\\xff') == -1; }"
 check_error character-literal-empty "int main(void) { return ''; }" "1:25: error: empty character literal"
 check_error character-literal-multiple "int main(void) { return 'ab'; }" "1:25: error: multi-character literals not supported"
 check_error character-literal-invalid-escape "int main(void) { return '\\q'; }" "1:25: error: invalid escape sequence in character literal"
@@ -1839,17 +1965,17 @@ check_error string-parenthesized-concat 'int main(void) { ("a") "b"; return 0; }
 # Fixed-size array declarations and array parameter adjustment.
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' \
     'long' 'unsigned long' 'long long' 'unsigned long long'; do
-    check 42 "int main(void) { $spec a[3]; return 42; }" "array-declaration-$spec"
+    check "array-declaration-$spec" 42 "int main(void) { $spec a[3]; return 42; }"
 done
-check 42 'int main(void) { int *a[3]; void *b[2]; int **c[1]; return 42; }' array-pointer-elements
-check 42 'int main(void) { int a[1 + 2 * 3]; char b[1 ? 5 : 2]; short c[1U << 3]; return 42; }' array-constant-bounds
-check 42 'int main(void) { int a[3]; { char a[5]; } int x = 42; return x; }' array-scope-and-following-local
-check 42 'int main(void) { for (int a[3]; 0;) ; return 42; }' array-for-declaration
-check 42 'int f(int a[1]) { return *a; } int main(void) { int x = 42; return f(&x); }' array-parameter-definition
-check 42 'int f(int [3]); int f(int *p) { return *p; } int main(void) { int x = 42; return f(&x); }' array-unnamed-parameter
-check 42 'int f(int a[2]); int f(int a[7]); int f(int *a) { return *a; } int main(void) { int x = 42; return f(&x); }' array-parameter-compatible-bounds
-check 42 'int *f(int *a[1]) { return *a; } int main(void) { int x = 42; int *p = &x; return *f(&p); }' array-pointer-parameter
-check 42 'int f(char a[1]) { *a = 42; return *a; } int main(void) { char x; return f(&x); }' array-char-parameter
+check array-pointer-elements 42 'int main(void) { int *a[3]; void *b[2]; int **c[1]; return 42; }'
+check array-constant-bounds 42 'int main(void) { int a[1 + 2 * 3]; char b[1 ? 5 : 2]; short c[1U << 3]; return 42; }'
+check array-scope-and-following-local 42 'int main(void) { int a[3]; { char a[5]; } int x = 42; return x; }'
+check array-for-declaration 42 'int main(void) { for (int a[3]; 0;) ; return 42; }'
+check array-parameter-definition 42 'int f(int a[1]) { return *a; } int main(void) { int x = 42; return f(&x); }'
+check array-unnamed-parameter 42 'int f(int [3]); int f(int *p) { return *p; } int main(void) { int x = 42; return f(&x); }'
+check array-parameter-compatible-bounds 42 'int f(int a[2]); int f(int a[7]); int f(int *a) { return *a; } int main(void) { int x = 42; return f(&x); }'
+check array-pointer-parameter 42 'int *f(int *a[1]) { return *a; } int main(void) { int x = 42; int *p = &x; return *f(&p); }'
+check array-char-parameter 42 'int f(char a[1]) { *a = 42; return *a; } int main(void) { char x; return f(&x); }'
 
 check_error array-zero-bound 'int main(void) { int a[0]; return 0; }' '1:24: error: array bound must be positive'
 check_error array-negative-bound 'int main(void) { int a[-1]; return 0; }' '1:24: error: array bound must be positive'
@@ -1869,23 +1995,23 @@ check_error array-function-return 'int f[3](void);' '1:5: error: function cannot
 check_error array-parameter-conflict 'int f(int a[3]); int f(char *a);' '1:22: error: conflicting declaration of function '\''f'\'''
 
 # Struct declarations, layout, and the tag namespace.
-check 42 'struct S { int x; }; int main(void) { struct S s; return 42; }' struct-local-declaration
-check 42 'struct S; struct S { int x; }; struct S; int main(void) { return 42; }' struct-forward-definition
-check 42 'struct Node { int value; struct Node *next; }; int main(void) { struct Node n; struct Node *p = &n; return p == &n ? 42 : 0; }' struct-self-pointer
-check 42 'struct A; struct B { struct A *a; }; struct A { struct B *b; }; int main(void) { struct A a; struct B b; return 42; }' struct-mutual-pointers
-check 42 'int main(void) { struct { int x; char y; } s; return 42; }' struct-anonymous
-check 42 'int main(void) { struct S { int x, y; char *p, bytes[3]; }; struct S s; return 42; }' struct-multiple-members
-check 42 'struct S { struct { int x; } inner; long a[2]; }; int main(void) { struct S s; return 42; }' struct-nested-members
-check 42 'struct S { int x; }; int main(void) { int S = 42; struct S s; return S; }' struct-separate-namespace
-check 16 'struct S { char c; long n; }; int main(void) { struct S a[2]; void *v = a; char *p = v; v = a + 1; char *q = v; return q - p; }' struct-padding-and-alignment
-check 16 'struct S { long n; char c; }; int main(void) { struct S a[2]; void *v = a; char *p = v; v = a + 1; char *q = v; return q - p; }' struct-tail-padding
-check 24 'struct Inner { int x; char c; }; struct S { char c; struct Inner inner; long n; }; int main(void) { struct S a[2]; void *v = a; char *p = v; v = a + 1; char *q = v; return q - p; }' struct-nested-layout
-check 42 'struct S { int x; }; struct S *id(struct S *p) { return p; } int main(void) { struct S s; return id(&s) == &s ? 42 : 0; }' struct-pointer-function
-check 42 'struct S; int f(struct S *p) { return p == 0 ? 42 : 0; } int main(void) { return f(0); }' struct-incomplete-pointer-parameter
-check 42 'struct S { int x; }; int main(void) { struct S s; struct S *p = &s; { struct S { char c; }; struct S t; } struct S *q = &s; return p == q ? 42 : 0; }' struct-tag-shadowing
-check 42 'int main(void) { { struct S { int x; }; } { struct S { char c; }; } return 42; }' struct-sibling-scopes
-check 42 'int main(void) { for (struct S { int x; } *p = 0; p; ) {} struct S { char c; }; return 42; }' struct-for-scope
-check 42 'int f(struct S { int x; } *p) { struct S s; return p == 0 ? 42 : 0; } int main(void) { struct S { char c; }; return f(0); }' struct-parameter-tag-scope
+check struct-local-declaration 42 'struct S { int x; }; int main(void) { struct S s; return 42; }'
+check struct-forward-definition 42 'struct S; struct S { int x; }; struct S; int main(void) { return 42; }'
+check struct-self-pointer 42 'struct Node { int value; struct Node *next; }; int main(void) { struct Node n; struct Node *p = &n; return p == &n ? 42 : 0; }'
+check struct-mutual-pointers 42 'struct A; struct B { struct A *a; }; struct A { struct B *b; }; int main(void) { struct A a; struct B b; return 42; }'
+check struct-anonymous 42 'int main(void) { struct { int x; char y; } s; return 42; }'
+check struct-multiple-members 42 'int main(void) { struct S { int x, y; char *p, bytes[3]; }; struct S s; return 42; }'
+check struct-nested-members 42 'struct S { struct { int x; } inner; long a[2]; }; int main(void) { struct S s; return 42; }'
+check struct-separate-namespace 42 'struct S { int x; }; int main(void) { int S = 42; struct S s; return S; }'
+check struct-padding-and-alignment 16 'struct S { char c; long n; }; int main(void) { struct S a[2]; void *v = a; char *p = v; v = a + 1; char *q = v; return q - p; }'
+check struct-tail-padding 16 'struct S { long n; char c; }; int main(void) { struct S a[2]; void *v = a; char *p = v; v = a + 1; char *q = v; return q - p; }'
+check struct-nested-layout 24 'struct Inner { int x; char c; }; struct S { char c; struct Inner inner; long n; }; int main(void) { struct S a[2]; void *v = a; char *p = v; v = a + 1; char *q = v; return q - p; }'
+check struct-pointer-function 42 'struct S { int x; }; struct S *id(struct S *p) { return p; } int main(void) { struct S s; return id(&s) == &s ? 42 : 0; }'
+check struct-incomplete-pointer-parameter 42 'struct S; int f(struct S *p) { return p == 0 ? 42 : 0; } int main(void) { return f(0); }'
+check struct-tag-shadowing 42 'struct S { int x; }; int main(void) { struct S s; struct S *p = &s; { struct S { char c; }; struct S t; } struct S *q = &s; return p == q ? 42 : 0; }'
+check struct-sibling-scopes 42 'int main(void) { { struct S { int x; }; } { struct S { char c; }; } return 42; }'
+check struct-for-scope 42 'int main(void) { for (struct S { int x; } *p = 0; p; ) {} struct S { char c; }; return 42; }'
+check struct-parameter-tag-scope 42 'int f(struct S { int x; } *p) { struct S s; return p == 0 ? 42 : 0; } int main(void) { struct S { char c; }; return f(0); }'
 
 check_error struct-redefinition 'struct S { int x; }; struct S { int y; };' '1:29: error: redefinition of struct '\''S'\'''
 check_error struct-recursive-definition 'struct S { struct S { int x; } member; };' '1:19: error: redefinition of struct '\''S'\'''
@@ -1926,35 +2052,35 @@ check_error struct-comparison 'struct S { int x; }; int main(void) { struct S a;
 
 # Struct member addresses reuse scalar loads, stores, and pointer arithmetic.
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' 'long' 'unsigned long' 'long long' 'unsigned long long'; do
-    check 42 "struct S { char before; $spec value; char after; }; int main(void) { struct S s; struct S *p = &s; s.before = 7; s.after = 9; s.value = 20; p->value = p->value + 22; return s.before == 7 && s.after == 9 ? s.value : 0; }" "member-load-store-$spec"
+    check "member-load-store-$spec" 42 "struct S { char before; $spec value; char after; }; int main(void) { struct S s; struct S *p = &s; s.before = 7; s.after = 9; s.value = 20; p->value = p->value + 22; return s.before == 7 && s.after == 9 ? s.value : 0; }"
 done
-check 42 'struct Point { int x; int y; }; int main(void) { struct Point p; struct Point *ptr = &p; p.x = 20; ptr->y = 22; return p.x + p.y; }' member-dot-and-arrow
-check 1 'struct S { char a; unsigned char b; short c; unsigned short d; int e; unsigned f; }; int main(void) { struct S s; s.a = 255; s.b = 511; s.c = 65535; s.d = 131071; s.e = -1; s.f = 4294967295U; return s.a == -1 && s.b == 255 && s.c == -1 && s.d == 65535 && s.e < 0 && s.f > 0; }' member-narrow-and-signed-values
-check 1 'struct S { long x; unsigned long y; long long z; unsigned long long w; }; int main(void) { struct S s; s.x = -4294967296L; s.y = 18446744073709551615UL; s.z = 1LL << 40; s.w = 1ULL << 63; return s.x < 0 && s.y >> 63 == 1 && s.z >> 40 == 1 && s.w >> 63 == 1; }' member-wide-values
-check 42 'struct I { char c; int x; }; struct O { char c; struct I inner; }; int main(void) { struct O o; struct O *p = &o; o.c = 1; p->inner.c = 2; o.inner.x = 39; return o.c + o.inner.c + p->inner.x; }' member-nested-struct
-check 42 'struct I { int x; }; struct O { char c; struct I *inner; }; int main(void) { struct I i; struct O o; struct O *p = &o; p->inner = &i; p->inner->x = 42; return o.inner->x; }' member-arrow-chain
-check 42 'struct Node { int value; struct Node *next; }; int main(void) { struct Node a; struct Node b; a.value = 20; b.value = 22; a.next = &b; b.next = 0; struct Node *p = &a; int sum = 0; while (p) { sum += p->value; p = p->next; } return sum; }' member-linked-list
-check 42 'struct S { char c; int values[3]; }; int main(void) { struct S s; struct S *p = &s; s.values[0] = 7; p->values[1] = 11; s.values[2] = 24; return s.values[0] + p->values[1] + s.values[2]; }' member-array-elements
-check 42 'struct S { int x; }; struct O { char c; struct S items[2]; }; int main(void) { struct O o; o.items[0].x = 7; o.items[1].x = 35; return o.items[0].x + o.items[1].x; }' member-array-of-struct
-check 42 'struct S { int x; }; int main(void) { struct S a[2]; a[0].x = 20; a[1].x = 22; struct S *p = a; return p->x + (p + 1)->x; }' member-struct-array-base
-check 42 'struct S { char c; int x; }; int main(void) { struct S s; int *p = &s.x; *p = 42; return (&s)->x; }' member-address-of-scalar
-check 42 'struct I { int x; }; struct O { char c; struct I inner; }; int main(void) { struct O o; struct I *p = &o.inner; p->x = 42; return o.inner.x; }' member-address-of-struct
-check 42 'struct S { int values[2]; }; int main(void) { struct S s; int *p = s.values; p[1] = 42; return (*(&s.values))[1]; }' member-array-decay-and-address
-check 1 'struct S { char c; int x; short y; }; int main(void) { struct S s; void *v = &s; char *base = v; v = &s.x; char *x = v; v = &s.y; char *y = v; return x - base == 4 && y - base == 8; }' member-layout-offsets
-check 1 'struct I { char c; long n; }; struct O { char c; struct I inner; char end; }; int main(void) { struct O o; void *v = &o; char *base = v; v = &o.inner.n; char *n = v; v = &o.end; char *end = v; return n - base == 16 && end - base == 24; }' member-nested-layout-offsets
-check 1 'struct S { char c; unsigned char u; short s; unsigned short t; int i; unsigned j; long l; unsigned long long q; }; int main(void) { struct S x; x.c = 126; x.u = 254; x.s = 100; x.t = 65534; x.i = 40; x.j = 40; x.l = 1L << 40; x.q = 1ULL << 63; return x.c++ == 126 && ++x.c == -128 && x.u++ == 254 && ++x.u == 0 && --x.s == 99 && x.t-- == 65534 && x.i++ == 40 && ++x.j == 41 && x.l++ == 1L << 40 && x.q-- == 1ULL << 63; }' member-increment-decrement
-check 42 'struct S { int x; int *p; }; int main(void) { struct S s; int a[2]; a[1] = 42; s.p = a; s.p++; return *s.p; }' member-pointer-increment
-check 1 'struct S { char x; }; int main(void) { struct S s; return (s.x = 255) == -1 && s.x == -1; }' member-assignment-result
-check 1 'struct S { int x; }; int main(void) { struct S s; struct S t; s.x = t.x = 42; return s.x == 42 && t.x == 42; }' member-chained-assignment
-check 1 'struct S { int x; }; int main(void) { struct S a[2]; int i = 0; a[i++].x = 41; i = 0; int old = a[i++].x++; return old == 41 && i == 1 && a[0].x == 42; }' member-index-evaluated-once
-check 1 'struct S { int x; }; struct S *get(struct S *p, int *n) { (*n)++; return p; } int main(void) { struct S s; int n = 0; get(&s, &n)->x = 41; int old = get(&s, &n)->x++; return n == 2 && old == 41 && s.x == 42; }' member-call-base-evaluated-once
-check 42 'struct S { char c; int x; }; int value(void) { return 42; } struct S *get(struct S *p) { return p; } int main(void) { struct S s; get(&s)->x = value(); return s.x; }' member-call-base-and-rhs
-check 42 'struct S { int x; }; int read(struct S *p) { return p->x; } int main(void) { struct S s; s.x = 42; return read(&s); }' member-pointer-parameter
-check 42 'struct S { int x; }; int last(int a, int b, int c, int d, int e, int f, int g) { return g; } int main(void) { struct S s; s.x = 42; return last(s.x, s.x, s.x, s.x, s.x, s.x, s.x); }' member-stack-call-argument
-check 42 'struct S { char *text; }; int main(void) { struct S s; s.text = "*"; return s.text[0]; }' member-string-pointer
-check 42 'int main(void) { struct { int x; } s; s.x = 42; return s.x; }' member-anonymous-struct
-check 42 'struct S { int x; }; int main(void) { struct S s; struct S t; s.x = 7; t.x = 42; int choose = 0; return (choose ? &s : &t)->x; }' member-conditional-pointer
-check 42 'struct S { int x; }; int main(void) { struct S s; s.x = 42; s.x; return (*(&s)).x; }' member-discarded-scalar
+check member-dot-and-arrow 42 'struct Point { int x; int y; }; int main(void) { struct Point p; struct Point *ptr = &p; p.x = 20; ptr->y = 22; return p.x + p.y; }'
+check member-narrow-and-signed-values 1 'struct S { char a; unsigned char b; short c; unsigned short d; int e; unsigned f; }; int main(void) { struct S s; s.a = 255; s.b = 511; s.c = 65535; s.d = 131071; s.e = -1; s.f = 4294967295U; return s.a == -1 && s.b == 255 && s.c == -1 && s.d == 65535 && s.e < 0 && s.f > 0; }'
+check member-wide-values 1 'struct S { long x; unsigned long y; long long z; unsigned long long w; }; int main(void) { struct S s; s.x = -4294967296L; s.y = 18446744073709551615UL; s.z = 1LL << 40; s.w = 1ULL << 63; return s.x < 0 && s.y >> 63 == 1 && s.z >> 40 == 1 && s.w >> 63 == 1; }'
+check member-nested-struct 42 'struct I { char c; int x; }; struct O { char c; struct I inner; }; int main(void) { struct O o; struct O *p = &o; o.c = 1; p->inner.c = 2; o.inner.x = 39; return o.c + o.inner.c + p->inner.x; }'
+check member-arrow-chain 42 'struct I { int x; }; struct O { char c; struct I *inner; }; int main(void) { struct I i; struct O o; struct O *p = &o; p->inner = &i; p->inner->x = 42; return o.inner->x; }'
+check member-linked-list 42 'struct Node { int value; struct Node *next; }; int main(void) { struct Node a; struct Node b; a.value = 20; b.value = 22; a.next = &b; b.next = 0; struct Node *p = &a; int sum = 0; while (p) { sum += p->value; p = p->next; } return sum; }'
+check member-array-elements 42 'struct S { char c; int values[3]; }; int main(void) { struct S s; struct S *p = &s; s.values[0] = 7; p->values[1] = 11; s.values[2] = 24; return s.values[0] + p->values[1] + s.values[2]; }'
+check member-array-of-struct 42 'struct S { int x; }; struct O { char c; struct S items[2]; }; int main(void) { struct O o; o.items[0].x = 7; o.items[1].x = 35; return o.items[0].x + o.items[1].x; }'
+check member-struct-array-base 42 'struct S { int x; }; int main(void) { struct S a[2]; a[0].x = 20; a[1].x = 22; struct S *p = a; return p->x + (p + 1)->x; }'
+check member-address-of-scalar 42 'struct S { char c; int x; }; int main(void) { struct S s; int *p = &s.x; *p = 42; return (&s)->x; }'
+check member-address-of-struct 42 'struct I { int x; }; struct O { char c; struct I inner; }; int main(void) { struct O o; struct I *p = &o.inner; p->x = 42; return o.inner.x; }'
+check member-array-decay-and-address 42 'struct S { int values[2]; }; int main(void) { struct S s; int *p = s.values; p[1] = 42; return (*(&s.values))[1]; }'
+check member-layout-offsets 1 'struct S { char c; int x; short y; }; int main(void) { struct S s; void *v = &s; char *base = v; v = &s.x; char *x = v; v = &s.y; char *y = v; return x - base == 4 && y - base == 8; }'
+check member-nested-layout-offsets 1 'struct I { char c; long n; }; struct O { char c; struct I inner; char end; }; int main(void) { struct O o; void *v = &o; char *base = v; v = &o.inner.n; char *n = v; v = &o.end; char *end = v; return n - base == 16 && end - base == 24; }'
+check member-increment-decrement 1 'struct S { char c; unsigned char u; short s; unsigned short t; int i; unsigned j; long l; unsigned long long q; }; int main(void) { struct S x; x.c = 126; x.u = 254; x.s = 100; x.t = 65534; x.i = 40; x.j = 40; x.l = 1L << 40; x.q = 1ULL << 63; return x.c++ == 126 && ++x.c == -128 && x.u++ == 254 && ++x.u == 0 && --x.s == 99 && x.t-- == 65534 && x.i++ == 40 && ++x.j == 41 && x.l++ == 1L << 40 && x.q-- == 1ULL << 63; }'
+check member-pointer-increment 42 'struct S { int x; int *p; }; int main(void) { struct S s; int a[2]; a[1] = 42; s.p = a; s.p++; return *s.p; }'
+check member-assignment-result 1 'struct S { char x; }; int main(void) { struct S s; return (s.x = 255) == -1 && s.x == -1; }'
+check member-chained-assignment 1 'struct S { int x; }; int main(void) { struct S s; struct S t; s.x = t.x = 42; return s.x == 42 && t.x == 42; }'
+check member-index-evaluated-once 1 'struct S { int x; }; int main(void) { struct S a[2]; int i = 0; a[i++].x = 41; i = 0; int old = a[i++].x++; return old == 41 && i == 1 && a[0].x == 42; }'
+check member-call-base-evaluated-once 1 'struct S { int x; }; struct S *get(struct S *p, int *n) { (*n)++; return p; } int main(void) { struct S s; int n = 0; get(&s, &n)->x = 41; int old = get(&s, &n)->x++; return n == 2 && old == 41 && s.x == 42; }'
+check member-call-base-and-rhs 42 'struct S { char c; int x; }; int value(void) { return 42; } struct S *get(struct S *p) { return p; } int main(void) { struct S s; get(&s)->x = value(); return s.x; }'
+check member-pointer-parameter 42 'struct S { int x; }; int read(struct S *p) { return p->x; } int main(void) { struct S s; s.x = 42; return read(&s); }'
+check member-stack-call-argument 42 'struct S { int x; }; int last(int a, int b, int c, int d, int e, int f, int g) { return g; } int main(void) { struct S s; s.x = 42; return last(s.x, s.x, s.x, s.x, s.x, s.x, s.x); }'
+check member-string-pointer 42 'struct S { char *text; }; int main(void) { struct S s; s.text = "*"; return s.text[0]; }'
+check member-anonymous-struct 42 'int main(void) { struct { int x; } s; s.x = 42; return s.x; }'
+check member-conditional-pointer 42 'struct S { int x; }; int main(void) { struct S s; struct S t; s.x = 7; t.x = 42; int choose = 0; return (choose ? &s : &t)->x; }'
+check member-discarded-scalar 42 'struct S { int x; }; int main(void) { struct S s; s.x = 42; s.x; return (*(&s)).x; }'
 
 # Struct member access syntax and operand checks.
 check_error member-dot-integer 'int main(void) { int x; return x.y; }' '1:33: error: '\''.'\'' requires a struct operand'
@@ -1977,85 +2103,85 @@ check_error member-array-increment 'struct S { int a[2]; }; int main(void) { str
 check_error member-struct-increment 'struct T { int x; }; struct S { struct T t; }; int main(void) { struct S s; ++s.t; return 0; }' '1:77: error: invalid increment target'
 check_error member-pointer-type 'struct S { char *p; }; int main(void) { struct S s; int *p = s.p; return 0; }' '1:58: error: incompatible initializer type'
 check_error member-array-address-type 'struct S { int a[2]; }; int main(void) { struct S s; int *p = &s.a; return 0; }' '1:59: error: incompatible initializer type'
-check 42 'struct S { int x; }; int main(void) { struct S s; s.x = 40; s.x += 2; return s.x; }' member-compound-assignment
+check member-compound-assignment 42 'struct S { int x; }; int main(void) { struct S s; s.x = 40; s.x += 2; return s.x; }'
 check_error member-address-rvalue 'struct S { int x; }; int main(void) { struct S s; int *p = &(s.x + 1); return 0; }' '1:60: error: invalid address-of target'
 
 # String literals have static storage and decay to pointers in value contexts.
-check 97 'int main(void) { return "abc"[0]; }' string-first-byte
-check 99 'int main(void) { return 2["abc"]; }' string-reversed-subscript
-check 0 'int main(void) { return "abc"[3]; }' string-final-terminator
-check 0 'int main(void) { return ""[0]; }' string-empty
-check 1 'int main(void) { char *p = "a\0b"; return p[0] == 97 && p[1] == 0 && p[2] == 98 && p[3] == 0; }' string-embedded-zero
-check 1 'int main(void) { char *p = "\n\t\r\a\b\f\v"; return p[0] == 10 && p[1] == 9 && p[2] == 13 && p[3] == 7 && p[4] == 8 && p[5] == 12 && p[6] == 11 && p[7] == 0; }' string-simple-escapes
-check 1 'int main(void) { char *p = "\"\\\?"; return p[0] == 34 && p[1] == 92 && p[2] == 63 && p[3] == 0; }' string-escaped-punctuation
-check 1 'int main(void) { char *p = "\101\x42\377\x80"; return p[0] == 65 && p[1] == 66 && p[2] == -1 && p[3] == -128 && p[4] == 0; }' string-numeric-escapes
-check 1 'int main(void) { char *p = "ab" /* concatenate */ "cd"; return p[0] == 97 && p[2] == 99 && p[3] == 100 && p[4] == 0; }' string-concatenation
-check 1 'int main(void) { char *p = "a\0" "b"; return p[0] == 97 && p[1] == 0 && p[2] == 98 && p[3] == 0; }' string-concatenated-zero
-check 1 'int main(void) { char *p = "\x4" "1"; return p[0] == 4 && p[1] == 49 && p[2] == 0; }' string-concatenated-escape-boundary
-check 1 'int main(void) { char *p = "" "" "a" ""; return p[0] == 97 && p[1] == 0; }' string-concatenated-empty
-check 1 'int main(void) { char *p = "0123456789abcdefXYZ"; return p[15] == 102 && p[16] == 88 && p[18] == 90 && p[19] == 0; }' string-multiple-byte-directives
-check 98 'int main(void) { char *p; p = "abc"; return *(p + 1); }' string-pointer-assignment
-check 98 'int main(void) { return (*(&"abc"))[1]; }' string-address-of-array
-check 99 'int main(void) { return (*(&"abc" + 1 - 1))[2]; }' string-pointer-to-array-arithmetic
-check 98 'int byte(char *p) { return p[1]; } int main(void) { return byte("abc"); }' string-call-argument
-check 98 'int byte(int a, int b, int c, int d, int e, int f, char *p) { return p[1]; } int main(void) { return byte(0,0,0,0,0,0,"abc"); }' string-stack-argument
-check 1 'char *text(void) { return "abc"; } int main(void) { char *p = text(); int i = 0; while (i++ < 3) { if (text() != p) return 0; } return p[2] == 99; }' string-static-lifetime
-check 1 'char *first(void) { return "abc"; } char *second(void) { return "xyz"; } int main(void) { return first()[0] == 97 && second()[0] == 120; }' string-labels-across-functions
-check 98 'int main(void) { char *p[2]; p[0] = "abc"; p[1] = "xyz"; return p[0][1]; }' string-pointer-array
-check 120 'int main(void) { return (0 ? "abc" : "xyz")[0]; }' string-conditional
-check 1 'int main(void) { if ("") return !!"abc" && ("x" || 0) && ("y" && 1); return 0; }' string-conditions
-check 98 'int main(void) { "discarded"; return (0, "abc")[1]; }' string-discarded-expression
-check 1 'int strcmp(char *a, char *b); int main(void) { return strcmp("hello", "hel" "lo") == 0 && strcmp("a", "b") < 0; }' string-libc-call
+check string-first-byte 97 'int main(void) { return "abc"[0]; }'
+check string-reversed-subscript 99 'int main(void) { return 2["abc"]; }'
+check string-final-terminator 0 'int main(void) { return "abc"[3]; }'
+check string-empty 0 'int main(void) { return ""[0]; }'
+check string-embedded-zero 1 'int main(void) { char *p = "a\0b"; return p[0] == 97 && p[1] == 0 && p[2] == 98 && p[3] == 0; }'
+check string-simple-escapes 1 'int main(void) { char *p = "\n\t\r\a\b\f\v"; return p[0] == 10 && p[1] == 9 && p[2] == 13 && p[3] == 7 && p[4] == 8 && p[5] == 12 && p[6] == 11 && p[7] == 0; }'
+check string-escaped-punctuation 1 'int main(void) { char *p = "\"\\\?"; return p[0] == 34 && p[1] == 92 && p[2] == 63 && p[3] == 0; }'
+check string-numeric-escapes 1 'int main(void) { char *p = "\101\x42\377\x80"; return p[0] == 65 && p[1] == 66 && p[2] == -1 && p[3] == -128 && p[4] == 0; }'
+check string-concatenation 1 'int main(void) { char *p = "ab" /* concatenate */ "cd"; return p[0] == 97 && p[2] == 99 && p[3] == 100 && p[4] == 0; }'
+check string-concatenated-zero 1 'int main(void) { char *p = "a\0" "b"; return p[0] == 97 && p[1] == 0 && p[2] == 98 && p[3] == 0; }'
+check string-concatenated-escape-boundary 1 'int main(void) { char *p = "\x4" "1"; return p[0] == 4 && p[1] == 49 && p[2] == 0; }'
+check string-concatenated-empty 1 'int main(void) { char *p = "" "" "a" ""; return p[0] == 97 && p[1] == 0; }'
+check string-multiple-byte-directives 1 'int main(void) { char *p = "0123456789abcdefXYZ"; return p[15] == 102 && p[16] == 88 && p[18] == 90 && p[19] == 0; }'
+check string-pointer-assignment 98 'int main(void) { char *p; p = "abc"; return *(p + 1); }'
+check string-address-of-array 98 'int main(void) { return (*(&"abc"))[1]; }'
+check string-pointer-to-array-arithmetic 99 'int main(void) { return (*(&"abc" + 1 - 1))[2]; }'
+check string-call-argument 98 'int byte(char *p) { return p[1]; } int main(void) { return byte("abc"); }'
+check string-stack-argument 98 'int byte(int a, int b, int c, int d, int e, int f, char *p) { return p[1]; } int main(void) { return byte(0,0,0,0,0,0,"abc"); }'
+check string-static-lifetime 1 'char *text(void) { return "abc"; } int main(void) { char *p = text(); int i = 0; while (i++ < 3) { if (text() != p) return 0; } return p[2] == 99; }'
+check string-labels-across-functions 1 'char *first(void) { return "abc"; } char *second(void) { return "xyz"; } int main(void) { return first()[0] == 97 && second()[0] == 120; }'
+check string-pointer-array 98 'int main(void) { char *p[2]; p[0] = "abc"; p[1] = "xyz"; return p[0][1]; }'
+check string-conditional 120 'int main(void) { return (0 ? "abc" : "xyz")[0]; }'
+check string-conditions 1 'int main(void) { if ("") return !!"abc" && ("x" || 0) && ("y" && 1); return 0; }'
+check string-discarded-expression 98 'int main(void) { "discarded"; return (0, "abc")[1]; }'
+check string-libc-call 1 'int strcmp(char *a, char *b); int main(void) { return strcmp("hello", "hel" "lo") == 0 && strcmp("a", "b") < 0; }'
 
 # Array expressions, element access, and pointer conversion.
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' 'long' 'unsigned long' 'long long' 'unsigned long long'; do
-    check 42 "int main(void) { $spec a[3]; a[0] = 7; a[1] = 11; a[2] = 24; return a[0] + a[1] + a[2]; }" "array-elements-$spec"
+    check "array-elements-$spec" 42 "int main(void) { $spec a[3]; a[0] = 7; a[1] = 11; a[2] = 24; return a[0] + a[1] + a[2]; }"
 done
-check 1 'int main(void) { char a[2]; a[0] = 255; a[1] = 42; return a[0] == -1 && a[1] == 42; }' array-signed-char
-check 1 'int main(void) { unsigned char a[2]; a[0] = 511; a[1] = 42; return a[0] == 255 && a[1] == 42; }' array-unsigned-char
-check 1 'int main(void) { short a[2]; a[0] = 65535; a[1] = 42; return a[0] == -1 && a[1] == 42; }' array-signed-short
-check 1 'int main(void) { unsigned short a[2]; a[0] = 131071; a[1] = 42; return a[0] == 65535 && a[1] == 42; }' array-unsigned-short
-check 1 'int main(void) { long long a[2]; a[0] = 1LL << 40; a[1] = -1; return a[0] >> 40 == 1 && a[1] < 0; }' array-wide-values
-check 1 'int main(void) { unsigned long long a[2]; a[0] = 18446744073709551615ULL; a[1] = 1ULL << 63; return a[0] / 2 == 9223372036854775807LL && a[1] >> 63 == 1; }' array-unsigned-wide-values
-check 42 'int main(void) { int a[3]; int *p = a; *(p + 2) = 42; return a[2]; }' array-pointer-initializer
-check 42 'int main(void) { int a[3]; int *p; p = a; p[1] = 42; return *(a + 1); }' array-pointer-assignment
-check 42 'int main(void) { int a[3]; 2[a] = 42; return a[2]; }' array-reversed-subscript
-check 42 'int main(void) { int a[3]; a[0] = 42; int *p = a + 2; long n = -2; return p[n]; }' array-negative-index
-check 42 'int main(void) { int a[3]; unsigned long n = 2; a[n] = 42; return a[2U]; }' array-unsigned-index
-check 1 'int main(void) { int a[3]; return a + 3 - a == 3 && (&a + 1) - &a == 1; }' array-pointer-scaling
-check 42 'int main(void) { int a[3]; (&a)[0][2] = 42; return (*(&a))[2]; }' array-address-preserves-type
-check 42 'int main(void) { int a[2]; int *p = &a[1]; *p = 42; return a[1]; }' array-element-address
-check 42 'int main(void) { int a[2]; int *p = (a); p[0] = 42; return (*(&(a)))[0]; }' array-parenthesized-address
-check 1 'int main(void) { int a[2]; a[0] = 40; a[1] = 42; return a[0]++ == 40 && ++a[0] == 42 && a[1]-- == 42 && --a[1] == 40; }' array-element-increment
-check 1 'int main(void) { int a[2]; int i = 0; a[i++] = 41; i = 0; return a[i++]++ == 41 && i == 1 && a[0] == 42; }' array-index-evaluated-once
-check 42 'int *base(int *p, int *n) { (*n)++; return p; } int main(void) { int a[2]; int n = 0; base(a, &n)[1] = 42; return n == 1 ? a[1] : 0; }' array-base-evaluated-once
-check 42 'int main(void) { int a[2]; a[0] = 7; a[1] = 42; int i = 0; return a[(i = 1, i)]; }' array-comma-index
-check 42 'int sum(int a[3]) { return a[0] + a[1] + a[2]; } int main(void) { int a[3]; a[0] = 7; a[1] = 11; a[2] = 24; return sum(a); }' array-call-argument
-check 42 'int f(); int main(void) { int a[1]; a[0] = 42; return f(a); } int f(int *p) { return p[0]; }' array-default-argument-conversion
-check 42 'int f(int x, int y, int z, int u, int v, int w, int *p) { return p[0]; } int main(void) { int a[1]; a[0] = 42; return f(0,0,0,0,0,0,a); }' array-stack-argument
-check 42 'int *id(int *p) { return p; } int main(void) { int a[2]; a[1] = 42; return id(a)[1]; }' array-subscript-call-result
-check 42 'void *id(void *p) { return p; } int main(void) { int a[1]; a[0] = 42; int *p = id(a); return *p; }' array-void-pointer-conversion
-check 42 'int main(void) { int a[2]; int b[2]; a[0] = 1; b[0] = 42; return (0 ? a : b)[0]; }' array-conditional-conversion
-check 42 'int main(void) { int a[2]; a[0] = 42; return (0, a)[0]; }' array-comma-conversion
-check 1 'int main(void) { int a[2]; return a == &a[0] && a != 0 && !!a && (a && a) && (0 || a); }' array-comparisons-and-logical
-check 42 'int main(void) { int a[1]; a[0] = 42; if (a) return a[0]; return 0; }' array-if-condition
-check 42 'int main(void) { char a[1]; a[0] = 42; return a ? a[0] : 0; }' array-conditional-condition
-check 42 'int main(void) { int a[1]; a[0] = 42; while (a) return a[0]; return 0; }' array-while-condition
-check 42 'int main(void) { int a[1]; a[0] = 42; for (; a;) return a[0]; return 0; }' array-for-condition
-check 1 'int main(void) { int a[1]; int n = 0; do { n++; } while (n < 2 && a); return n == 2; }' array-do-condition
-check 1 'int main(void) { int a[1]; int n = 0; do { if (++n == 2) return 1; } while (a); return 0; }' array-do-direct-condition
-check 42 'int main(void) { int a[2]; int b[2]; int *p[2]; p[0] = a; p[1] = b; p[1][1] = 42; return b[1]; }' array-pointer-elements
-check 42 'int main(void) { int a[2]; int *p[1]; p[0] = a; (*p)[1] = 42; return a[1]; }' array-pointer-element-deref
-check 42 'int main(void) { int a[2]; a[0] = 42; { int a[1]; a[0] = 7; } return a[0]; }' array-shadowing
-check 42 'int main(void) { char c = 7; int a[3]; char d = 9; long b[2]; a[2] = 12; b[1] = 14; return c + a[2] + d + b[1]; }' array-storage-separation
-check 42 'int main(void) { int a[1]; a; *(&a); a[0] = 42; return a[0]; }' array-discarded-expression
+check array-signed-char 1 'int main(void) { char a[2]; a[0] = 255; a[1] = 42; return a[0] == -1 && a[1] == 42; }'
+check array-unsigned-char 1 'int main(void) { unsigned char a[2]; a[0] = 511; a[1] = 42; return a[0] == 255 && a[1] == 42; }'
+check array-signed-short 1 'int main(void) { short a[2]; a[0] = 65535; a[1] = 42; return a[0] == -1 && a[1] == 42; }'
+check array-unsigned-short 1 'int main(void) { unsigned short a[2]; a[0] = 131071; a[1] = 42; return a[0] == 65535 && a[1] == 42; }'
+check array-wide-values 1 'int main(void) { long long a[2]; a[0] = 1LL << 40; a[1] = -1; return a[0] >> 40 == 1 && a[1] < 0; }'
+check array-unsigned-wide-values 1 'int main(void) { unsigned long long a[2]; a[0] = 18446744073709551615ULL; a[1] = 1ULL << 63; return a[0] / 2 == 9223372036854775807LL && a[1] >> 63 == 1; }'
+check array-pointer-initializer 42 'int main(void) { int a[3]; int *p = a; *(p + 2) = 42; return a[2]; }'
+check array-pointer-assignment 42 'int main(void) { int a[3]; int *p; p = a; p[1] = 42; return *(a + 1); }'
+check array-reversed-subscript 42 'int main(void) { int a[3]; 2[a] = 42; return a[2]; }'
+check array-negative-index 42 'int main(void) { int a[3]; a[0] = 42; int *p = a + 2; long n = -2; return p[n]; }'
+check array-unsigned-index 42 'int main(void) { int a[3]; unsigned long n = 2; a[n] = 42; return a[2U]; }'
+check array-pointer-scaling 1 'int main(void) { int a[3]; return a + 3 - a == 3 && (&a + 1) - &a == 1; }'
+check array-address-preserves-type 42 'int main(void) { int a[3]; (&a)[0][2] = 42; return (*(&a))[2]; }'
+check array-element-address 42 'int main(void) { int a[2]; int *p = &a[1]; *p = 42; return a[1]; }'
+check array-parenthesized-address 42 'int main(void) { int a[2]; int *p = (a); p[0] = 42; return (*(&(a)))[0]; }'
+check array-element-increment 1 'int main(void) { int a[2]; a[0] = 40; a[1] = 42; return a[0]++ == 40 && ++a[0] == 42 && a[1]-- == 42 && --a[1] == 40; }'
+check array-index-evaluated-once 1 'int main(void) { int a[2]; int i = 0; a[i++] = 41; i = 0; return a[i++]++ == 41 && i == 1 && a[0] == 42; }'
+check array-base-evaluated-once 42 'int *base(int *p, int *n) { (*n)++; return p; } int main(void) { int a[2]; int n = 0; base(a, &n)[1] = 42; return n == 1 ? a[1] : 0; }'
+check array-comma-index 42 'int main(void) { int a[2]; a[0] = 7; a[1] = 42; int i = 0; return a[(i = 1, i)]; }'
+check array-call-argument 42 'int sum(int a[3]) { return a[0] + a[1] + a[2]; } int main(void) { int a[3]; a[0] = 7; a[1] = 11; a[2] = 24; return sum(a); }'
+check array-default-argument-conversion 42 'int f(); int main(void) { int a[1]; a[0] = 42; return f(a); } int f(int *p) { return p[0]; }'
+check array-stack-argument 42 'int f(int x, int y, int z, int u, int v, int w, int *p) { return p[0]; } int main(void) { int a[1]; a[0] = 42; return f(0,0,0,0,0,0,a); }'
+check array-subscript-call-result 42 'int *id(int *p) { return p; } int main(void) { int a[2]; a[1] = 42; return id(a)[1]; }'
+check array-void-pointer-conversion 42 'void *id(void *p) { return p; } int main(void) { int a[1]; a[0] = 42; int *p = id(a); return *p; }'
+check array-conditional-conversion 42 'int main(void) { int a[2]; int b[2]; a[0] = 1; b[0] = 42; return (0 ? a : b)[0]; }'
+check array-comma-conversion 42 'int main(void) { int a[2]; a[0] = 42; return (0, a)[0]; }'
+check array-comparisons-and-logical 1 'int main(void) { int a[2]; return a == &a[0] && a != 0 && !!a && (a && a) && (0 || a); }'
+check array-if-condition 42 'int main(void) { int a[1]; a[0] = 42; if (a) return a[0]; return 0; }'
+check array-conditional-condition 42 'int main(void) { char a[1]; a[0] = 42; return a ? a[0] : 0; }'
+check array-while-condition 42 'int main(void) { int a[1]; a[0] = 42; while (a) return a[0]; return 0; }'
+check array-for-condition 42 'int main(void) { int a[1]; a[0] = 42; for (; a;) return a[0]; return 0; }'
+check array-do-condition 1 'int main(void) { int a[1]; int n = 0; do { n++; } while (n < 2 && a); return n == 2; }'
+check array-do-direct-condition 1 'int main(void) { int a[1]; int n = 0; do { if (++n == 2) return 1; } while (a); return 0; }'
+check array-pointer-elements 42 'int main(void) { int a[2]; int b[2]; int *p[2]; p[0] = a; p[1] = b; p[1][1] = 42; return b[1]; }'
+check array-pointer-element-deref 42 'int main(void) { int a[2]; int *p[1]; p[0] = a; (*p)[1] = 42; return a[1]; }'
+check array-shadowing 42 'int main(void) { int a[2]; a[0] = 42; { int a[1]; a[0] = 7; } return a[0]; }'
+check array-storage-separation 42 'int main(void) { char c = 7; int a[3]; char d = 9; long b[2]; a[2] = 12; b[1] = 14; return c + a[2] + d + b[1]; }'
+check array-discarded-expression 42 'int main(void) { int a[1]; a; *(&a); a[0] = 42; return a[0]; }'
 
 check_error array-assignment 'int main(void) { int a[2]; int b[2]; a = b; return 0; }' '1:40: error: invalid assignment target'
 check_error array-indirect-assignment 'int main(void) { int a[2]; (*(&a)) = a; return 0; }' '1:36: error: invalid assignment target'
 check_error array-prefix-increment 'int main(void) { int a[2]; ++a; return 0; }' '1:28: error: invalid increment target'
 check_error array-postfix-decrement 'int main(void) { int a[2]; a--; return 0; }' '1:29: error: invalid decrement target'
 check_error array-compound-assignment 'int main(void) { int a[2]; a += 1; return 0; }' '1:30: error: invalid assignment target'
-check 42 'int main(void) { int a[2]; a[0] = 40; a[0] += 2; return a[0]; }' array-compound-element-assignment
+check array-compound-element-assignment 42 'int main(void) { int a[2]; a[0] = 40; a[0] += 2; return a[0]; }'
 check_error array-invalid-subscript 'int main(void) { int a[2]; int b[2]; return a[b]; }' '1:46: error: subscript requires a pointer and an integer'
 check_error array-integer-subscript 'int main(void) { return 1[2]; }' '1:26: error: subscript requires a pointer and an integer'
 check_error array-void-subscript 'void f(void); int main(void) { int a[2]; return a[f()]; }' '1:50: error: subscript requires a pointer and an integer'
@@ -2069,26 +2195,26 @@ check_error array-call-type-mismatch 'int f(char *p); int main(void) { int a[2];
 check_error array-incompatible-subtraction 'int main(void) { int a[2]; char b[2]; return a - b; }' '1:48: error: pointer subtraction requires compatible types'
 
 # Long long literal types and boundaries.
-check 1 'int main(void) { return 1LL << 40 == 1099511627776L; }' literal-long-long-width
-check 1 'int main(void) { return 1LL - 2 < 0 && 0ll == 0; }' literal-long-long-signed
-check 1 'int main(void) { return 1ULL - 2 > 0 && 0llu - 1 == 18446744073709551615ULL; }' literal-unsigned-long-long-type
-check 1 'int main(void) { long long x = 9223372036854775807LL; return x >> 62 == 1 && x > 2147483647; }' literal-long-long-max
-check 1 'int main(void) { long long x = -9223372036854775807LL - 1; return x >> 63 == -1 && x < 0; }' literal-long-long-min
-check 1 'int main(void) { unsigned long long x = 18446744073709551615ULL; return x / 2 == 9223372036854775807LL && x + 1 == 0; }' literal-unsigned-long-long-max
-check 1 'int main(void) { return 037777777777LL > -1 && 040000000000LL >> 32 == 1; }' literal-octal-long-long-small
-check 1 'int main(void) { return 0777777777777777777777LL == 9223372036854775807LL; }' literal-octal-long-long-max
-check 1 'int main(void) { return 01000000000000000000000LL >> 63 == 1 && 01000000000000000000000LL > 0; }' literal-octal-long-long-unsigned-fallback
-check 1 'int main(void) { return 01777777777777777777777ll == 18446744073709551615ULL; }' literal-octal-long-long-unsigned-max
-check 1 'int main(void) { return -1LL < 1U && -1LL > 1UL && -1L > 1ULL; }' literal-long-long-mixed-signedness
-check 1 'int main(void) { return (1 ? -1LL : 1U) < 0 && (1 ? -1LL : 1UL) > 0; }' literal-long-long-conditional-type
-check 1 'int main(void) { unsigned u = 18446744073709551615ULL; short s = 65535LL; return u == 4294967295U && s == -1; }' literal-long-long-narrow-conversions
-check 1 'long long f(long long x) { return x; } int main(void) { return f(9223372036854775807LL) == 9223372036854775807LL; }' literal-long-long-call
-check 1 'unsigned long long f(int a, int b, int c, int d, int e, int f, unsigned long long g) { return g; } int main(void) { return f(1,2,3,4,5,6,18446744073709551615ULL) == 18446744073709551615ULL; }' literal-long-long-stack-argument
-check 42 'int main(void) { switch (9223372036854775807LL) { case 9223372036854775807LL: return 42; default: return 0; } }' case-long-long-max
-check 42 'int main(void) { switch (-9223372036854775807LL - 1) { case -9223372036854775807LL - 1: return 42; default: return 0; } }' case-long-long-min
-check 42 'int main(void) { switch (0) { case 18446744073709551615ULL + 1: return 42; default: return 0; } }' case-long-long-wraparound
-check 42 'int main(void) { switch (1) { case -1LL < 1U: return 42; default: return 0; } }' case-long-long-mixed-signedness
-check 1 'int main(void) { int *p = 18446744073709551615ULL + 1; return p == 0; }' literal-long-long-null-constant
+check literal-long-long-width 1 'int main(void) { return 1LL << 40 == 1099511627776L; }'
+check literal-long-long-signed 1 'int main(void) { return 1LL - 2 < 0 && 0ll == 0; }'
+check literal-unsigned-long-long-type 1 'int main(void) { return 1ULL - 2 > 0 && 0llu - 1 == 18446744073709551615ULL; }'
+check literal-long-long-max 1 'int main(void) { long long x = 9223372036854775807LL; return x >> 62 == 1 && x > 2147483647; }'
+check literal-long-long-min 1 'int main(void) { long long x = -9223372036854775807LL - 1; return x >> 63 == -1 && x < 0; }'
+check literal-unsigned-long-long-max 1 'int main(void) { unsigned long long x = 18446744073709551615ULL; return x / 2 == 9223372036854775807LL && x + 1 == 0; }'
+check literal-octal-long-long-small 1 'int main(void) { return 037777777777LL > -1 && 040000000000LL >> 32 == 1; }'
+check literal-octal-long-long-max 1 'int main(void) { return 0777777777777777777777LL == 9223372036854775807LL; }'
+check literal-octal-long-long-unsigned-fallback 1 'int main(void) { return 01000000000000000000000LL >> 63 == 1 && 01000000000000000000000LL > 0; }'
+check literal-octal-long-long-unsigned-max 1 'int main(void) { return 01777777777777777777777ll == 18446744073709551615ULL; }'
+check literal-long-long-mixed-signedness 1 'int main(void) { return -1LL < 1U && -1LL > 1UL && -1L > 1ULL; }'
+check literal-long-long-conditional-type 1 'int main(void) { return (1 ? -1LL : 1U) < 0 && (1 ? -1LL : 1UL) > 0; }'
+check literal-long-long-narrow-conversions 1 'int main(void) { unsigned u = 18446744073709551615ULL; short s = 65535LL; return u == 4294967295U && s == -1; }'
+check literal-long-long-call 1 'long long f(long long x) { return x; } int main(void) { return f(9223372036854775807LL) == 9223372036854775807LL; }'
+check literal-long-long-stack-argument 1 'unsigned long long f(int a, int b, int c, int d, int e, int f, unsigned long long g) { return g; } int main(void) { return f(1,2,3,4,5,6,18446744073709551615ULL) == 18446744073709551615ULL; }'
+check case-long-long-max 42 'int main(void) { switch (9223372036854775807LL) { case 9223372036854775807LL: return 42; default: return 0; } }'
+check case-long-long-min 42 'int main(void) { switch (-9223372036854775807LL - 1) { case -9223372036854775807LL - 1: return 42; default: return 0; } }'
+check case-long-long-wraparound 42 'int main(void) { switch (0) { case 18446744073709551615ULL + 1: return 42; default: return 0; } }'
+check case-long-long-mixed-signedness 42 'int main(void) { switch (1) { case -1LL < 1U: return 42; default: return 0; } }'
+check literal-long-long-null-constant 1 'int main(void) { int *p = 18446744073709551615ULL + 1; return p == 0; }'
 check_error literal-over-signed-long-long 'int main(void) { return 9223372036854775808LL; }' '1:25: error: integer literal out of range for supported signed types'
 check_error literal-negative-over-signed-long-long 'int main(void) { return -9223372036854775808ll; }' '1:26: error: integer literal out of range for supported signed types'
 check_error literal-over-uint64-long-long 'int main(void) { return 18446744073709551616ULL; }' '1:25: error: integer literal out of range for 64-bit unsigned integer'
@@ -2098,51 +2224,51 @@ check_error case-long-long-overflow-div 'int main(void) { switch (0) { case (-92
 check_error case-long-long-duplicate 'int main(void) { switch (0ULL) { case -1LL: return 1; case 18446744073709551615ULL: return 2; } return 0; }' '1:55: error: duplicate case value'
 
 # Integer literal ranges, suffix types, and 64-bit constant expressions.
-check 1 'int main(void) { return 2147483648 > -1; }' literal-decimal-above-int
-check 1 'int main(void) { return 4294967295 > -1 && ~4294967295 == -4294967296L; }' literal-decimal-uses-long
-check 1 'int main(void) { return -2147483648 < 0U; }' literal-minus-is-separate-operator
-check 1 'int main(void) { return 1U - 2 > 0 && 4294967295U + 1 == 0; }' literal-unsigned-int-type
-check 1 'int main(void) { return 4294967296U >> 32 == 1 && 4294967296U > -1L == 0; }' literal-unsigned-promotes-to-long
-check 1 'int main(void) { return 1L << 40 == 1099511627776; }' literal-long-suffix-width
-check 1 'int main(void) { return 1UL - 2 > 9223372036854775807L; }' literal-unsigned-long-suffix
-check 1 'int main(void) { return 037777777777 > -1 == 0 && ~037777777777 == 0U; }' literal-octal-unsigned-int-type
-check 1 'int main(void) { return 040000000000 > -1 && 040000000000 >> 32 == 1; }' literal-octal-long-type
-check 1 'int main(void) { return 037777777777L > -1 && 037777777777L >> 32 == 0; }' literal-octal-long-suffix
-check 1 'int main(void) { return 01000000000000000000000 >> 63 == 1; }' literal-octal-unsigned-long-type
-check 1 'int main(void) { return 01777777777777777777777 == 18446744073709551615UL; }' literal-octal-unsigned-long-max
-check 1 'int main(void) { return 01000000000000000000000L > 0; }' literal-octal-long-selects-unsigned
-check 1 'int main(void) { long x = 9223372036854775807; return x > 2147483647 && x >> 62 == 1; }' literal-long-max
-check 1 'int main(void) { long x = -9223372036854775807L - 1; return x < 0 && x >> 63 == -1; }' literal-long-min
-check 1 'int main(void) { unsigned long x = 18446744073709551615U; return x / 2 == 9223372036854775807L && x + 1 == 0; }' literal-unsigned-long-max
-check 1 'int main(void) { return 18446744073709551615ul == 18446744073709551615LU; }' literal-suffix-case-order-large
-check 1 'int main(void) { unsigned short s = 4294967295U; unsigned u = 18446744073709551615UL; return s == 65535 && u == 4294967295U; }' literal-narrow-conversions
-check 1 'long f(long x) { return x; } int main(void) { return f(4294967296L) == 4294967296L; }' literal-long-call
-check 1 'unsigned long f(int a, int b, int c, int d, int e, int f, unsigned long g) { return g; } int main(void) { return f(1,2,3,4,5,6,18446744073709551615UL) == 18446744073709551615UL; }' literal-wide-stack-argument
-check 42 'int main(void) { long x = 4294967296L; switch (x) { case 4294967296L: return 42; default: return 0; } }' case-long-literal
-check 42 'int main(void) { unsigned long x = 18446744073709551615UL; switch (x) { case 18446744073709551615UL: return 42; default: return 0; } }' case-unsigned-long-literal
-check 42 'int main(void) { long x = -9223372036854775807L - 1; switch (x) { case -9223372036854775807L - 1: return 42; default: return 0; } }' case-long-min
-check 42 'int main(void) { switch (0) { case 18446744073709551615UL + 1: return 42; default: return 0; } }' case-unsigned-long-add-wrap
-check 42 'int main(void) { unsigned long x = 18446744073709551615UL; switch (x) { case 0UL - 1: return 42; default: return 0; } }' case-unsigned-long-subtract-wrap
-check 42 'int main(void) { switch (1) { case 18446744073709551615UL * 18446744073709551615UL: return 42; default: return 0; } }' case-unsigned-long-multiply-wrap
-check 42 'int main(void) { long x = 9223372032559808512L; switch (x) { case 4294967296L * 2147483647: return 42; default: return 0; } }' case-long-multiply
-check 42 'int main(void) { long x = -9223372036854775807L - 1; switch (x) { case (-9223372036854775807L - 1) * 1: return 42; default: return 0; } }' case-long-min-multiply
-check 42 'int main(void) { long x = 9223372036854775807L; switch (x) { case 18446744073709551615UL / 2: return 42; default: return 0; } }' case-unsigned-long-division
-check 42 'int main(void) { switch (1) { case 18446744073709551615UL % 7: return 42; default: return 0; } }' case-unsigned-long-remainder
-check 42 'int main(void) { switch (-1) { case -4294967297L / 4294967296L: return 42; default: return 0; } }' case-long-negative-division
-check 42 'int main(void) { long x = -9223372036854775807L - 1; switch (x) { case -9223372036854775807L + -1L: return 42; default: return 0; } }' case-long-add-negative
-check 42 'int main(void) { switch (-1) { case (-9223372036854775807L - 1) + 9223372036854775807L: return 42; default: return 0; } }' case-long-add-min-max
-check 42 'int main(void) { switch (0) { case 9223372036854775807L - 9223372036854775807L: return 42; default: return 0; } }' case-long-subtract
-check 42 'int main(void) { unsigned long x = 9223372036854775808UL; switch (x) { case 1UL << 63: return 42; default: return 0; } }' case-long-shift-63
-check 42 'int main(void) { switch (1) { case 18446744073709551615UL >> 63: return 42; default: return 0; } }' case-unsigned-long-right-shift
-check 42 'int main(void) { switch (-1) { case -1L >> 63: return 42; default: return 0; } }' case-long-signed-right-shift
-check 42 'int main(void) { long x = 1099511627776L; switch (x) { case 1L << 40: return 42; default: return 0; } }' case-long-left-shift
-check 42 'int main(void) { switch (1) { case 18446744073709551615UL > 9223372036854775807L: return 42; default: return 0; } }' case-unsigned-long-comparison
-check 42 'int main(void) { switch (0) { case 18446744073709551615UL < 1UL: return 42; default: return 0; } }' case-unsigned-long-comparison-false
-check 42 'int main(void) { switch (-1) { case ~0UL: return 42; default: return 0; } }' case-unsigned-long-narrow
-check 42 'int main(void) { switch (0) { case ~18446744073709551615UL: return 42; default: return 0; } }' case-unsigned-long-not
-check 42 'int main(void) { switch (1) { case -18446744073709551615UL: return 42; default: return 0; } }' case-unsigned-long-negate
-check 42 'int main(void) { switch (0) { case 0 && (9223372036854775807L + 1L): return 42; default: return 0; } }' case-long-overflow-short-circuit
-check 1 'int main(void) { int *p = 18446744073709551615UL + 1; return p == 0; }' literal-unsigned-long-null-constant
+check literal-decimal-above-int 1 'int main(void) { return 2147483648 > -1; }'
+check literal-decimal-uses-long 1 'int main(void) { return 4294967295 > -1 && ~4294967295 == -4294967296L; }'
+check literal-minus-is-separate-operator 1 'int main(void) { return -2147483648 < 0U; }'
+check literal-unsigned-int-type 1 'int main(void) { return 1U - 2 > 0 && 4294967295U + 1 == 0; }'
+check literal-unsigned-promotes-to-long 1 'int main(void) { return 4294967296U >> 32 == 1 && 4294967296U > -1L == 0; }'
+check literal-long-suffix-width 1 'int main(void) { return 1L << 40 == 1099511627776; }'
+check literal-unsigned-long-suffix 1 'int main(void) { return 1UL - 2 > 9223372036854775807L; }'
+check literal-octal-unsigned-int-type 1 'int main(void) { return 037777777777 > -1 == 0 && ~037777777777 == 0U; }'
+check literal-octal-long-type 1 'int main(void) { return 040000000000 > -1 && 040000000000 >> 32 == 1; }'
+check literal-octal-long-suffix 1 'int main(void) { return 037777777777L > -1 && 037777777777L >> 32 == 0; }'
+check literal-octal-unsigned-long-type 1 'int main(void) { return 01000000000000000000000 >> 63 == 1; }'
+check literal-octal-unsigned-long-max 1 'int main(void) { return 01777777777777777777777 == 18446744073709551615UL; }'
+check literal-octal-long-selects-unsigned 1 'int main(void) { return 01000000000000000000000L > 0; }'
+check literal-long-max 1 'int main(void) { long x = 9223372036854775807; return x > 2147483647 && x >> 62 == 1; }'
+check literal-long-min 1 'int main(void) { long x = -9223372036854775807L - 1; return x < 0 && x >> 63 == -1; }'
+check literal-unsigned-long-max 1 'int main(void) { unsigned long x = 18446744073709551615U; return x / 2 == 9223372036854775807L && x + 1 == 0; }'
+check literal-suffix-case-order-large 1 'int main(void) { return 18446744073709551615ul == 18446744073709551615LU; }'
+check literal-narrow-conversions 1 'int main(void) { unsigned short s = 4294967295U; unsigned u = 18446744073709551615UL; return s == 65535 && u == 4294967295U; }'
+check literal-long-call 1 'long f(long x) { return x; } int main(void) { return f(4294967296L) == 4294967296L; }'
+check literal-wide-stack-argument 1 'unsigned long f(int a, int b, int c, int d, int e, int f, unsigned long g) { return g; } int main(void) { return f(1,2,3,4,5,6,18446744073709551615UL) == 18446744073709551615UL; }'
+check case-long-literal 42 'int main(void) { long x = 4294967296L; switch (x) { case 4294967296L: return 42; default: return 0; } }'
+check case-unsigned-long-literal 42 'int main(void) { unsigned long x = 18446744073709551615UL; switch (x) { case 18446744073709551615UL: return 42; default: return 0; } }'
+check case-long-min 42 'int main(void) { long x = -9223372036854775807L - 1; switch (x) { case -9223372036854775807L - 1: return 42; default: return 0; } }'
+check case-unsigned-long-add-wrap 42 'int main(void) { switch (0) { case 18446744073709551615UL + 1: return 42; default: return 0; } }'
+check case-unsigned-long-subtract-wrap 42 'int main(void) { unsigned long x = 18446744073709551615UL; switch (x) { case 0UL - 1: return 42; default: return 0; } }'
+check case-unsigned-long-multiply-wrap 42 'int main(void) { switch (1) { case 18446744073709551615UL * 18446744073709551615UL: return 42; default: return 0; } }'
+check case-long-multiply 42 'int main(void) { long x = 9223372032559808512L; switch (x) { case 4294967296L * 2147483647: return 42; default: return 0; } }'
+check case-long-min-multiply 42 'int main(void) { long x = -9223372036854775807L - 1; switch (x) { case (-9223372036854775807L - 1) * 1: return 42; default: return 0; } }'
+check case-unsigned-long-division 42 'int main(void) { long x = 9223372036854775807L; switch (x) { case 18446744073709551615UL / 2: return 42; default: return 0; } }'
+check case-unsigned-long-remainder 42 'int main(void) { switch (1) { case 18446744073709551615UL % 7: return 42; default: return 0; } }'
+check case-long-negative-division 42 'int main(void) { switch (-1) { case -4294967297L / 4294967296L: return 42; default: return 0; } }'
+check case-long-add-negative 42 'int main(void) { long x = -9223372036854775807L - 1; switch (x) { case -9223372036854775807L + -1L: return 42; default: return 0; } }'
+check case-long-add-min-max 42 'int main(void) { switch (-1) { case (-9223372036854775807L - 1) + 9223372036854775807L: return 42; default: return 0; } }'
+check case-long-subtract 42 'int main(void) { switch (0) { case 9223372036854775807L - 9223372036854775807L: return 42; default: return 0; } }'
+check case-long-shift-63 42 'int main(void) { unsigned long x = 9223372036854775808UL; switch (x) { case 1UL << 63: return 42; default: return 0; } }'
+check case-unsigned-long-right-shift 42 'int main(void) { switch (1) { case 18446744073709551615UL >> 63: return 42; default: return 0; } }'
+check case-long-signed-right-shift 42 'int main(void) { switch (-1) { case -1L >> 63: return 42; default: return 0; } }'
+check case-long-left-shift 42 'int main(void) { long x = 1099511627776L; switch (x) { case 1L << 40: return 42; default: return 0; } }'
+check case-unsigned-long-comparison 42 'int main(void) { switch (1) { case 18446744073709551615UL > 9223372036854775807L: return 42; default: return 0; } }'
+check case-unsigned-long-comparison-false 42 'int main(void) { switch (0) { case 18446744073709551615UL < 1UL: return 42; default: return 0; } }'
+check case-unsigned-long-narrow 42 'int main(void) { switch (-1) { case ~0UL: return 42; default: return 0; } }'
+check case-unsigned-long-not 42 'int main(void) { switch (0) { case ~18446744073709551615UL: return 42; default: return 0; } }'
+check case-unsigned-long-negate 42 'int main(void) { switch (1) { case -18446744073709551615UL: return 42; default: return 0; } }'
+check case-long-overflow-short-circuit 42 'int main(void) { switch (0) { case 0 && (9223372036854775807L + 1L): return 42; default: return 0; } }'
+check literal-unsigned-long-null-constant 1 'int main(void) { int *p = 18446744073709551615UL + 1; return p == 0; }'
 
 check_error literal-over-uint64 'int main(void) { return 18446744073709551616UL; }' '1:25: error: integer literal out of range for 64-bit unsigned integer'
 check_error literal-over-uint64-no-suffix 'int main(void) { return 18446744073709551616; }' '1:25: error: integer literal out of range for 64-bit unsigned integer'
@@ -2165,69 +2291,69 @@ check_error case-long-duplicate-after-conversion 'int main(void) { switch (0) { 
 check_error case-unsigned-long-duplicate 'int main(void) { unsigned long x = 0; switch (x) { case -1: return 1; case 18446744073709551615UL: return 2; } return 0; }' '1:71: error: duplicate case value'
 
 # Full unsigned short int and unsigned long int spellings.
-check 1 'int main(void) { unsigned short int x = -1; return x == 65535 && x + 1 == 65536; }' unsigned-short-int-promotion
-check 1 'int main(void) { unsigned short int x = 65537; x += 65535; return x == 0; }' unsigned-short-int-truncation
-check 1 'int main(void) { unsigned short int guard = 42; unsigned short int x = 0; unsigned short int *p = &x; return (*p = -1) == 65535 && x == 65535 && guard == 42; }' unsigned-short-int-pointer-store
-check 1 'unsigned short int id(unsigned short int); unsigned short int id(unsigned short int x) { return x; } int main(void) { return id(-1) == 65535 && id(65536) == 0; }' unsigned-short-int-function-signature
-check 1 'int main(void) { unsigned long int x = 1; x <<= 40; return x >> 40 == 1; }' unsigned-long-int-width
-check 1 'int main(void) { unsigned long int x = -1; return x + 1 == 0 && x / 2 >> 62 == 1; }' unsigned-long-int-arithmetic
-check 1 'unsigned long int *id(unsigned long int *p) { return p; } int main(void) { unsigned long int x = 1; x <<= 40; unsigned long int y = x; *id(&x) = x + 7; return x == y + 7; }' unsigned-long-int-pointer-store
-check 1 'unsigned long int id(unsigned long int); unsigned long int id(unsigned long int x) { return x; } int main(void) { unsigned long int x = 1; x <<= 40; return id(x) == x && id(-1) >> 63 == 1; }' unsigned-long-int-function-signature
-check 1 'unsigned long int f(int a, int b, int c, int d, int e, int f, unsigned short int g, unsigned long int h) { return g + h; } int main(void) { unsigned long int x = 1; x <<= 40; return f(1,2,3,4,5,6,-1,x) == x + 65535; }' unsigned-short-long-int-stack-arguments
+check unsigned-short-int-promotion 1 'int main(void) { unsigned short int x = -1; return x == 65535 && x + 1 == 65536; }'
+check unsigned-short-int-truncation 1 'int main(void) { unsigned short int x = 65537; x += 65535; return x == 0; }'
+check unsigned-short-int-pointer-store 1 'int main(void) { unsigned short int guard = 42; unsigned short int x = 0; unsigned short int *p = &x; return (*p = -1) == 65535 && x == 65535 && guard == 42; }'
+check unsigned-short-int-function-signature 1 'unsigned short int id(unsigned short int); unsigned short int id(unsigned short int x) { return x; } int main(void) { return id(-1) == 65535 && id(65536) == 0; }'
+check unsigned-long-int-width 1 'int main(void) { unsigned long int x = 1; x <<= 40; return x >> 40 == 1; }'
+check unsigned-long-int-arithmetic 1 'int main(void) { unsigned long int x = -1; return x + 1 == 0 && x / 2 >> 62 == 1; }'
+check unsigned-long-int-pointer-store 1 'unsigned long int *id(unsigned long int *p) { return p; } int main(void) { unsigned long int x = 1; x <<= 40; unsigned long int y = x; *id(&x) = x + 7; return x == y + 7; }'
+check unsigned-long-int-function-signature 1 'unsigned long int id(unsigned long int); unsigned long int id(unsigned long int x) { return x; } int main(void) { unsigned long int x = 1; x <<= 40; return id(x) == x && id(-1) >> 63 == 1; }'
+check unsigned-short-long-int-stack-arguments 1 'unsigned long int f(int a, int b, int c, int d, int e, int f, unsigned short int g, unsigned long int h) { return g + h; } int main(void) { unsigned long int x = 1; x <<= 40; return f(1,2,3,4,5,6,-1,x) == x + 65535; }'
 
 # Short storage, conversions, and promotions use the target's 16-bit width.
-check 1 'int main(void) { short s = 32767; return s == 32767; }' short-load
-check 1 'int main(void) { short s = -32768; return s == -32768 && s < 0; }' short-sign-extension
-check 1 'int main(void) { unsigned short s = 65535; return s == 65535 && s > 0; }' unsigned-short-zero-extension
-check 1 'int main(void) { short s = 65535; return s == -1; }' short-initializer-truncate
-check 1 'int main(void) { unsigned short s = -1; return s == 65535; }' unsigned-short-initializer-truncate
-check 1 'int main(void) { short s = 65536; unsigned short u = 65537; return s == 0 && u == 1; }' short-initializer-wrap
-check 1 'int main(void) { short s = 0; unsigned short u = 0; return (s = 65535) == -1 && (u = -1) == 65535; }' short-assignment-result
-check 1 'int main(void) { int guard = 42; short a = -1; short b = 7; b = 9; return guard == 42 && a == -1 && b == 9; }' short-adjacent-stores
-check 1 'int main(void) { char a = 42; short b = -1; char c = 7; short d = 9; d = -2; return a == 42 && b == -1 && c == 7 && d == -2; }' short-mixed-local-layout
-check 1 'int main(void) { unsigned short s = 65535; return s + 1 == 65536 && s > -1; }' unsigned-short-integer-promotion
-check 1 'int main(void) { unsigned short s = 65535; return -s == -65535 && ~s == -65536; }' unsigned-short-unary-promotion
-check 1 'int main(void) { short s = -32768; return -s == 32768 && s / -1 == 32768; }' short-unary-division-promotion
-check 1 'int main(void) { short s = -1; unsigned short u = 65535; return u + s == 65534 && u > s; }' short-mixed-signs
-check 1 'int main(void) { unsigned short s = 65535; unsigned u = -1; return s < u && s + u == 65534; }' short-unsigned-common-type
-check 1 'int main(void) { unsigned short s = 65535; return (1 ? s : -1) == 65535 && (0 ? s : -1) < 0; }' short-conditional-promotion
-check 1 'int main(void) { short s = -1; unsigned short u = 65535; long a = s; long b = u; return a == -1 && b == 65535; }' short-widen-long
-check 1 'int main(void) { long x = 1; x <<= 40; short s = x + 65535; unsigned short u = x + 65537; return s == -1 && u == 1; }' long-narrow-short
-check 1 'int main(void) { unsigned x = -1; short s = x; unsigned short u = x; return s == -1 && u == 65535; }' unsigned-int-narrow-short
-check 1 'int main(void) { short s = -1; char c = s; unsigned char u = s; unsigned short v = c; return c == -1 && u == 255 && v == 65535; }' short-char-conversions
-check 1 'int main(void) { short s = 32767; s += 1; s -= 1; return s == 32767; }' short-compound-truncate
-check 1 'int main(void) { unsigned short s = 65535; s += 1; s -= 1; s *= 2; s /= 2; s %= 7; return s == 0; }' short-compound-arithmetic
-check 1 'int main(void) { unsigned short s = 65535; s <<= 1; s >>= 1; s |= 7; s ^= 8; s &= 255; return s == 247; }' short-compound-bitwise
-check 1 'int main(void) { short s = 32767; return s++ == 32767 && s == -32768 && --s == 32767 && ++s == -32768 && s-- == -32768 && s == 32767; }' short-increment-boundaries
-check 1 'int main(void) { unsigned short s = 65535; return s++ == 65535 && s == 0 && --s == 65535 && ++s == 0 && s-- == 0 && s == 65535; }' unsigned-short-increment-boundaries
-check 1 'int main(void) { short guard = 42; short s = 0; short *p = &s; return (*p = 65535) == -1 && s == -1 && guard == 42; }' short-indirect-store
-check 1 'int main(void) { unsigned short s = 65535; unsigned short *p = &s; return (*p)++ == 65535 && s == 0 && --*p == 65535; }' short-indirect-increment
-check 42 'int main(void) { short s = 42; short *p = &s + 1; short n = -1; return *(p + n); }' short-pointer-offset
-check 1 'int main(void) { unsigned short s = 32768; if (!s) return 0; return s && (0 || s) && (s ? 1 : 0); }' short-condition
-check 42 'int main(void) { unsigned short s = -1; switch (s) { case -1: return 0; case 65535: return 42; default: return 0; } }' short-switch-promotion
-check 2 'int main(void) { int n = 0; for (unsigned short s = 65534; s; s++) n++; return n; }' short-for-counter
-check 1 'short id(short s) { return s; } int main(void) { return id(65535) == -1 && id(32768) == -32768; }' short-call-return
-check 1 'unsigned short id(unsigned short s) { return s; } int main(void) { return id(-1) == 65535 && id(65536) == 0 && id(-1) + 1 == 65536; }' unsigned-short-call-return
-check 1 'short f(void) { return 65535; } unsigned short g(void) { return -1; } int main(void) { return f() == -1 && g() == 65535; }' short-return-conversion
-check 1 'int f(short a, unsigned short b, short c, unsigned short d, short e, unsigned short f) { return a+b+c+d+e+f; } int main(void) { return f(-1,65535,-2,32768,-3,12345) == 110642; }' short-six-register-arguments
-check 1 'int f(int a, int b, int c, int d, int e, int f, short g, unsigned short h) { return a+g+h; } int main(void) { return f(1,2,3,4,5,6,32768,-1) == 32768; }' short-stack-arguments
-check 1 'long f(short a, unsigned short b, char c, int d, long e, unsigned long f, int g, short h, unsigned short i) { return a+b+c+d+e+f+g+h+i; } int main(void) { long x = 1; x <<= 40; return f(-1,-1,-2,3,x,0,0,32768,32768) == x + 65535; }' short-mixed-stack-arguments
-check 1 'void set(short *p) { *p = -1; } short f(short s) { set(&s); return s; } int main(void) { return f(42) == -1; }' short-parameter-address
-check 1 'int f(); int main(void) { unsigned short s = 65535; return f(s); } int f(int s) { return s == 65535; }' short-default-argument-promotion
-check 1 'unsigned short id(unsigned short s) { return s; } int main(void) { return id(id(-1)) == 65535; }' short-nested-call
-check 120 'short fact(short n) { if (n == 0) return 1; return n * fact(n - 1); } int main(void) { return fact(5); }' short-recursion
+check short-load 1 'int main(void) { short s = 32767; return s == 32767; }'
+check short-sign-extension 1 'int main(void) { short s = -32768; return s == -32768 && s < 0; }'
+check unsigned-short-zero-extension 1 'int main(void) { unsigned short s = 65535; return s == 65535 && s > 0; }'
+check short-initializer-truncate 1 'int main(void) { short s = 65535; return s == -1; }'
+check unsigned-short-initializer-truncate 1 'int main(void) { unsigned short s = -1; return s == 65535; }'
+check short-initializer-wrap 1 'int main(void) { short s = 65536; unsigned short u = 65537; return s == 0 && u == 1; }'
+check short-assignment-result 1 'int main(void) { short s = 0; unsigned short u = 0; return (s = 65535) == -1 && (u = -1) == 65535; }'
+check short-adjacent-stores 1 'int main(void) { int guard = 42; short a = -1; short b = 7; b = 9; return guard == 42 && a == -1 && b == 9; }'
+check short-mixed-local-layout 1 'int main(void) { char a = 42; short b = -1; char c = 7; short d = 9; d = -2; return a == 42 && b == -1 && c == 7 && d == -2; }'
+check unsigned-short-integer-promotion 1 'int main(void) { unsigned short s = 65535; return s + 1 == 65536 && s > -1; }'
+check unsigned-short-unary-promotion 1 'int main(void) { unsigned short s = 65535; return -s == -65535 && ~s == -65536; }'
+check short-unary-division-promotion 1 'int main(void) { short s = -32768; return -s == 32768 && s / -1 == 32768; }'
+check short-mixed-signs 1 'int main(void) { short s = -1; unsigned short u = 65535; return u + s == 65534 && u > s; }'
+check short-unsigned-common-type 1 'int main(void) { unsigned short s = 65535; unsigned u = -1; return s < u && s + u == 65534; }'
+check short-conditional-promotion 1 'int main(void) { unsigned short s = 65535; return (1 ? s : -1) == 65535 && (0 ? s : -1) < 0; }'
+check short-widen-long 1 'int main(void) { short s = -1; unsigned short u = 65535; long a = s; long b = u; return a == -1 && b == 65535; }'
+check long-narrow-short 1 'int main(void) { long x = 1; x <<= 40; short s = x + 65535; unsigned short u = x + 65537; return s == -1 && u == 1; }'
+check unsigned-int-narrow-short 1 'int main(void) { unsigned x = -1; short s = x; unsigned short u = x; return s == -1 && u == 65535; }'
+check short-char-conversions 1 'int main(void) { short s = -1; char c = s; unsigned char u = s; unsigned short v = c; return c == -1 && u == 255 && v == 65535; }'
+check short-compound-truncate 1 'int main(void) { short s = 32767; s += 1; s -= 1; return s == 32767; }'
+check short-compound-arithmetic 1 'int main(void) { unsigned short s = 65535; s += 1; s -= 1; s *= 2; s /= 2; s %= 7; return s == 0; }'
+check short-compound-bitwise 1 'int main(void) { unsigned short s = 65535; s <<= 1; s >>= 1; s |= 7; s ^= 8; s &= 255; return s == 247; }'
+check short-increment-boundaries 1 'int main(void) { short s = 32767; return s++ == 32767 && s == -32768 && --s == 32767 && ++s == -32768 && s-- == -32768 && s == 32767; }'
+check unsigned-short-increment-boundaries 1 'int main(void) { unsigned short s = 65535; return s++ == 65535 && s == 0 && --s == 65535 && ++s == 0 && s-- == 0 && s == 65535; }'
+check short-indirect-store 1 'int main(void) { short guard = 42; short s = 0; short *p = &s; return (*p = 65535) == -1 && s == -1 && guard == 42; }'
+check short-indirect-increment 1 'int main(void) { unsigned short s = 65535; unsigned short *p = &s; return (*p)++ == 65535 && s == 0 && --*p == 65535; }'
+check short-pointer-offset 42 'int main(void) { short s = 42; short *p = &s + 1; short n = -1; return *(p + n); }'
+check short-condition 1 'int main(void) { unsigned short s = 32768; if (!s) return 0; return s && (0 || s) && (s ? 1 : 0); }'
+check short-switch-promotion 42 'int main(void) { unsigned short s = -1; switch (s) { case -1: return 0; case 65535: return 42; default: return 0; } }'
+check short-for-counter 2 'int main(void) { int n = 0; for (unsigned short s = 65534; s; s++) n++; return n; }'
+check short-call-return 1 'short id(short s) { return s; } int main(void) { return id(65535) == -1 && id(32768) == -32768; }'
+check unsigned-short-call-return 1 'unsigned short id(unsigned short s) { return s; } int main(void) { return id(-1) == 65535 && id(65536) == 0 && id(-1) + 1 == 65536; }'
+check short-return-conversion 1 'short f(void) { return 65535; } unsigned short g(void) { return -1; } int main(void) { return f() == -1 && g() == 65535; }'
+check short-six-register-arguments 1 'int f(short a, unsigned short b, short c, unsigned short d, short e, unsigned short f) { return a+b+c+d+e+f; } int main(void) { return f(-1,65535,-2,32768,-3,12345) == 110642; }'
+check short-stack-arguments 1 'int f(int a, int b, int c, int d, int e, int f, short g, unsigned short h) { return a+g+h; } int main(void) { return f(1,2,3,4,5,6,32768,-1) == 32768; }'
+check short-mixed-stack-arguments 1 'long f(short a, unsigned short b, char c, int d, long e, unsigned long f, int g, short h, unsigned short i) { return a+b+c+d+e+f+g+h+i; } int main(void) { long x = 1; x <<= 40; return f(-1,-1,-2,3,x,0,0,32768,32768) == x + 65535; }'
+check short-parameter-address 1 'void set(short *p) { *p = -1; } short f(short s) { set(&s); return s; } int main(void) { return f(42) == -1; }'
+check short-default-argument-promotion 1 'int f(); int main(void) { unsigned short s = 65535; return f(s); } int f(int s) { return s == 65535; }'
+check short-nested-call 1 'unsigned short id(unsigned short s) { return s; } int main(void) { return id(id(-1)) == 65535; }'
+check short-recursion 120 'short fact(short n) { if (n == 0) return 1; return n * fact(n - 1); } int main(void) { return fact(5); }'
 
 # Short declaration specifiers.
 for spec in 'short' 'short int' 'int short' 'unsigned short' 'short unsigned' \
     'unsigned short int' 'unsigned int short' 'short unsigned int' \
     'short int unsigned' 'int unsigned short' 'int short unsigned'; do
-    check 42 "$spec f($spec); int main(void) { $spec x; return 42; }" "short-declspecs-$spec"
+    check "short-declspecs-$spec" 42 "$spec f($spec); int main(void) { $spec x; return 42; }"
 done
-check 42 'short f(short int); short int f(int short); int main(void) { return 42; }' short-compatible-prototypes
-check 42 'unsigned short f(short unsigned int); int unsigned short f(unsigned int short); int main(void) { return 42; }' unsigned-short-compatible-prototypes
-check 42 'int main(void) { for (short i; 0;) ; return 42; }' short-for-declaration
-check 42 'int main(void) { for (unsigned short i; 0;) ; return 42; }' unsigned-short-for-declaration
-check 1 'int main(void) { short x; short *p = &x; return (p + 1) - p; }' short-pointer-declaration
+check short-compatible-prototypes 42 'short f(short int); short int f(int short); int main(void) { return 42; }'
+check unsigned-short-compatible-prototypes 42 'unsigned short f(short unsigned int); int unsigned short f(unsigned int short); int main(void) { return 42; }'
+check short-for-declaration 42 'int main(void) { for (short i; 0;) ; return 42; }'
+check unsigned-short-for-declaration 42 'int main(void) { for (unsigned short i; 0;) ; return 42; }'
+check short-pointer-declaration 1 'int main(void) { short x; short *p = &x; return (p + 1) - p; }'
 
 check_error short-missing-name 'int main() { int short; return 0; }' '1:23: error: expect variable name'
 check_error short-char-specifiers 'int main(void) { short char x; return 0; }' '1:24: error: invalid combination of type specifiers'
@@ -2247,69 +2373,69 @@ check_error short-incompatible-pointer 'int main(void) { int x; short *p = &x; r
 check_error short-declaration-as-statement 'int main(void) { if (1) short x; return 0; }' '1:25: error: expect statement'
 
 # Long values exercise the upper 32 bits without requiring long literals.
-check 1 'int main(void) { long x = 1; x <<= 40; long y = x; return y >> 40 == 1; }' long-load-store
-check 1 'int main(void) { long x = -1; long y = 0 - 1; return x < 0 && y < 0; }' long-sign-extension
-check 1 'int main(void) { unsigned x = -1; long y = x; return y > 2147483647 && y >> 32 == 0; }' long-zero-extension
-check 1 'int main(void) { long x = -2147483647 - 1; return x < -2147483647; }' long-int-min-extension
-check 1 'int main(void) { unsigned long x = -1; return x >> 63 == 1; }' unsigned-long-sign-extension
-check 1 'int main(void) { long x = 1; x <<= 40; long y; return (y = x) == x && y >> 40 == 1; }' long-assignment-result
-check 1 'int main(void) { long x = 1; x <<= 40; return x + x == x * 2 && x + 7 - x == 7; }' long-add-subtract-multiply
-check 1 'int main(void) { long x = 1; x <<= 40; return (x * 6) / 3 == x * 2 && (x + 5) % x == 5; }' long-divmod
-check 1 'int main(void) { long x = 1; x <<= 40; return (-x - 5) / x == -1 && (-x - 5) % x == -5; }' long-negative-divmod
-check 1 'int main(void) { unsigned long x = -1; return x / 2 >> 62 == 1 && x % 2 == 1; }' unsigned-long-divmod
-check 1 'int main(void) { unsigned long x = -1; return x + 1 == 0 && x * x == 1 && -x == 1; }' unsigned-long-wraparound
-check 1 'int main(void) { long x = 1; x <<= 40; return x != 0 && x > 2147483647 && x >= x && 0 < x && 0 <= x; }' long-comparisons
-check 1 'int main(void) { unsigned long x = -1; long y = -1; return x > 0 && x >= y && y > 0 - x && x == y; }' unsigned-long-comparisons
-check 1 'int main(void) { long x = -1; unsigned y = 1; return x < y && x + y == 0 && x <= y; }' long-unsigned-int-common-type
-check 1 'int main(void) { long x = -1; unsigned long y = 1; return x > y && x + y == 0; }' long-unsigned-long-common-type
-check 1 'int main(void) { long x = 0; unsigned y = -1; return (x | y) >> 32 == 0 && (x ^ y) >> 32 == 0; }' long-unsigned-bitwise-conversion
-check 1 'int main(void) { long x = 1; x <<= 40; return (x | 3) == x + 3 && (x ^ 3) == x + 3 && ((x | 3) & x) == x; }' long-bitwise
-check 1 'int main(void) { long x = 1; x <<= 40; return ~x == -x - 1 && -x < 0; }' long-unary
-check 1 'int main(void) { long x = -1; unsigned y = 40; return x >> y == -1; }' long-signed-shift
-check 1 'int main(void) { unsigned long x = -1; return x >> 63 == 1 && x << 63 >> 63 == 1; }' unsigned-long-shifts
-check 1 'int main(void) { long n = 1; return (-4 >> n) == -2; }' int-shift-long-count
-check 1 'int main(void) { long x = 1; x <<= 40; return (1 ? x : 0) == x && (0 ? 0 : x) == x; }' long-conditional-type
-check 1 'int main(void) { long x = -1; unsigned y = 0; return (1 ? x : y) < 0 && (0 ? y : x) < 0; }' long-conditional-signedness
-check 1 'int main(void) { long x = 1; x <<= 40; return !x == 0 && !!x && (x && 1) && (0 || x); }' long-logical
-check 42 'int main(void) { long x = 1; x <<= 32; if (x) return 42; return 0; }' long-if-condition
-check 42 'int main(void) { long x = 1; x <<= 32; return x ? 42 : 0; }' long-conditional-condition
-check 42 'int main(void) { long x = 1; x <<= 32; while (x) { x = 0; return 42; } return 0; }' long-while-condition
-check 42 'int main(void) { long x = 1; x <<= 32; for (; x;) { x = 0; return 42; } return 0; }' long-for-condition
-check 2 'int main(void) { long x = 1; x <<= 32; int n = 0; do { n++; if (n == 2) x = 0; } while (x); return n; }' long-do-condition
-check 42 'int main(void) { long x = 1; x <<= 32; switch (x) { case 0: return 0; default: return 42; } }' long-switch-full-width
-check 42 'int main(void) { long x = -1; switch (x) { case -1: return 42; default: return 0; } }' long-switch-negative
-check 42 'int main(void) { unsigned long x = -1; switch (x) { case -1: return 42; default: return 0; } }' unsigned-long-switch-negative
-check 1 'int main(void) { long x = 1; x <<= 40; int y = x + 42; unsigned z = x + 43; return y == 42 && z == 43; }' long-narrow-int
-check 1 'int main(void) { long x = -1; char c = x; unsigned char u = x; return c == -1 && u == 255; }' long-narrow-char
-check 1 'int main(void) { char c = -1; unsigned char u = 255; long x = c; long y = u; return x == -1 && y == 255; }' long-widen-char
-check 1 'int main(void) { long x = 1; x <<= 40; long y = x; x += 7; x -= 1; x *= 3; x /= 3; return x == y + 6; }' long-compound-arithmetic
-check 1 'int main(void) { unsigned long x = -1; x >>= 32; x <<= 8; x |= 15; x ^= 8; x &= -1; x %= 16; return x == 7; }' long-compound-bitwise
-check 1 'int main(void) { long x = 1; x <<= 40; long y = x; return x++ == y && ++x == y + 2 && x-- == y + 2 && --x == y; }' long-increment
-check 1 'int main(void) { unsigned long x = -1; return x++ != 0 && x == 0 && --x != 0; }' unsigned-long-increment
-check 1 'int main(void) { long x = 1; x <<= 40; long *p = &x; long y = *p; *p = x + 7; return x == y + 7 && (*p)++ == y + 7 && --*p == y + 7; }' long-indirect-load-store-increment
-check 42 'int main(void) { long x = 42; long *p = &x + 1; long n = -1; return *(p + n); }' long-pointer-offset
-check 1 'int main(void) { long x; unsigned y = 0; return (&x - (&x + 1)) < y; }' pointer-difference-long-type
-check 1 'long id(long x) { return x; } int main(void) { long x = 1; x <<= 40; return id(x) == x && id(-1) < 0; }' long-call-return
-check 1 'unsigned long id(unsigned long x) { return x; } int main(void) { return id(-1) >> 63 == 1; }' unsigned-long-call-return
-check 1 'long f(void) { return -1; } int main(void) { return f() < 0; }' long-return-int-conversion
-check 1 'int f(long x) { return x; } int main(void) { long x = 1; x <<= 40; return f(x + 42) == 42; }' long-return-narrow-conversion
-check 1 'long id(); int main(void) { long x = 1; x <<= 40; return id(x) == x; } long id(long x) { return x; }' long-default-argument
-check 1 'long sum(long a, long b, long c, long d, long e, long f, long g, long h) { return a+b+c+d+e+f+g+h; } int main(void) { long x = 1; x <<= 40; return sum(x,x,x,x,x,x,x,x) == x * 8; }' long-eight-arguments
-check 1 'long f(int a, char b, long c, unsigned d, unsigned long e, char f, long g, unsigned long h) { return c + g + h - e + a + b + d + f; } int main(void) { long x = 1; x <<= 40; return f(1,2,x,3,x,4,x,x) == x * 2 + 10; }' long-mixed-arguments
-check 1 'long f(long x, int n) { if (n) return f(x + 1, n - 1); return x; } int main(void) { long x = 1; x <<= 40; return f(x, 3) == x + 3; }' long-recursion
-check 1 'long f(long x) { return x + 1; } int main(void) { long x = 1; x <<= 40; return x + f(f(x)) == x * 2 + 2; }' long-nested-calls
+check long-load-store 1 'int main(void) { long x = 1; x <<= 40; long y = x; return y >> 40 == 1; }'
+check long-sign-extension 1 'int main(void) { long x = -1; long y = 0 - 1; return x < 0 && y < 0; }'
+check long-zero-extension 1 'int main(void) { unsigned x = -1; long y = x; return y > 2147483647 && y >> 32 == 0; }'
+check long-int-min-extension 1 'int main(void) { long x = -2147483647 - 1; return x < -2147483647; }'
+check unsigned-long-sign-extension 1 'int main(void) { unsigned long x = -1; return x >> 63 == 1; }'
+check long-assignment-result 1 'int main(void) { long x = 1; x <<= 40; long y; return (y = x) == x && y >> 40 == 1; }'
+check long-add-subtract-multiply 1 'int main(void) { long x = 1; x <<= 40; return x + x == x * 2 && x + 7 - x == 7; }'
+check long-divmod 1 'int main(void) { long x = 1; x <<= 40; return (x * 6) / 3 == x * 2 && (x + 5) % x == 5; }'
+check long-negative-divmod 1 'int main(void) { long x = 1; x <<= 40; return (-x - 5) / x == -1 && (-x - 5) % x == -5; }'
+check unsigned-long-divmod 1 'int main(void) { unsigned long x = -1; return x / 2 >> 62 == 1 && x % 2 == 1; }'
+check unsigned-long-wraparound 1 'int main(void) { unsigned long x = -1; return x + 1 == 0 && x * x == 1 && -x == 1; }'
+check long-comparisons 1 'int main(void) { long x = 1; x <<= 40; return x != 0 && x > 2147483647 && x >= x && 0 < x && 0 <= x; }'
+check unsigned-long-comparisons 1 'int main(void) { unsigned long x = -1; long y = -1; return x > 0 && x >= y && y > 0 - x && x == y; }'
+check long-unsigned-int-common-type 1 'int main(void) { long x = -1; unsigned y = 1; return x < y && x + y == 0 && x <= y; }'
+check long-unsigned-long-common-type 1 'int main(void) { long x = -1; unsigned long y = 1; return x > y && x + y == 0; }'
+check long-unsigned-bitwise-conversion 1 'int main(void) { long x = 0; unsigned y = -1; return (x | y) >> 32 == 0 && (x ^ y) >> 32 == 0; }'
+check long-bitwise 1 'int main(void) { long x = 1; x <<= 40; return (x | 3) == x + 3 && (x ^ 3) == x + 3 && ((x | 3) & x) == x; }'
+check long-unary 1 'int main(void) { long x = 1; x <<= 40; return ~x == -x - 1 && -x < 0; }'
+check long-signed-shift 1 'int main(void) { long x = -1; unsigned y = 40; return x >> y == -1; }'
+check unsigned-long-shifts 1 'int main(void) { unsigned long x = -1; return x >> 63 == 1 && x << 63 >> 63 == 1; }'
+check int-shift-long-count 1 'int main(void) { long n = 1; return (-4 >> n) == -2; }'
+check long-conditional-type 1 'int main(void) { long x = 1; x <<= 40; return (1 ? x : 0) == x && (0 ? 0 : x) == x; }'
+check long-conditional-signedness 1 'int main(void) { long x = -1; unsigned y = 0; return (1 ? x : y) < 0 && (0 ? y : x) < 0; }'
+check long-logical 1 'int main(void) { long x = 1; x <<= 40; return !x == 0 && !!x && (x && 1) && (0 || x); }'
+check long-if-condition 42 'int main(void) { long x = 1; x <<= 32; if (x) return 42; return 0; }'
+check long-conditional-condition 42 'int main(void) { long x = 1; x <<= 32; return x ? 42 : 0; }'
+check long-while-condition 42 'int main(void) { long x = 1; x <<= 32; while (x) { x = 0; return 42; } return 0; }'
+check long-for-condition 42 'int main(void) { long x = 1; x <<= 32; for (; x;) { x = 0; return 42; } return 0; }'
+check long-do-condition 2 'int main(void) { long x = 1; x <<= 32; int n = 0; do { n++; if (n == 2) x = 0; } while (x); return n; }'
+check long-switch-full-width 42 'int main(void) { long x = 1; x <<= 32; switch (x) { case 0: return 0; default: return 42; } }'
+check long-switch-negative 42 'int main(void) { long x = -1; switch (x) { case -1: return 42; default: return 0; } }'
+check unsigned-long-switch-negative 42 'int main(void) { unsigned long x = -1; switch (x) { case -1: return 42; default: return 0; } }'
+check long-narrow-int 1 'int main(void) { long x = 1; x <<= 40; int y = x + 42; unsigned z = x + 43; return y == 42 && z == 43; }'
+check long-narrow-char 1 'int main(void) { long x = -1; char c = x; unsigned char u = x; return c == -1 && u == 255; }'
+check long-widen-char 1 'int main(void) { char c = -1; unsigned char u = 255; long x = c; long y = u; return x == -1 && y == 255; }'
+check long-compound-arithmetic 1 'int main(void) { long x = 1; x <<= 40; long y = x; x += 7; x -= 1; x *= 3; x /= 3; return x == y + 6; }'
+check long-compound-bitwise 1 'int main(void) { unsigned long x = -1; x >>= 32; x <<= 8; x |= 15; x ^= 8; x &= -1; x %= 16; return x == 7; }'
+check long-increment 1 'int main(void) { long x = 1; x <<= 40; long y = x; return x++ == y && ++x == y + 2 && x-- == y + 2 && --x == y; }'
+check unsigned-long-increment 1 'int main(void) { unsigned long x = -1; return x++ != 0 && x == 0 && --x != 0; }'
+check long-indirect-load-store-increment 1 'int main(void) { long x = 1; x <<= 40; long *p = &x; long y = *p; *p = x + 7; return x == y + 7 && (*p)++ == y + 7 && --*p == y + 7; }'
+check long-pointer-offset 42 'int main(void) { long x = 42; long *p = &x + 1; long n = -1; return *(p + n); }'
+check pointer-difference-long-type 1 'int main(void) { long x; unsigned y = 0; return (&x - (&x + 1)) < y; }'
+check long-call-return 1 'long id(long x) { return x; } int main(void) { long x = 1; x <<= 40; return id(x) == x && id(-1) < 0; }'
+check unsigned-long-call-return 1 'unsigned long id(unsigned long x) { return x; } int main(void) { return id(-1) >> 63 == 1; }'
+check long-return-int-conversion 1 'long f(void) { return -1; } int main(void) { return f() < 0; }'
+check long-return-narrow-conversion 1 'int f(long x) { return x; } int main(void) { long x = 1; x <<= 40; return f(x + 42) == 42; }'
+check long-default-argument 1 'long id(); int main(void) { long x = 1; x <<= 40; return id(x) == x; } long id(long x) { return x; }'
+check long-eight-arguments 1 'long sum(long a, long b, long c, long d, long e, long f, long g, long h) { return a+b+c+d+e+f+g+h; } int main(void) { long x = 1; x <<= 40; return sum(x,x,x,x,x,x,x,x) == x * 8; }'
+check long-mixed-arguments 1 'long f(int a, char b, long c, unsigned d, unsigned long e, char f, long g, unsigned long h) { return c + g + h - e + a + b + d + f; } int main(void) { long x = 1; x <<= 40; return f(1,2,x,3,x,4,x,x) == x * 2 + 10; }'
+check long-recursion 1 'long f(long x, int n) { if (n) return f(x + 1, n - 1); return x; } int main(void) { long x = 1; x <<= 40; return f(x, 3) == x + 3; }'
+check long-nested-calls 1 'long f(long x) { return x + 1; } int main(void) { long x = 1; x <<= 40; return x + f(f(x)) == x * 2 + 2; }'
 
 # Long declaration specifiers.
 for spec in 'long' 'long int' 'int long' 'unsigned long' 'long unsigned' \
     'unsigned long int' 'unsigned int long' 'long unsigned int' \
     'long int unsigned' 'int unsigned long' 'int long unsigned'; do
-    check 42 "$spec f($spec); int main(void) { $spec x; return 42; }" "long-declspecs-$spec"
+    check "long-declspecs-$spec" 42 "$spec f($spec); int main(void) { $spec x; return 42; }"
 done
-check 42 'long f(long int); long int f(int long); int main(void) { return 42; }' long-compatible-prototypes
-check 42 'unsigned long f(long unsigned int); int unsigned long f(unsigned int long); int main(void) { return 42; }' unsigned-long-compatible-prototypes
-check 42 'int main(void) { for (long i; 0;) ; return 42; }' long-for-declaration
-check 42 'int main(void) { for (unsigned long i; 0;) ; return 42; }' unsigned-long-for-declaration
-check 1 'int main(void) { long x; long *p = &x; return (p + 1) - p; }' long-pointer-declaration
+check long-compatible-prototypes 42 'long f(long int); long int f(int long); int main(void) { return 42; }'
+check unsigned-long-compatible-prototypes 42 'unsigned long f(long unsigned int); int unsigned long f(unsigned int long); int main(void) { return 42; }'
+check long-for-declaration 42 'int main(void) { for (long i; 0;) ; return 42; }'
+check unsigned-long-for-declaration 42 'int main(void) { for (unsigned long i; 0;) ; return 42; }'
+check long-pointer-declaration 1 'int main(void) { long x; long *p = &x; return (p + 1) - p; }'
 
 check_error long-missing-name 'int main() { int long; return 0; }' '1:22: error: expect variable name'
 check_error long-char-specifiers 'int main(void) { long char x; return 0; }' '1:23: error: invalid combination of type specifiers'
@@ -2331,15 +2457,15 @@ for spec in 'long long' 'long long int' 'long int long' 'int long long' \
     'int unsigned long long' 'int long unsigned long' 'int long long unsigned' \
     'long unsigned int long' 'long unsigned long int' 'long int unsigned long' \
     'long int long unsigned' 'long long unsigned int' 'long long int unsigned'; do
-    check 42 "$spec f($spec); $spec f($spec x) { return x; } int main(void) { $spec x = 42; return f(x); }" "long-long-declspecs-$spec"
+    check "long-long-declspecs-$spec" 42 "$spec f($spec); $spec f($spec x) { return x; } int main(void) { $spec x = 42; return f(x); }"
 done
-check 42 'int main(void) { for (long long i = 42; i;) return i; return 0; }' long-long-for-declaration
-check 42 'int main(void) { for (unsigned long long i = 42; i;) return i; return 0; }' unsigned-long-long-for-declaration
-check 42 'int main(void) { long long x = 42; long long *p = &x; return *p; }' long-long-pointer-declaration
-check 1 'int main(void) { long long x = 1; x <<= 40; return x + x == 2199023255552L; }' long-long-common-type-width
-check 1 'int main(void) { long long x = -1; unsigned y = 1; return x < y; }' long-long-unsigned-int-common-type
-check 1 'int main(void) { long long x = -1; unsigned long y = 1; return x > y; }' long-long-unsigned-long-common-type
-check 1 'int main(void) { long x = -1; unsigned long long y = 1; return x > y; }' long-unsigned-long-long-common-type
+check long-long-for-declaration 42 'int main(void) { for (long long i = 42; i;) return i; return 0; }'
+check unsigned-long-long-for-declaration 42 'int main(void) { for (unsigned long long i = 42; i;) return i; return 0; }'
+check long-long-pointer-declaration 42 'int main(void) { long long x = 42; long long *p = &x; return *p; }'
+check long-long-common-type-width 1 'int main(void) { long long x = 1; x <<= 40; return x + x == 2199023255552L; }'
+check long-long-unsigned-int-common-type 1 'int main(void) { long long x = -1; unsigned y = 1; return x < y; }'
+check long-long-unsigned-long-common-type 1 'int main(void) { long long x = -1; unsigned long y = 1; return x > y; }'
+check long-unsigned-long-long-common-type 1 'int main(void) { long x = -1; unsigned long long y = 1; return x > y; }'
 check_error long-long-short-specifiers 'int main(void) { long long short x; return 0; }' '1:28: error: invalid combination of type specifiers'
 check_error long-long-char-specifiers 'int main(void) { long long char x; return 0; }' '1:28: error: invalid combination of type specifiers'
 check_error long-long-duplicate-int 'int main(void) { long long int int x; return 0; }' '1:32: error: duplicate int type specifier'
@@ -2350,32 +2476,32 @@ check_error long-long-conflicting-signedness 'int f(long long); int f(unsigned l
 check_error long-long-incompatible-pointer 'int main(void) { long x; long long *p = &x; return 0; }' '1:37: error: incompatible initializer type'
 
 # Unsigned char occupies one byte and promotes to int.
-check 255 'int main(void) { unsigned char c = -1; return c; }' unsigned-char-load
-check 255 'int main(void) { char unsigned c = -1; return c; }' char-unsigned-order
-check 1 'int main(void) { unsigned char c = 128; return c > 0 && c == 128; }' unsigned-char-high-bit
-check 1 'int main(void) { unsigned char c = 511; return c == 255; }' unsigned-char-truncate
-check 1 'int main(void) { unsigned char c = 256; return c == 0; }' unsigned-char-truncate-zero
-check 1 'int main(void) { unsigned char c = 0; return (c = -1) == 255 && c == 255; }' unsigned-char-assignment-result
-check 1 'int main(void) { unsigned char c = 255; return c + 1 == 256 && c - 256 == -1; }' unsigned-char-integer-promotion
-check 1 'int main(void) { unsigned char c = 255; return ~c == -256 && -c == -255; }' unsigned-char-unary-promotion
-check 1 'int main(void) { unsigned char c = 255; return c / 2 == 127 && (c >> 1) == 127 && (c << 1) == 510; }' unsigned-char-shift-promotion
-check 1 'int main(void) { unsigned char c = 255; return (1 ? c : -1) == 255 && (0 ? c : -1) < 0; }' unsigned-char-conditional-promotion
-check 1 'int main(void) { unsigned char c = 255; char s = -1; return c > s && c + s == 254; }' unsigned-char-signed-char-mix
-check 1 'int main(void) { unsigned char c = 255; unsigned u = 0; return c < -1 == 0 && c > u && c + u == 255; }' unsigned-char-unsigned-mix
-check 1 'int main(void) { unsigned char c = 255; char s = c; unsigned char d = s; return s == -1 && d == 255; }' unsigned-char-signed-conversion
-check 1 'int main(void) { unsigned char c = 255; c += 1; c -= 1; c *= 2; return c == 254; }' unsigned-char-compound-truncate
-check 1 'int main(void) { unsigned char c = 255; c >>= 1; c /= 2; c %= 7; return c == 0; }' unsigned-char-compound-divmod
-check 1 'int main(void) { unsigned char c = 255; return c++ == 255 && c == 0 && --c == 255 && ++c == 0 && c-- == 0 && c == 255; }' unsigned-char-increment
-check 1 'int main(void) { unsigned char c = 128; unsigned char *p = &c; return *p == 128 && (*p = -1) == 255 && c == 255; }' unsigned-char-pointer-store
-check 1 'int main(void) { unsigned char c = 255; unsigned char *p = &c; return (*p)++ == 255 && c == 0 && --*p == 255; }' unsigned-char-pointer-increment
-check 1 'int main(void) { unsigned char c = 255; unsigned char *p = &c; return (p + 1) - p == 1; }' unsigned-char-pointer-size
-check 1 'unsigned char id(char unsigned c); char unsigned id(unsigned char c) { return c; } int main(void) { return id(-1) == 255 && id(256) == 0; }' unsigned-char-call-signatures
-check 1 'unsigned char f(void) { return -1; } int main(void) { return f() > 0 && f() + 1 == 256; }' unsigned-char-return
-check 1 'int f(unsigned char c) { return c == 255; } int main(void) { return f(511); }' unsigned-char-argument-truncate
-check 1 'int f(int a, int b, int c, int d, int e, int f, unsigned char g, unsigned char h) { return g == 255 && h == 128; } int main(void) { return f(1, 2, 3, 4, 5, 6, -1, 384); }' unsigned-char-stack-arguments
-check 1 'int f(); int main(void) { unsigned char c = 255; return f(c); } int f(int c) { return c == 255; }' unsigned-char-default-promotion
-check 42 'int main(void) { unsigned char c = -1; switch (c) { case 255: return 42; case -1: return 1; default: return 0; } }' unsigned-char-switch-promotion
-check 1 'int main(void) { int n = 0; for (char unsigned c = 254; c; c++) n++; return n == 2; }' unsigned-char-for-declaration
+check unsigned-char-load 255 'int main(void) { unsigned char c = -1; return c; }'
+check char-unsigned-order 255 'int main(void) { char unsigned c = -1; return c; }'
+check unsigned-char-high-bit 1 'int main(void) { unsigned char c = 128; return c > 0 && c == 128; }'
+check unsigned-char-truncate 1 'int main(void) { unsigned char c = 511; return c == 255; }'
+check unsigned-char-truncate-zero 1 'int main(void) { unsigned char c = 256; return c == 0; }'
+check unsigned-char-assignment-result 1 'int main(void) { unsigned char c = 0; return (c = -1) == 255 && c == 255; }'
+check unsigned-char-integer-promotion 1 'int main(void) { unsigned char c = 255; return c + 1 == 256 && c - 256 == -1; }'
+check unsigned-char-unary-promotion 1 'int main(void) { unsigned char c = 255; return ~c == -256 && -c == -255; }'
+check unsigned-char-shift-promotion 1 'int main(void) { unsigned char c = 255; return c / 2 == 127 && (c >> 1) == 127 && (c << 1) == 510; }'
+check unsigned-char-conditional-promotion 1 'int main(void) { unsigned char c = 255; return (1 ? c : -1) == 255 && (0 ? c : -1) < 0; }'
+check unsigned-char-signed-char-mix 1 'int main(void) { unsigned char c = 255; char s = -1; return c > s && c + s == 254; }'
+check unsigned-char-unsigned-mix 1 'int main(void) { unsigned char c = 255; unsigned u = 0; return c < -1 == 0 && c > u && c + u == 255; }'
+check unsigned-char-signed-conversion 1 'int main(void) { unsigned char c = 255; char s = c; unsigned char d = s; return s == -1 && d == 255; }'
+check unsigned-char-compound-truncate 1 'int main(void) { unsigned char c = 255; c += 1; c -= 1; c *= 2; return c == 254; }'
+check unsigned-char-compound-divmod 1 'int main(void) { unsigned char c = 255; c >>= 1; c /= 2; c %= 7; return c == 0; }'
+check unsigned-char-increment 1 'int main(void) { unsigned char c = 255; return c++ == 255 && c == 0 && --c == 255 && ++c == 0 && c-- == 0 && c == 255; }'
+check unsigned-char-pointer-store 1 'int main(void) { unsigned char c = 128; unsigned char *p = &c; return *p == 128 && (*p = -1) == 255 && c == 255; }'
+check unsigned-char-pointer-increment 1 'int main(void) { unsigned char c = 255; unsigned char *p = &c; return (*p)++ == 255 && c == 0 && --*p == 255; }'
+check unsigned-char-pointer-size 1 'int main(void) { unsigned char c = 255; unsigned char *p = &c; return (p + 1) - p == 1; }'
+check unsigned-char-call-signatures 1 'unsigned char id(char unsigned c); char unsigned id(unsigned char c) { return c; } int main(void) { return id(-1) == 255 && id(256) == 0; }'
+check unsigned-char-return 1 'unsigned char f(void) { return -1; } int main(void) { return f() > 0 && f() + 1 == 256; }'
+check unsigned-char-argument-truncate 1 'int f(unsigned char c) { return c == 255; } int main(void) { return f(511); }'
+check unsigned-char-stack-arguments 1 'int f(int a, int b, int c, int d, int e, int f, unsigned char g, unsigned char h) { return g == 255 && h == 128; } int main(void) { return f(1, 2, 3, 4, 5, 6, -1, 384); }'
+check unsigned-char-default-promotion 1 'int f(); int main(void) { unsigned char c = 255; return f(c); } int f(int c) { return c == 255; }'
+check unsigned-char-switch-promotion 42 'int main(void) { unsigned char c = -1; switch (c) { case 255: return 42; case -1: return 1; default: return 0; } }'
+check unsigned-char-for-declaration 1 'int main(void) { int n = 0; for (char unsigned c = 254; c; c++) n++; return n == 2; }'
 
 check_error duplicate-char-specifier 'int main(void) { char char c; return 0; }' '1:23: error: duplicate char type specifier'
 check_error unsigned-char-int-specifier 'int main(void) { unsigned char int c; return 0; }' '1:32: error: invalid combination of type specifiers'
@@ -2388,48 +2514,48 @@ check_error unsigned-char-prototype-promotion-reverse 'int f(unsigned char); int
 check_error unsigned-char-incompatible-pointer 'int main(void) { char c; unsigned char *p = &c; return 0; }' '1:41: error: incompatible initializer type'
 
 # Unsigned arithmetic and the usual arithmetic conversions.
-check 1 'int main(void) { unsigned u = -1; return u > 2147483647; }' unsigned-high-bit
-check 1 'int main(void) { unsigned u = 0; return -1 > u; }' unsigned-mixed-comparison
-check 1 'int main(void) { unsigned u = -1; return u == -1; }' unsigned-mixed-equality
-check 1 'int main(void) { unsigned u = 0; return u < -1 && u <= -1 && -1 >= u; }' unsigned-relations
-check 0 'int main(void) { unsigned u = -1; return u < 0 || u <= 0 || 0 > u || 0 >= u; }' unsigned-relations-false
-check 1 'int main(void) { unsigned u = -1; return u + 1 == 0 && u * u == 1; }' unsigned-wraparound
-check 1 'int main(void) { unsigned u = 0; return u - 1 > 0; }' unsigned-subtract-type
-check 1 'int main(void) { unsigned u = -1; return u / 2 == 2147483647 && u % 3 == 0; }' unsigned-divmod
-check 1 'int main(void) { unsigned u = -1; return u / -1 == 1 && u % -1 == 0; }' unsigned-mixed-divmod
-check 1 'int main(void) { unsigned u = -1; return (u >> 1) == 2147483647; }' unsigned-right-shift
-check 1 'int main(void) { unsigned n = 1; return (-4 >> n) == -2; }' signed-shift-unsigned-count
-check 1 'int main(void) { unsigned u = 1; return (u << 31) > 0; }' unsigned-left-shift
-check 1 'int main(void) { unsigned u = 1; return -u > 0 && ~u > 0; }' unsigned-unary-type
-check 1 'int main(void) { unsigned u = 0; return (1 ? -1 : u) > 0 && (0 ? u : -1) > 0; }' unsigned-conditional-type
-check 1 'int main(void) { unsigned u = 0; char c = -1; return c > u && (c + u) > 0; }' unsigned-char-promotion
-check 1 'int main(void) { unsigned u = -1; char c = u; int i = u; return c == -1 && i == -1 && i < 0; }' unsigned-conversion
-check 1 'int main(void) { unsigned u = 0; return (u = -1) > 0; }' unsigned-assignment-value
-check 1 'int main(void) { unsigned u = -1; u += 1; u -= 1; u *= 2; u /= 2; return u == 2147483647; }' unsigned-compound-arithmetic
-check 1 'int main(void) { unsigned u = -1; u >>= 1; u %= 7; return u == 1; }' unsigned-compound-divmod-shift
-check 1 'int main(void) { unsigned u = 0; return (u | -1) > 0 && (u ^ -1) > 0 && ((u - 1) & -1) > 0; }' unsigned-bitwise-type
-check 1 'int main(void) { unsigned u = -1; return !u == 0 && (u && 1) == 1 && (u || 0) == 1; }' unsigned-logical
-check 1 'int main(void) { unsigned u = -1; return (u > 0) - 2 < 0; }' unsigned-comparison-result-int
-check 1 'int main(void) { unsigned u = -1; return u++ > 0 && u == 0 && --u > 0 && ++u == 0 && u-- == 0 && u > 0; }' unsigned-increment
-check 1 'int main(void) { unsigned u = -1; unsigned *p = &u; *p = *p / 2; return *p == 2147483647; }' unsigned-dereference
-check 1 'int main(void) { unsigned u = -1; unsigned *p = &u; return (*p)++ > 0 && u == 0 && --*p > 0; }' unsigned-increment-dereference
-check 1 'unsigned id(unsigned u) { return u; } int main(void) { return id(-1) / 2 == 2147483647; }' unsigned-call-return
-check 1 'unsigned f(void) { return -1; } int g(int x) { return x < 0; } int main(void) { return g(f()); }' unsigned-return-conversion
-check 1 'unsigned f(int a, int b, int c, int d, int e, int f, unsigned g, unsigned h) { return g / h; } int main(void) { return f(1, 2, 3, 4, 5, 6, -1, 2) == 2147483647; }' unsigned-stack-arguments
-check 1 'int main(void) { int x = 42; int *p = &x; unsigned u = 1; return *((p + u) - u) == 42; }' unsigned-pointer-offset
-check 42 'int main(void) { unsigned u = -1; switch (u) { case -1: return 42; default: return 0; } }' unsigned-switch-negative-case
-check 42 'int main(void) { char c = -1; switch (c) { case -1: return 42; default: return 0; } }' char-switch-promotion
+check unsigned-high-bit 1 'int main(void) { unsigned u = -1; return u > 2147483647; }'
+check unsigned-mixed-comparison 1 'int main(void) { unsigned u = 0; return -1 > u; }'
+check unsigned-mixed-equality 1 'int main(void) { unsigned u = -1; return u == -1; }'
+check unsigned-relations 1 'int main(void) { unsigned u = 0; return u < -1 && u <= -1 && -1 >= u; }'
+check unsigned-relations-false 0 'int main(void) { unsigned u = -1; return u < 0 || u <= 0 || 0 > u || 0 >= u; }'
+check unsigned-wraparound 1 'int main(void) { unsigned u = -1; return u + 1 == 0 && u * u == 1; }'
+check unsigned-subtract-type 1 'int main(void) { unsigned u = 0; return u - 1 > 0; }'
+check unsigned-divmod 1 'int main(void) { unsigned u = -1; return u / 2 == 2147483647 && u % 3 == 0; }'
+check unsigned-mixed-divmod 1 'int main(void) { unsigned u = -1; return u / -1 == 1 && u % -1 == 0; }'
+check unsigned-right-shift 1 'int main(void) { unsigned u = -1; return (u >> 1) == 2147483647; }'
+check signed-shift-unsigned-count 1 'int main(void) { unsigned n = 1; return (-4 >> n) == -2; }'
+check unsigned-left-shift 1 'int main(void) { unsigned u = 1; return (u << 31) > 0; }'
+check unsigned-unary-type 1 'int main(void) { unsigned u = 1; return -u > 0 && ~u > 0; }'
+check unsigned-conditional-type 1 'int main(void) { unsigned u = 0; return (1 ? -1 : u) > 0 && (0 ? u : -1) > 0; }'
+check unsigned-char-promotion 1 'int main(void) { unsigned u = 0; char c = -1; return c > u && (c + u) > 0; }'
+check unsigned-conversion 1 'int main(void) { unsigned u = -1; char c = u; int i = u; return c == -1 && i == -1 && i < 0; }'
+check unsigned-assignment-value 1 'int main(void) { unsigned u = 0; return (u = -1) > 0; }'
+check unsigned-compound-arithmetic 1 'int main(void) { unsigned u = -1; u += 1; u -= 1; u *= 2; u /= 2; return u == 2147483647; }'
+check unsigned-compound-divmod-shift 1 'int main(void) { unsigned u = -1; u >>= 1; u %= 7; return u == 1; }'
+check unsigned-bitwise-type 1 'int main(void) { unsigned u = 0; return (u | -1) > 0 && (u ^ -1) > 0 && ((u - 1) & -1) > 0; }'
+check unsigned-logical 1 'int main(void) { unsigned u = -1; return !u == 0 && (u && 1) == 1 && (u || 0) == 1; }'
+check unsigned-comparison-result-int 1 'int main(void) { unsigned u = -1; return (u > 0) - 2 < 0; }'
+check unsigned-increment 1 'int main(void) { unsigned u = -1; return u++ > 0 && u == 0 && --u > 0 && ++u == 0 && u-- == 0 && u > 0; }'
+check unsigned-dereference 1 'int main(void) { unsigned u = -1; unsigned *p = &u; *p = *p / 2; return *p == 2147483647; }'
+check unsigned-increment-dereference 1 'int main(void) { unsigned u = -1; unsigned *p = &u; return (*p)++ > 0 && u == 0 && --*p > 0; }'
+check unsigned-call-return 1 'unsigned id(unsigned u) { return u; } int main(void) { return id(-1) / 2 == 2147483647; }'
+check unsigned-return-conversion 1 'unsigned f(void) { return -1; } int g(int x) { return x < 0; } int main(void) { return g(f()); }'
+check unsigned-stack-arguments 1 'unsigned f(int a, int b, int c, int d, int e, int f, unsigned g, unsigned h) { return g / h; } int main(void) { return f(1, 2, 3, 4, 5, 6, -1, 2) == 2147483647; }'
+check unsigned-pointer-offset 1 'int main(void) { int x = 42; int *p = &x; unsigned u = 1; return *((p + u) - u) == 42; }'
+check unsigned-switch-negative-case 42 'int main(void) { unsigned u = -1; switch (u) { case -1: return 42; default: return 0; } }'
+check char-switch-promotion 42 'int main(void) { char c = -1; switch (c) { case -1: return 42; default: return 0; } }'
 
 check_error unsigned-switch-duplicate 'int main(void) { unsigned u = 0; switch (u) { case -1: return 1; case ~0: return 2; } return 0; }' '1:66: error: duplicate case value'
 check_error switch-pointer 'int main(void) { int x; switch (&x) { default: return 0; } }' '1:33: error: switch condition must have integer type'
 check_error case-overflow-mod 'int main(void) { switch (0) { case (-2147483647 - 1) % -1: return 1; } return 0; }' '1:58: error: integer overflow in constant expression'
 
 # Both orders of the unsigned int declaration specifiers denote one type.
-check 42 'int main(void) { unsigned int x = 42; return x; }' unsigned-int-local
-check 42 'int main(void) { int unsigned x = 42; return x; }' int-unsigned-local
-check 42 'unsigned int id(int unsigned x); int unsigned id(unsigned int x) { return x; } int main(void) { return id(42); }' unsigned-specifier-signatures
-check 42 'unsigned int *id(int unsigned *p) { return p; } int main(void) { unsigned int x = 42; int unsigned *p = &x; return *id(p); }' unsigned-specifier-pointers
-check 42 'int main(void) { int n = 0; for (int unsigned i = 0; i < 6; i++) n += 7; return n; }' unsigned-specifier-for
+check unsigned-int-local 42 'int main(void) { unsigned int x = 42; return x; }'
+check int-unsigned-local 42 'int main(void) { int unsigned x = 42; return x; }'
+check unsigned-specifier-signatures 42 'unsigned int id(int unsigned x); int unsigned id(unsigned int x) { return x; } int main(void) { return id(42); }'
+check unsigned-specifier-pointers 42 'unsigned int *id(int unsigned *p) { return p; } int main(void) { unsigned int x = 42; int unsigned *p = &x; return *id(p); }'
+check unsigned-specifier-for 42 'int main(void) { int n = 0; for (int unsigned i = 0; i < 6; i++) n += 7; return n; }'
 check_error unsigned-missing-name 'int main() { int unsigned; return 0; }' '1:26: error: expect variable name'
 check_error duplicate-int-specifier 'int main(void) { int int x; return 0; }' '1:22: error: duplicate int type specifier'
 check_error duplicate-unsigned-specifier 'int main(void) { unsigned unsigned x; return 0; }' '1:27: error: duplicate unsigned type specifier'
@@ -2532,14 +2658,14 @@ check_error declare-keyword 'int main() { int return; return 0; }' '1:18: error:
 check_error use-post-scope-shadow 'int main() { { int x = 1; } x = 42; return 0; }' '1:29: error: undeclared identifier'
 check_error redecl-after-nested 'int main() { int a; { int a; } int a; }' '1:36: error: duplicate local variable'
 check_error unsupported-comma-decl 'int main() { int a, b; return 0; }' "1:19: error: expect ';'"
-check 42 'int main() { int a = 42; a == 3; return a; }'
+check discarded-comparison-expression 42 'int main() { int a = 42; a == 3; return a; }'
 check_error invalid-int-char-specifiers 'int main() { int char; return 0; }' '1:18: error: invalid combination of type specifiers'
 for kw in \
     _Alignas _Alignof _Atomic _Complex _Generic _Imaginary \
 	     _Noreturn _Static_assert _Thread_local \
 	     auto break case continue default do double else extern \
 	     float for goto if inline register restrict signed sizeof \
-	     static switch union volatile while; do
+	     switch union volatile while; do
     check_error "reserved-kw-$kw" \
 		"int main() { int $kw; return 0; }" \
 		'1:18: error: expect variable name'

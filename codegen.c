@@ -835,7 +835,8 @@ static void codegen_global_variable(Variable *var) {
     }
   }
   fprintf(out, "\t.pushsection %s\n", nonzero ? ".data" : ".bss");
-  fprintf(out, "\t.globl %.*s\n", name.len, name.start);
+  fprintf(out, "\t.%s %.*s\n", var->is_static ? "local" : "globl", name.len,
+          name.start);
   fprintf(out, "\t.type %.*s, @object\n", name.len, name.start);
   fprintf(out, "\t.size %.*s, %d\n", name.len, name.start, size);
   fprintf(out, "\t.balign %d\n", type_alignment(var->type));
@@ -886,6 +887,7 @@ void codegen(const AstNode *ast, FILE *out_file) {
       codegen_global_variable(decl->d.decl.var);
       continue;
     }
+    Function *func;
     Token name;
     int stack_size;
     int ret_label = label_seq++;
@@ -895,9 +897,11 @@ void codegen(const AstNode *ast, FILE *out_file) {
       exit(1);
     }
 
-    name = decl->d.function.name;
+    func = decl->d.function.declaration;
+    name = func->name;
     stack_size = (decl->d.function.stack_size + 15) / 16 * 16;
-    fprintf(out, "\t.globl %.*s\n", name.len, name.start);
+    fprintf(out, "\t.%s %.*s\n", func->is_static ? "local" : "globl", name.len,
+            name.start);
     fprintf(out, "%.*s:\n", name.len, name.start);
     fprintf(out, "\tpushq %%rbp\n");
     fprintf(out, "\tmovq %%rsp, %%rbp\n");

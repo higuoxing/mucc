@@ -140,12 +140,14 @@ Variable *new_variable(Parser *p, Token name, Type *type) {
  * A file-scope object without an initializer is a tentative definition
  * (C11 6.9.2). A later initializer can provide its definition.
  * Compatible declarations share one variable and produce one declaration node.
- * An incomplete struct may be completed later in the translation unit.
+ * An incomplete struct with external linkage may be completed later in the
+ * translation unit.
  */
-AstNode *declare_global_variable(Parser *p, Token name, Type *type) {
+AstNode *declare_global_variable(Parser *p, Token name, Type *type,
+                                 bool is_static, bool has_initializer) {
   Symbol *prev_sym = find_symbol_in_scope(p, name, 0);
   Variable *var;
-  AstNode *decl;
+  AstNode *decl = NULL;
   if (type->kind == TYPE_VOID)
     error_at(p, name, "variable has void type");
   if (prev_sym) {
@@ -153,6 +155,10 @@ AstNode *declare_global_variable(Parser *p, Token name, Type *type) {
       error_at(p, name, "variable conflicts with %s '%.*s'",
                symbol_kind_name(prev_sym->kind), name.len, name.start);
     var = prev_sym->d.variable;
+    if (var->is_static != is_static)
+      error_at(p, name, "%s declaration of '%.*s' follows %s declaration",
+               is_static ? "static" : "non-static", name.len, name.start,
+               var->is_static ? "static" : "non-static");
     if (var->type->kind == TYPE_ARRAY && type->kind == TYPE_ARRAY &&
         same_type(var->type->base, type->base) &&
         (var->type->array_len < 0 || type->array_len < 0)) {
@@ -162,12 +168,19 @@ AstNode *declare_global_variable(Parser *p, Token name, Type *type) {
       error_at(p, name, "conflicting declaration of variable '%.*s'", name.len,
                name.start);
     }
-    return NULL;
+  } else {
+    var = new_variable(p, name, type);
+    var->is_global = true;
+    var->is_static = is_static;
+    decl = new_expr(p, AST_DECL, &builtin_type_void, name);
+    decl->d.decl.var = var;
   }
-  var = new_variable(p, name, type);
-  var->is_global = true;
-  decl = new_expr(p, AST_DECL, &builtin_type_void, name);
-  decl->d.decl.var = var;
+  /*
+   * Internal-linkage tentative definitions require a complete type here
+   * (C11 6.9.2p3). An initializer may complete an unknown array bound.
+   */
+  if (is_static && !has_initializer && type_size(var->type) < 0)
+    error_at(p, name, "static variable has incomplete type");
   return decl;
 }
 
@@ -371,7 +384,7 @@ AstNode *sema_switch_condition(Parser *p, AstNode *expr) {
 
 Function *declare_function(Parser *p, Token name, Type *return_type,
                            Type **param_types, int nparams, bool has_prototype,
-                           bool definition) {
+                           bool definition, bool is_static) {
   Symbol *prev_sym = find_symbol_in_scope(p, name, 0);
   Function *func = NULL;
   int i;
@@ -387,6 +400,14 @@ Function *declare_function(Parser *p, Token name, Type *return_type,
     func = prev_sym->d.function;
   }
   if (func) {
+    /*
+     * A function declaration without a storage class inherits prior linkage
+     * (C11 6.2.2p5). A later static declaration cannot change external linkage.
+     */
+    if (is_static && !func->is_static)
+      error_at(p, name,
+               "static declaration of '%.*s' follows non-static declaration",
+               name.len, name.start);
     if (definition && func->is_defined)
       error_at(p, name, "redefinition of function '%.*s'", name.len,
                name.start);
@@ -416,6 +437,7 @@ Function *declare_function(Parser *p, Token name, Type *return_type,
       error_at(p, name, "out of memory");
     func->name = name;
     func->return_type = return_type;
+    func->is_static = is_static;
     add_symbol(p, name, SYMBOL_FUNCTION, func, 0);
   }
   if (has_prototype && !func->has_prototype) {
