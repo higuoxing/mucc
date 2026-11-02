@@ -74,6 +74,7 @@ extern Type builtin_type_void;
 
 extern bool is_integer(const Type *type);
 extern bool is_record(const Type *type);
+extern bool contains_const(const Type *type);
 extern Member *find_member(const Type *type, Token name);
 extern Type *integer_promotion_type(Type *type);
 extern Type *common_integer_type(const Type *a, const Type *b);

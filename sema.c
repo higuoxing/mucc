@@ -335,16 +335,25 @@ AstNode *sema_enumerator_expr(Parser *p, Enum *enumerator, Token loc) {
 
 /*
  * Convert an operand used as a value without promoting its integer type.
- * Arrays decay to pointers. Scalar value conversion removes the top-level
- * const qualifier while preserving the qualifiers of any pointed-to type.
+ * Arrays decay to pointers. Value conversion removes the top-level const
+ * qualifier while preserving the qualifiers of any pointed-to type.
+ * Record conversions materialize a copy; codegen represents it by its address.
  */
 static AstNode *convert_to_value(Parser *p, AstNode *expr) {
   AstNode *node;
   Type *type;
-  if (is_record(expr->type))
-    error_at(p, expr->loc, "%s values are not supported yet",
-             expr->type->kind == TYPE_STRUCT ? "struct" : "union");
-  if (expr->type->kind == TYPE_ARRAY)
+  if (is_record(expr->type)) {
+    if (type_size(expr->type) < 0)
+      error_at(p, expr->loc, "aggregate value has incomplete type");
+    /*
+     * These expressions already refer to a materialized value. Assignment
+     * results still refer to their destination and need a copy when consumed.
+     */
+    if (expr->kind == AST_CAST || expr->kind == AST_COMMA ||
+        expr->kind == AST_CONDITIONAL)
+      return expr;
+    type = unqualified_type(expr->type);
+  } else if (expr->type->kind == TYPE_ARRAY)
     type = pointer_to(expr->type->base);
   else if (expr->type->is_const)
     type = unqualified_type(expr->type);
@@ -673,7 +682,7 @@ static bool is_lvalue(const AstNode *expr) {
 
 static bool is_modifiable_lvalue(const AstNode *expr) {
   return is_lvalue(expr) && expr->type->kind != TYPE_ARRAY &&
-         !expr->type->is_const;
+         type_size(expr->type) >= 0 && !contains_const(expr->type);
 }
 
 static bool is_increment_op(AstKind ty) {
@@ -882,7 +891,8 @@ static AstNode *sema_additive(Parser *p, AstKind kind, AstNode *left,
     kind = kind == AST_ADD ? AST_PTR_ADD : AST_PTR_SUB;
     type = left->type;
   } else {
-    error_at(p, loc, "invalid operands to binary -");
+    error_at(p, loc, "invalid operands to binary %s",
+             kind == AST_ADD ? "+" : "-");
   }
   return new_binary_expr(p, kind, left, right, type, loc);
 }
@@ -932,6 +942,8 @@ AstNode *sema_binary(Parser *p, AstKind kind, AstNode *left, AstNode *right,
   case AST_GE:
   case AST_EQ:
   case AST_NE:
+    if (is_record(left->type) || is_record(right->type))
+      error_at(p, loc, "invalid operands to comparison");
     if (is_integer(left->type) && is_integer(right->type)) {
       convert_integer_operands(p, &left, &right, loc);
     } else {
@@ -969,6 +981,8 @@ AstNode *sema_member(Parser *p, AstNode *base, Token op, Token name) {
     base = sema_unary(p, AST_DEREF, base, op);
   } else if (!is_record(base->type)) {
     error_at(p, op, "'.' requires a struct or union operand");
+  } else if (!is_lvalue(base)) {
+    base = convert_to_value(p, base);
   }
   if (type_size(base->type) < 0)
     error_at(p, op, "member access on incomplete %s",
@@ -1065,7 +1079,7 @@ AstNode *sema_assignment(Parser *p, Token operator, AstNode *left,
   }
 
   rhs = sema_convert_expr(p, left->type, rhs, loc, "assignment");
-  node = new_expr(p, AST_ASSIGN, left->type, loc);
+  node = new_expr(p, AST_ASSIGN, unqualified_type(left->type), loc);
   node->d.binary.lhs = left;
   node->d.binary.rhs = rhs;
   return node;

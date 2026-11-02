@@ -37,31 +37,113 @@ static void layout_error(StackLayout *layout, Token loc, const char *message) {
   exit(1);
 }
 
-static void layout_variable(StackLayout *layout, Variable *var) {
-  int size = type_size(var->type);
-  int alignment = type_alignment(var->type);
+static int layout_slot(StackLayout *layout, Type *type, Token loc) {
+  int size = type_size(type);
+  int alignment = type_alignment(type);
   int padding = (alignment - layout->size % alignment) % alignment;
   /*
    * Leave room for codegen to round the frame size to a multiple of 16.
    */
   if (size > INT_MAX - 15 - layout->size - padding)
-    layout_error(layout, var->name,
-                 "local variables exceed supported stack size");
+    layout_error(layout, loc, "local variables exceed supported stack size");
   layout->size += padding + size;
-  var->offset = layout->size;
+  return layout->size;
 }
 
 /*
- * Only statement nodes can contain local declarations in our C subset.
- * Case-list entries refer to nodes already reached through the switch body.
+ * Aggregate conversions need storage for their values through the containing
+ * full expression. Give each reachable conversion its own stack slot. sizeof
+ * has already become a literal, so its operand allocates no temporary storage.
  */
+static void layout_expr(StackLayout *layout, AstNode *expr) {
+  if (!expr)
+    return;
+  switch (expr->kind) {
+  case AST_VAR:
+  case AST_INT_LITERAL:
+  case AST_STRING_LITERAL:
+    break;
+  case AST_CAST:
+    layout_expr(layout, expr->d.unary.operand);
+    if (is_record(expr->type))
+      expr->d.unary.offset = layout_slot(layout, expr->type, expr->loc);
+    break;
+  case AST_ADDR:
+  case AST_DEREF:
+  case AST_NEG:
+  case AST_BITWISE_NOT:
+  case AST_LOGICAL_NOT:
+  case AST_PRE_INCREMENT:
+  case AST_PRE_DECREMENT:
+  case AST_POST_INCREMENT:
+  case AST_POST_DECREMENT:
+    layout_expr(layout, expr->d.unary.operand);
+    break;
+  case AST_MEMBER:
+    layout_expr(layout, expr->d.member.base);
+    break;
+  case AST_CALL: {
+    AstNode *arg;
+    for (arg = expr->d.call.args; arg; arg = arg->next)
+      layout_expr(layout, arg);
+    break;
+  }
+  case AST_CONDITIONAL:
+    layout_expr(layout, expr->d.conditional.cond);
+    layout_expr(layout, expr->d.conditional.then_expr);
+    layout_expr(layout, expr->d.conditional.else_expr);
+    break;
+  case AST_COMPOUND_ASSIGN:
+    layout_expr(layout, expr->d.compound_assign.lhs);
+    layout_expr(layout, expr->d.compound_assign.rhs);
+    break;
+  case AST_ASSIGN:
+  case AST_ADD:
+  case AST_SUB:
+  case AST_PTR_ADD:
+  case AST_PTR_SUB:
+  case AST_PTR_DIFF:
+  case AST_MUL:
+  case AST_DIV:
+  case AST_MOD:
+  case AST_LSHIFT:
+  case AST_RSHIFT:
+  case AST_BIT_AND:
+  case AST_BIT_OR:
+  case AST_BIT_XOR:
+  case AST_EQ:
+  case AST_NE:
+  case AST_LT:
+  case AST_LE:
+  case AST_GT:
+  case AST_GE:
+  case AST_LOGICAL_AND:
+  case AST_LOGICAL_OR:
+  case AST_COMMA:
+    layout_expr(layout, expr->d.binary.lhs);
+    layout_expr(layout, expr->d.binary.rhs);
+    break;
+  default:
+    layout_error(layout, expr->loc, "unexpected expression in stack layout");
+  }
+}
+
+/* Case-list entries refer to nodes already reached through the switch body. */
 static void layout_stmt(StackLayout *layout, AstNode *stmt) {
   if (!stmt)
     return;
   switch (stmt->kind) {
   case AST_DECL:
     if (stmt->d.decl.var)
-      layout_variable(layout, stmt->d.decl.var);
+      stmt->d.decl.var->offset =
+          layout_slot(layout, stmt->d.decl.var->type, stmt->d.decl.var->name);
+    layout_expr(layout, stmt->d.decl.init);
+    break;
+  case AST_EXPR_STMT:
+    layout_expr(layout, stmt->d.expr_stmt.expr);
+    break;
+  case AST_RETURN:
+    layout_expr(layout, stmt->d.ret.expr);
     break;
   case AST_BLOCK: {
     AstNode *cur;
@@ -70,20 +152,26 @@ static void layout_stmt(StackLayout *layout, AstNode *stmt) {
     break;
   }
   case AST_IF:
+    layout_expr(layout, stmt->d.if_stmt.cond);
     layout_stmt(layout, stmt->d.if_stmt.then_stmt);
     layout_stmt(layout, stmt->d.if_stmt.else_stmt);
     break;
   case AST_WHILE:
+    layout_expr(layout, stmt->d.while_stmt.cond);
     layout_stmt(layout, stmt->d.while_stmt.body);
     break;
   case AST_FOR:
     layout_stmt(layout, stmt->d.for_stmt.init);
+    layout_expr(layout, stmt->d.for_stmt.cond);
+    layout_expr(layout, stmt->d.for_stmt.post);
     layout_stmt(layout, stmt->d.for_stmt.body);
     break;
   case AST_DO:
     layout_stmt(layout, stmt->d.do_stmt.body);
+    layout_expr(layout, stmt->d.do_stmt.cond);
     break;
   case AST_SWITCH:
+    layout_expr(layout, stmt->d.switch_stmt.cond);
     layout_stmt(layout, stmt->d.switch_stmt.body);
     break;
   case AST_CASE:

@@ -114,7 +114,7 @@ static void codegen_addr(AstNode *expr) {
      * Both '.' and '->' use the record's address plus its member offset.
      * Union members have offset zero; anonymous members form nested accesses.
      */
-    codegen_addr(expr->d.member.base);
+    codegen_expr(expr->d.member.base);
     fprintf(out, "\taddq $%d, %%rax\n", expr->d.member.member->offset);
     break;
   case AST_STRING_LITERAL: {
@@ -157,11 +157,17 @@ static void codegen_load(Type *type, const char *dst) {
 }
 
 /*
- * Store the value in %rcx through the address in %rax. Both registers
- * are preserved so the caller can produce the expression's result.
+ * Store the value in %rcx through the address in %rax. For records, %rcx
+ * points to the source bytes; the copy preserves %rax and clobbers %rcx,
+ * %rsi and %rdi. Scalar stores preserve both input registers.
  */
 static void codegen_store(Type *type) {
-  if (type->size == 8)
+  if (is_record(type)) {
+    fprintf(out, "\tmovq %%rcx, %%rsi\n");
+    fprintf(out, "\tmovq %%rax, %%rdi\n");
+    fprintf(out, "\tmovl $%d, %%ecx\n", type_size(type));
+    fprintf(out, "\trep movsb\n");
+  } else if (type->size == 8)
     fprintf(out, "\tmovq %%rcx, (%%rax)\n");
   else if (type->size == 1)
     fprintf(out, "\tmovb %%cl, (%%rax)\n");
@@ -284,8 +290,10 @@ static void codegen_expr(AstNode *expr) {
     fprintf(out, "\tpopq %%rcx\n");
     push_depth--;
     codegen_store(expr->type);
-    fprintf(out, "\tmovq %%rcx, %%rax\n");
-    codegen_normalize(expr->type);
+    if (!is_record(expr->type)) {
+      fprintf(out, "\tmovq %%rcx, %%rax\n");
+      codegen_normalize(expr->type);
+    }
     break;
   case AST_COMPOUND_ASSIGN: {
     AstKind op = expr->d.compound_assign.op;
@@ -324,6 +332,12 @@ static void codegen_expr(AstNode *expr) {
   }
   case AST_CAST:
     codegen_expr(expr->d.unary.operand);
+    if (is_record(expr->type)) {
+      fprintf(out, "\tmovq %%rax, %%rcx\n");
+      fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", expr->d.unary.offset);
+      codegen_store(expr->type);
+      break;
+    }
     if ((is_integer(expr->type) || expr->type->kind == TYPE_PTR) &&
         is_integer(expr->d.unary.operand->type) &&
         expr->type->size > expr->d.unary.operand->type->size)
@@ -763,6 +777,12 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
         break;
       }
       codegen_expr(stmt->d.decl.init);
+      if (is_record(stmt->d.decl.var->type)) {
+        fprintf(out, "\tmovq %%rax, %%rcx\n");
+        fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", stmt->d.decl.var->offset);
+        codegen_store(stmt->d.decl.var->type);
+        break;
+      }
       if (stmt->d.decl.var->type->size == 8)
         fprintf(out, "\tmovq %%rax, -%d(%%rbp)\n", stmt->d.decl.var->offset);
       else if (stmt->d.decl.var->type->size == 1)

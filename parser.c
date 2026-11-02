@@ -1013,10 +1013,10 @@ static AstNode *parse_typedef_declarators(Parser *p, Type *base) {
 static AstNode *parse_initializer(Parser *p, Type *type) {
   Token loc = p->current;
   AstNode *expr;
-  if (is_record(type))
-    parse_error(p, "%s initializers are not supported yet",
-                type->kind == TYPE_STRUCT ? "struct" : "union");
   parser_advance(p);
+  if (is_record(type) && p->current.kind == TOKEN_LBRACE)
+    error_at(p, loc, "%s initializer lists are not supported yet",
+             type->kind == TYPE_STRUCT ? "struct" : "union");
   if (type->kind == TYPE_ARRAY && p->current.kind == TOKEN_LBRACE) {
     if (p->lookahead.kind != TOKEN_STRING_LITERAL)
       error_at(p, loc, "array initializers are not supported yet");
@@ -1449,15 +1449,6 @@ static AstNode *parse_condition(Parser *p) {
   return sema_check_condition(p, parse_expression(p));
 }
 
-/* Record values need aggregate codegen, including in discarded expressions. */
-static AstNode *parse_discarded_expression(Parser *p) {
-  AstNode *expr = parse_expression(p);
-  if (is_record(expr->type))
-    error_at(p, expr->loc, "%s values are not supported yet",
-             expr->type->kind == TYPE_STRUCT ? "struct" : "union");
-  return expr;
-}
-
 /*
  * conditional-expression:
  *   logical-OR-expression
@@ -1814,7 +1805,7 @@ static AstNode *parse_for_stmt(Parser *p) {
     parser_advance(p);
   } else {
     AstNode *init = new_ast_node(p, AST_EXPR_STMT);
-    init->d.expr_stmt.expr = parse_discarded_expression(p);
+    init->d.expr_stmt.expr = parse_expression(p);
     parse_expect(p, TOKEN_SEMICOLON, "expect ';'");
     for_node->d.for_stmt.init = init;
   }
@@ -1825,7 +1816,7 @@ static AstNode *parse_for_stmt(Parser *p) {
   parse_expect(p, TOKEN_SEMICOLON, "expect ';'");
 
   if (p->current.kind != TOKEN_RPAREN)
-    for_node->d.for_stmt.post = parse_discarded_expression(p);
+    for_node->d.for_stmt.post = parse_expression(p);
   parse_expect(p, TOKEN_RPAREN, "expect ')'");
 
   ++p->loop_depth;
@@ -2124,7 +2115,7 @@ static AstNode *parse_stmt(Parser *p, bool allow_decl) {
     return stmt;
   default:
     stmt = new_ast_node(p, AST_EXPR_STMT);
-    stmt->d.expr_stmt.expr = parse_discarded_expression(p);
+    stmt->d.expr_stmt.expr = parse_expression(p);
     parse_semicolon(p);
     return stmt;
   }

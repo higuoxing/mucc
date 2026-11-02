@@ -342,6 +342,7 @@ typedef struct AstNode {
 
     struct {
       struct AstNode *operand;
+      int offset; /* Stack slot for an aggregate AST_CAST value, set by layout. */
     } unary;
 
     struct {

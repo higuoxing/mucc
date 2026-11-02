@@ -50,6 +50,24 @@ bool is_record(const Type *type) {
 }
 
 /*
+ * Const members make an entire record non-modifiable, including through
+ * nested records and arrays. A pointer's pointee is not part of its object.
+ */
+bool contains_const(const Type *type) {
+  Member *member;
+  if (type->is_const)
+    return true;
+  if (type->kind == TYPE_ARRAY)
+    return contains_const(type->base);
+  if (is_record(type)) {
+    for (member = type->members; member; member = member->next)
+      if (contains_const(member->type))
+        return true;
+  }
+  return false;
+}
+
+/*
  * Return the immediate member containing name. For an anonymous struct or
  * union, callers follow this member and repeat lookup in its type.
  */

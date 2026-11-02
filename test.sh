@@ -167,6 +167,123 @@ function check_error() {
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
+# Aggregate values copy records and preserve non-lvalue expression results.
+check struct-assignment-by-value 42 'struct S { int x; }; int main(void) { struct S a; struct S b; b.x = 42; a = b; b.x = 7; return a.x; }'
+check union-assignment-by-value 42 'union U { long x; char bytes[16]; }; int main(void) { union U a; union U b; b.x = 42; a = b; b.x = 7; return a.x; }'
+check aggregate-struct-copy-initializer 42 'struct S { int x; }; int main(void) { struct S a; a.x = 42; struct S b = a; a.x = 7; return b.x; }'
+check aggregate-union-copy-initializer 42 'union U { long x; int y; }; int main(void) { union U a; a.x = 42; union U b = a; a.x = 7; return b.x; }'
+check aggregate-const-source-and-destination 42 'struct S { int x; }; int main(void) { struct S a; a.x = 42; const struct S b = a; struct S c = b; const struct S d = c; return d.x; }'
+check aggregate-union-const-copy 42 'union U { long x; }; int main(void) { union U a; a.x = 42; const union U b = a; union U c = b; return c.x; }'
+check aggregate-self-assignment 42 'struct S { int x; }; int main(void) { struct S a; a.x = 42; a = a; return a.x; }'
+check aggregate-chain-assignment 42 'struct S { int x; }; int main(void) { struct S a; struct S b; struct S c; c.x = 14; a = b = c; return a.x + b.x + c.x; }'
+check aggregate-assignment-result-member 42 'struct S { int x; }; int main(void) { struct S a; struct S b; b.x = 42; return (a = b).x; }'
+check aggregate-initialize-from-assignment 42 'struct S { int x; }; int main(void) { struct S a; struct S b; b.x = 42; struct S c = (a = b); return c.x; }'
+check aggregate-pointer-copy 42 'struct S { int x; }; int main(void) { struct S a; struct S b; struct S *p = &a; struct S *q = &b; q->x = 42; *p = *q; return p->x; }'
+check aggregate-array-element-copy 42 'struct S { int x; }; int main(void) { struct S a[2]; a[0].x = 42; a[1] = a[0]; return a[1].x; }'
+check aggregate-padded-nested-copy 42 'struct I { short x; char c; }; struct S { char c; long x; struct I i; }; int main(void) { struct S a; a.c = 2; a.x = 30; a.i.x = 7; a.i.c = 3; struct S b = a; return b.c + b.x + b.i.x + b.i.c; }'
+check aggregate-struct-containing-union 42 'union U { long x; char bytes[16]; }; struct S { int x; union U u; }; int main(void) { struct S a; a.x = 20; a.u.x = 22; struct S b = a; return b.x + b.u.x; }'
+check aggregate-union-containing-struct 42 'struct S { int x; int y; }; union U { struct S s; long n; }; int main(void) { union U a; a.s.x = 20; a.s.y = 22; union U b = a; return b.s.x + b.s.y; }'
+check aggregate-nested-member-assignment 42 'struct I { int x; }; struct S { struct I i; }; int main(void) { struct S a; struct S b; b.i.x = 42; a.i = b.i; return a.i.x; }'
+check aggregate-anonymous-member-copy 42 'struct S { union { struct { int x; int y; }; long n; }; }; int main(void) { struct S a; a.x = 20; a.y = 22; struct S b = a; return b.x + b.y; }'
+check aggregate-array-member-copy 42 'struct S { int a[2]; }; int main(void) { struct S a; a.a[0] = 20; a.a[1] = 22; struct S b = a; a.a[0] = 0; return b.a[0] + b.a[1]; }'
+check aggregate-array-member-of-result 42 'struct S { int a[2]; }; int sum(int *p) { return p[0] + p[1]; } int main(void) { struct S a; struct S b; b.a[0] = 20; b.a[1] = 22; return sum((a = b).a); }'
+check aggregate-pointer-to-const-member 42 'struct S { const int *p; }; int main(void) { int n = 42; struct S a; a.p = &n; struct S b; b = a; return *b.p; }'
+check aggregate-const-members-copy-initializer 0 'struct S { const int x; int y; } a; int main(void) { struct S b = a; b.y = 42; return b.x + b.y - 42; }'
+check aggregate-nested-const-copy-initializer 0 'struct I { const int x; }; struct S { struct I a[2]; } a; int main(void) { struct S b = a; return b.a[1].x; }'
+check aggregate-const-pointer-copy-initializer 0 'struct S { int *const p; } a; int main(void) { struct S b = a; return b.p != 0; }'
+check aggregate-global-source-and-destination 42 'struct S { long x; } a; struct S b; int main(void) { a.x = 42; b = a; a.x = 0; return b.x; }'
+check \
+    aggregate-extern-source \
+    42 \
+    'struct S { long x; }; extern struct S a; int main(void) { a.x = 42; struct S b = a; return b.x; }' \
+    'struct S { long x; } a;'
+check aggregate-conditional-true 42 'struct S { int x; }; int main(void) { struct S a; struct S b; a.x = 42; b.x = 7; struct S c = 1 ? a : b; return c.x; }'
+check aggregate-conditional-false 42 'union U { long x; }; int main(void) { union U a; union U b; a.x = 7; b.x = 42; union U c = 0 ? a : b; return c.x; }'
+check aggregate-conditional-const-member 42 'struct S { int x; }; int main(void) { struct S a; a.x = 42; const struct S b = a; return (0 ? a : b).x; }'
+check aggregate-conditional-selected-side-effects 42 'struct S { int x; }; int main(void) { struct S a; struct S b; a.x = 20; b.x = 21; int n = 0; struct S c = 1 ? (++n, a) : (++n, b); return c.x + n + b.x; }'
+check aggregate-comma-result 42 'struct S { int x; }; int main(void) { struct S a; a.x = 41; int n = 0; struct S b = (++n, a); return b.x + n; }'
+check aggregate-discarded-values 42 'struct S { int x; }; union U { int x; }; int main(void) { struct S s; union U u; s.x = 20; u.x = 22; s; u; (void)s; (void)u; return s.x + u.x; }'
+check aggregate-lhs-evaluated-once 42 'struct S { int x; }; int main(void) { struct S a[2]; struct S b; b.x = 40; int i = 0; a[i++] = b; return a[0].x + i + 1; }'
+check aggregate-rhs-evaluated-once 42 'struct S { int x; }; int main(void) { struct S a[2]; struct S b; a[0].x = 40; int i = 0; b = a[i++]; return b.x + i + 1; }'
+check aggregate-copy-with-call 42 'struct S { int x; } a; int count; struct S *get(void) { ++count; return &a; } int main(void) { a.x = 40; struct S b; *get() = (b = a); return a.x + count + 1; }'
+check aggregate-nested-function-call 42 'struct S { long x; }; int add(int a, int b, int c, int d, int e, int f, int g, int h) { return a+b+c+d+e+f+g+h; } int main(void) { struct S a; struct S b; b.x = 14; return add(1,2,3,4,5,6,7,(a=b).x); }'
+check aggregate-if-expression-layout 42 'struct S { int x; }; int main(void) { struct S a; struct S b; b.x = 42; if ((a = b).x == 42) return a.x; return 0; }'
+check aggregate-loop-expression-layout 42 'struct S { int x; }; int main(void) { struct S a; struct S b; b.x = 20; int n = 0; for (a=b; (a=b).x < 21; a=b) { b.x++; n++; } while ((a=b).x < 22) b.x++; do { n += 19; } while ((a=b).x < 22); return a.x + n; }'
+check aggregate-switch-expression-layout 42 'struct S { int x; }; int main(void) { struct S a; struct S b; b.x = 42; switch ((a=b).x) { case 42: return a.x; } return 0; }'
+check aggregate-label-expression-layout 42 'struct S { int x; }; int main(void) { struct S a; struct S b; b.x = 42; goto L; L: a=b; return a.x; }'
+check aggregate-sizeof-unevaluated 42 'struct S { int x; }; int main(void) { struct S a; struct S b; a.x = 42; b.x = 7; int n = sizeof(a=b); return a.x + n - sizeof(struct S); }'
+check aggregate-sizeof-no-temporary-storage 1 'struct S { char bytes[1073741824]; } a; int main(void) { return sizeof(1 ? a : a) == 1073741824UL; }'
+check aggregate-copy-bytes-1 42 'struct S { unsigned char bytes[1]; }; int main(void) { struct S a; int i; for (i=0; i<1; i++) a.bytes[i]=42; struct S b=a; for (i=0; i<1; i++) if (b.bytes[i]!=42) return 1; return 42; }'
+check aggregate-copy-bytes-2 42 'struct S { unsigned char bytes[2]; }; int main(void) { struct S a; int i; for (i=0; i<2; i++) a.bytes[i]=42; struct S b=a; for (i=0; i<2; i++) if (b.bytes[i]!=42) return 1; return 42; }'
+check aggregate-copy-bytes-3 42 'struct S { unsigned char bytes[3]; }; int main(void) { struct S a; int i; for (i=0; i<3; i++) a.bytes[i]=42; struct S b=a; for (i=0; i<3; i++) if (b.bytes[i]!=42) return 1; return 42; }'
+check aggregate-copy-bytes-8 42 'struct S { unsigned char bytes[8]; }; int main(void) { struct S a; int i; for (i=0; i<8; i++) a.bytes[i]=42; struct S b=a; for (i=0; i<8; i++) if (b.bytes[i]!=42) return 1; return 42; }'
+check aggregate-copy-bytes-17 42 'struct S { unsigned char bytes[17]; }; int main(void) { struct S a; int i; for (i=0; i<17; i++) a.bytes[i]=42; struct S b=a; for (i=0; i<17; i++) if (b.bytes[i]!=42) return 1; return 42; }'
+check aggregate-copy-bytes-64 42 'struct S { unsigned char bytes[64]; }; int main(void) { struct S a; int i; for (i=0; i<64; i++) a.bytes[i]=42; struct S b=a; for (i=0; i<64; i++) if (b.bytes[i]!=42) return 1; return 42; }'
+check aggregate-copy-bytes-257 42 'struct S { unsigned char bytes[257]; }; int main(void) { struct S a; int i; for (i=0; i<257; i++) a.bytes[i]=42; struct S b=a; for (i=0; i<257; i++) if (b.bytes[i]!=42) return 1; return 42; }'
+
+check_error aggregate-incompatible-struct-assignment 'struct A { int x; }; struct B { int x; }; int main(void) { struct A a; struct B b; a = b; return 0; }' \
+            '1:86: error: incompatible assignment type'
+check_error aggregate-incompatible-union-initializer 'union A { int x; }; union B { int x; }; int main(void) { union A a; union B b = a; return 0; }' \
+            '1:77: error: incompatible initializer type'
+check_error aggregate-struct-union-assignment 'struct S { int x; }; union U { int x; }; int main(void) { struct S a; union U b; a = b; return 0; }' \
+            '1:84: error: incompatible assignment type'
+check_error aggregate-to-scalar-initializer 'struct S { int x; }; int main(void) { struct S a; int b = a; return 0; }' \
+            '1:55: error: incompatible initializer type'
+check_error aggregate-const-assignment 'struct S { int x; }; int main(void) { struct S a; const struct S b = a; b = a; return 0; }' \
+            '1:75: error: invalid assignment target'
+check_error aggregate-const-member-assignment 'struct S { const int x; }; int main(void) { struct S a; struct S b; a = b; return 0; }' \
+            '1:71: error: invalid assignment target'
+check_error aggregate-const-union-member-assignment 'union U { int x; const long y; }; int main(void) { union U a; union U b; a = b; return 0; }' \
+            '1:76: error: invalid assignment target'
+check_error aggregate-nested-const-assignment 'struct I { const int x; }; struct S { struct I i; }; int main(void) { struct S a; struct S b; a = b; return 0; }' \
+            '1:97: error: invalid assignment target'
+check_error aggregate-array-const-assignment 'struct S { const int x[2]; }; int main(void) { struct S a; struct S b; a = b; return 0; }' \
+            '1:74: error: invalid assignment target'
+check_error aggregate-array-nested-const-assignment 'struct I { const int x; }; struct S { struct I i[2]; }; int main(void) { struct S a; struct S b; a = b; return 0; }' \
+            '1:100: error: invalid assignment target'
+check_error aggregate-const-pointer-member-assignment 'struct S { int *const p; }; int main(void) { struct S a; struct S b; a = b; return 0; }' \
+            '1:72: error: invalid assignment target'
+check_error aggregate-result-assignment 'struct S { int x; }; int main(void) { struct S a; struct S b; (a=b) = b; return 0; }' \
+            '1:69: error: invalid assignment target'
+check_error aggregate-result-member-assignment 'struct S { int x; }; int main(void) { struct S a; struct S b; (a=b).x = 1; return 0; }' \
+            '1:71: error: invalid assignment target'
+check_error aggregate-result-member-address 'struct S { int x; }; int main(void) { struct S a; struct S b; int *p = &(a=b).x; return 0; }' \
+            '1:72: error: invalid address-of target'
+check_error aggregate-conditional-member-assignment 'struct S { int x; }; int main(void) { struct S a; struct S b; (1 ? a : b).x = 1; return 0; }' \
+            '1:77: error: invalid assignment target'
+check_error aggregate-comma-member-assignment 'struct S { int x; }; int main(void) { struct S a; (0, a).x = 1; return 0; }' \
+            '1:60: error: invalid assignment target'
+check_error aggregate-array-assignment 'struct S { int x; }; int main(void) { struct S a[2]; struct S b[2]; a = b; return 0; }' \
+            '1:71: error: invalid assignment target'
+check_error aggregate-conditional-incompatible 'struct A { int x; }; struct B { int x; }; int main(void) { struct A a; struct B b; 1 ? a : b; return 0; }' \
+            '1:86: error: incompatible conditional operand types'
+check_error aggregate-global-copy-initializer 'struct S { int x; } a; struct S b = a;' \
+            '1:33: error: global initializer requires a scalar type'
+check_error aggregate-union-initializer-list 'union U { int x; }; int main(void) { union U a = {42}; return 0; }' \
+            '1:48: error: union initializer lists are not supported yet'
+check_error aggregate-incomplete-assignment 'struct S; extern struct S a; int main(void) { a = a; return 0; }' \
+            '1:49: error: invalid assignment target'
+check_error aggregate-comparison-eq 'struct S { int x; }; int main(void) { struct S a; return a == a; }' \
+            '1:60: error: invalid operands to comparison'
+check_error aggregate-comparison-ne 'struct S { int x; }; int main(void) { struct S a; return a != a; }' \
+            '1:60: error: invalid operands to comparison'
+check_error aggregate-comparison-lt 'struct S { int x; }; int main(void) { struct S a; return a < a; }' \
+            '1:60: error: invalid operands to comparison'
+check_error aggregate-comparison-le 'struct S { int x; }; int main(void) { struct S a; return a <= a; }' \
+            '1:60: error: invalid operands to comparison'
+check_error aggregate-comparison-gt 'struct S { int x; }; int main(void) { struct S a; return a > a; }' \
+            '1:60: error: invalid operands to comparison'
+check_error aggregate-comparison-ge 'struct S { int x; }; int main(void) { struct S a; return a >= a; }' \
+            '1:60: error: invalid operands to comparison'
+check_error aggregate-invalid-operator-add 'struct S { int x; }; int main(void) { struct S a; a + a; return 0; }' \
+            '1:53: error: invalid operands to binary +'
+check_error aggregate-invalid-operator-sub 'struct S { int x; }; int main(void) { struct S a; a - a; return 0; }' \
+            '1:53: error: invalid operands to binary -'
+check_error aggregate-invalid-operator-mul 'struct S { int x; }; int main(void) { struct S a; a * a; return 0; }' \
+            '1:53: error: invalid operands to integer operator'
+check_error aggregate-invalid-operator-shift 'struct S { int x; }; int main(void) { struct S a; a << a; return 0; }' \
+            '1:53: error: invalid operands to integer operator'
+
 # Union members share storage; anonymous records promote member names.
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' 'long' 'unsigned long' 'long long' 'unsigned long long'; do
     check "union-scalar-member-$spec" 1 "union U { $spec value; char bytes[16]; }; int main(void) { union U u; u.value = 1; return u.value == 1 && sizeof u == 16; }"
@@ -267,21 +384,17 @@ check_error union-anonymous-type-identity 'int main(void) { union { int x; } a; 
 check_error union-struct-pointer-mismatch 'union U { int x; }; struct S { int x; }; int main(void) { union U u; struct S *p = &u; return 0; }' \
             "1:80: error: incompatible initializer type"
 check_error union-initializer-not-supported 'union U { int x; }; int main(void) { union U u = 0; return 0; }' \
-            "1:48: error: union initializers are not supported yet"
+            "1:46: error: incompatible initializer type"
 check_error union-return-by-value 'union U { int x; }; union U f(void);' \
             "1:29: error: returning unions by value is not supported yet"
 check_error union-parameter-by-value 'union U { int x; }; int f(union U u);' \
             "1:35: error: passing unions by value is not supported yet"
-check_error union-assignment-by-value 'union U { int x; }; int main(void) { union U a; union U b; a = b; return 0; }' \
-            "1:64: error: union values are not supported yet"
 check_error union-unprototyped-value-argument 'int f(); union U { int x; }; int main(void) { union U u; return f(u); }' \
             "1:67: error: passing unions by value is not supported yet"
 check_error union-condition 'union U { int x; }; int main(void) { union U u; if (u) return 1; return 0; }' \
-            "1:53: error: union values are not supported yet"
+            "1:53: error: condition must have scalar type"
 check_error union-increment 'union U { int x; }; int main(void) { union U u; ++u; return 0; }' \
             "1:49: error: invalid increment target"
-check_error union-discarded-value 'union U { int x; }; int main(void) { union U u; u; return 0; }' \
-            "1:49: error: union values are not supported yet"
 check_error union-const-member-write 'union U { int x; }; const union U u; int main(void) { u.x = 1; return 0; }' \
             "1:59: error: invalid assignment target"
 check_error union-const-array-element-write 'union U { int a[2]; }; const union U u; int main(void) { u.a[0] = 1; return 0; }' \
@@ -925,7 +1038,7 @@ check_error bool-prototype-conflict-reversed 'int f(_Bool b); int f();' \
 check_error bool-void-init 'void f(void); int main(void) { _Bool b = f(); return 0; }' \
             '1:42: error: void expression used as a value'
 check_error bool-struct-init 'struct S { int x; }; int main(void) { struct S s; _Bool b = s; return 0; }' \
-            '1:61: error: struct values are not supported yet'
+            "1:57: error: incompatible initializer type"
 check_error bool-void-cast 'void f(void); int main(void) { return (_Bool)f(); }' \
             '1:46: error: cast operand must have scalar type'
 check_error bool-pointer-incompatible 'int main(void) { _Bool b; unsigned char *p = &b; return 0; }' \
@@ -1301,7 +1414,7 @@ check_error global-initializer-evaluated-call 'int f(void); int x = 1 && f();' "
 check_error global-initializer-incompatible-string 'int x = "A";' "1:5: error: incompatible initializer type"
 check_error global-initializer-void-call 'void f(void); int x = f();' "1:23: error: void expression used as a value"
 check_error global-initializer-array-unsupported 'int a[2] = {1,2};' "1:10: error: array initializers are not supported yet"
-check_error global-initializer-struct-unsupported 'struct S { int x; }; struct S s = {1};' "1:33: error: struct initializers are not supported yet"
+check_error global-initializer-struct-unsupported 'struct S { int x; }; struct S s = {1};' "1:33: error: struct initializer lists are not supported yet"
 check_error global-initializer-division-by-zero 'int x = 1 / 0;' "1:14: error: division by zero in constant expression"
 check_error global-initializer-signed-overflow 'int x = 2147483647 + 1;' "1:23: error: integer overflow in constant expression"
 check_error global-initializer-invalid-shift 'int x = 1 << 32;' "1:16: error: invalid shift count in constant expression"
@@ -1843,7 +1956,8 @@ check_error compound-pointer-shift 'int main(void) { int a[1]; int *p = a; p <<=
 check_error compound-pointer-member-void 'struct S { void *p; }; int main(void) { struct S s; s.p += 1; return 0; }' '1:57: error: pointer arithmetic on void pointer'
 check_error compound-pointer-member-incomplete 'struct S { struct T *p; }; int main(void) { struct S s; s.p += 1; return 0; }' '1:61: error: pointer arithmetic on incomplete type'
 check_error compound-array-member-target 'struct S { int a[2]; }; int main(void) { struct S s; s.a += 1; return 0; }' '1:58: error: invalid assignment target'
-check_error compound-struct-target 'struct S { int x; }; int main(void) { struct S s; s += 1; return 0; }' '1:51: error: struct values are not supported yet'
+check_error compound-struct-target 'struct S { int x; }; int main(void) { struct S s; s += 1; return 0; }' \
+            "1:53: error: invalid operands to binary +"
 check_error compound-result-is-not-lvalue 'int main(void) { int a = 0; (a += 1) += 1; return 0; }' '1:38: error: invalid assignment target'
 check_error compound-result-address 'int main(void) { int a = 0; int *p = &(a += 1); return 0; }' '1:38: error: invalid address-of target'
 check_error compound-result-not-null-constant 'int main(void) { int a = 0; int *p = (a += 0); return 0; }' '1:34: error: incompatible initializer type'
@@ -2306,7 +2420,8 @@ check_error struct-incomplete-local 'int main(void) { struct S s; return 0; }' '
 check_error struct-incomplete-array 'int main(void) { struct S a[2]; return 0; }' '1:28: error: array element has incomplete type'
 check_error struct-array-overflow 'struct S { long x[268435455]; long y[2]; };' '1:36: error: struct size exceeds supported limit'
 check_error struct-tail-padding-overflow 'struct S { long x; char a[2147483639]; };' '1:1: error: struct size exceeds supported limit'
-check_error struct-initializer 'struct S { int x; }; int main(void) { struct S s = 0; return 0; }' '1:50: error: struct initializers are not supported yet'
+check_error struct-initializer 'struct S { int x; }; int main(void) { struct S s = 0; return 0; }' \
+            "1:48: error: incompatible initializer type"
 check_error struct-return-by-value 'struct S { int x; }; struct S f(void);' '1:31: error: returning structs by value is not supported yet'
 check_error struct-parameter-by-value 'struct S { int x; }; int f(struct S s);' '1:37: error: passing structs by value is not supported yet'
 check_error struct-pointer-type-mismatch 'struct A { int x; }; struct B { int x; }; int main(void) { struct A *a; struct B *b = a; return 0; }' '1:83: error: incompatible initializer type'
@@ -2318,11 +2433,12 @@ check_error struct-prototype-tag-scope 'int f(struct S *p); struct S { int x; };
 check_error struct-incomplete-pointer-add 'int main(void) { struct S *p; p + 1; return 0; }' '1:33: error: pointer arithmetic on incomplete type'
 check_error struct-incomplete-pointer-increment 'int main(void) { struct S *p; p++; return 0; }' '1:32: error: pointer arithmetic on incomplete type'
 check_error struct-incomplete-pointer-compound 'int main(void) { struct S *p; p += 1; return 0; }' '1:33: error: pointer arithmetic on incomplete type'
-check_error struct-assignment-by-value 'struct S { int x; }; int main(void) { struct S a; struct S b; a = b; return 0; }' '1:67: error: struct values are not supported yet'
 check_error struct-unprototyped-call 'int f(); struct S { int x; }; int main(void) { struct S a; return f(a); }' '1:69: error: passing structs by value is not supported yet'
-check_error struct-condition 'struct S { int x; }; int main(void) { struct S a; if (a) return 1; return 0; }' '1:55: error: struct values are not supported yet'
+check_error struct-condition 'struct S { int x; }; int main(void) { struct S a; if (a) return 1; return 0; }' \
+            "1:55: error: condition must have scalar type"
 check_error struct-prefix-increment 'struct S { int x; }; int main(void) { struct S a; ++a; return 0; }' '1:51: error: invalid increment target'
-check_error struct-comparison 'struct S { int x; }; int main(void) { struct S a; return a == a; }' '1:58: error: struct values are not supported yet'
+check_error struct-comparison 'struct S { int x; }; int main(void) { struct S a; return a == a; }' \
+            "1:60: error: invalid operands to comparison"
 
 # Struct member addresses reuse scalar loads, stores, and pointer arithmetic.
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' 'long' 'unsigned long' 'long long' 'unsigned long long'; do
@@ -2363,7 +2479,8 @@ check_error member-dot-array 'struct S { int x; }; int main(void) { struct S a[2
 check_error member-arrow-integer 'int main(void) { int x; return x->y; }' '1:33: error: '\''->'\'' requires a pointer to struct or union'
 check_error member-arrow-integer-pointer 'int main(void) { int *p; return p->x; }' '1:34: error: '\''->'\'' requires a pointer to struct or union'
 check_error member-arrow-void-pointer 'int main(void) { void *p; return p->x; }' '1:35: error: '\''->'\'' requires a pointer to struct or union'
-check_error member-arrow-struct 'struct S { int x; }; int main(void) { struct S s; return s->x; }' '1:58: error: struct values are not supported yet'
+check_error member-arrow-struct 'struct S { int x; }; int main(void) { struct S s; return s->x; }' \
+            "1:59: error: '->' requires a pointer to struct or union"
 check_error member-arrow-pointer-to-pointer 'struct S { int x; }; int main(void) { struct S **p; return p->x; }' '1:61: error: '\''->'\'' requires a pointer to struct or union'
 check_error member-incomplete-struct 'int main(void) { struct S *p; return p->x; }' '1:39: error: member access on incomplete struct'
 check_error member-missing-dot 'struct S { int x; }; int main(void) { struct S s; return s.y; }' '1:60: error: no member named '\''y'\'' in struct'
