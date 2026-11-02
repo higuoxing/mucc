@@ -59,7 +59,8 @@ static AstNode *parse_stmt(Parser *p, bool allow_decl);
 static AstNode *parse_compound_stmt(Parser *p);
 static AstNode *parse_block(Parser *p);
 static AstNode *parse_external_declaration(Parser *p);
-static Type *parse_declspecs(Parser *p, StorageClass *storage_class);
+static Type *parse_declspecs(Parser *p, StorageClass *storage_class,
+                             bool *anonymous_record);
 static AstNode *parse_typedef_declarators(Parser *p, Type *base);
 static Type *parse_declarator(Parser *p, Type *type, Token *name);
 static Type *parse_type_name(Parser *p);
@@ -74,7 +75,7 @@ static bool is_declspec(Parser *p, Token token) {
          kind == TOKEN_EXTERN || kind == TOKEN_CONST || kind == TOKEN_BOOL ||
          kind == TOKEN_CHAR || kind == TOKEN_SHORT || kind == TOKEN_INT ||
          kind == TOKEN_LONG || kind == TOKEN_UNSIGNED || kind == TOKEN_VOID ||
-         kind == TOKEN_STRUCT || kind == TOKEN_ENUM;
+         kind == TOKEN_STRUCT || kind == TOKEN_UNION || kind == TOKEN_ENUM;
 }
 
 /* assignment-operator: = += -= *= /= %= <<= >>= &= ^= |=  (C11 6.5.16) */
@@ -561,53 +562,76 @@ static Type *parse_enum_specifier(Parser *p) {
 }
 
 /*
- * Parse one member declarator and update the struct's size and alignment.
+ * Check names promoted from anonymous members as well as ordinary members.
+ */
+static void check_member_names(Parser *p, Type *type, Member *member) {
+  if (member->name.kind == TOKEN_IDENTIFIER) {
+    if (find_member(type, member->name))
+      error_at(p, member->name, "duplicate %s member",
+               type->kind == TYPE_STRUCT ? "struct" : "union");
+  } else {
+    Member *inner;
+    for (inner = unqualified_type(member->type)->members; inner;
+         inner = inner->next)
+      check_member_names(p, type, inner);
+  }
+}
+
+/*
+ * Parse one member declarator and update the record's size and alignment.
  * The caller links the returned member before parsing the next declarator.
  */
-static Member *parse_struct_member(Parser *p, Type *type, Type *base,
-                                   int *size) {
-  Token name;
-  Type *member_type = parse_declarator(p, base, &name);
+static Member *parse_record_member(Parser *p, Type *type, Type *base, int *size,
+                                   bool anonymous) {
+  Token name = p->current;
+  Type *member_type = anonymous ? base : parse_declarator(p, base, &name);
   Member *member;
   int alignment;
-  int padding;
+  int padding = 0;
 
-  if (name.kind != TOKEN_IDENTIFIER)
+  if (!anonymous && name.kind != TOKEN_IDENTIFIER)
     error_at(p, name, "expect member name");
   if (member_type->kind == TYPE_VOID)
     error_at(p, name, "member has void type");
   if (type_size(member_type) < 0)
     error_at(p, name, "member has incomplete type");
-  for (member = type->members; member; member = member->next)
-    if (same_identifier(member->name, name))
-      error_at(p, name, "duplicate struct member");
   alignment = type_alignment(member_type);
-  padding = (alignment - *size % alignment) % alignment;
-  if (*size > INT_MAX - padding ||
-      type_size(member_type) > INT_MAX - *size - padding)
-    error_at(p, name, "struct size exceeds supported limit");
+  if (type->kind == TYPE_STRUCT) {
+    padding = (alignment - *size % alignment) % alignment;
+    if (*size > INT_MAX - padding ||
+        type_size(member_type) > INT_MAX - *size - padding)
+      error_at(p, name, "struct size exceeds supported limit");
+  }
   member = calloc(1, sizeof(Member));
   if (!member)
     error_at(p, name, "out of memory");
   member->name = name;
   member->type = member_type;
-  member->offset = *size + padding;
-  *size = member->offset + type_size(member_type);
+  check_member_names(p, type, member);
+  if (type->kind == TYPE_STRUCT) {
+    member->offset = *size + padding;
+    *size = member->offset + type_size(member_type);
+  } else if (type_size(member_type) > *size) {
+    *size = type_size(member_type);
+  }
   if (alignment > type->alignment)
     type->alignment = alignment;
   return member;
 }
 
 /*
- * struct-specifier:
- *   'struct' identifier
- *   'struct' identifier_opt '{' struct-declaration+ '}'
+ * struct-or-union-specifier:
+ *   ('struct' | 'union') identifier
+ *   ('struct' | 'union') identifier_opt '{' struct-declaration+ '}'
  * struct-declaration:
  *   declaration-specifiers declarator (',' declarator)* ';'
- * (C11 6.7.2.1, excluding bit-fields and anonymous members.)
+ *   declaration-specifiers ';' (an anonymous struct or union definition)
+ * (C11 6.7.2.1, excluding bit-fields and flexible array members.)
  */
-static Type *parse_struct_specifier(Parser *p) {
+static Type *parse_record_specifier(Parser *p) {
   Token loc = p->current;
+  TypeKind kind = loc.kind == TOKEN_STRUCT ? TYPE_STRUCT : TYPE_UNION;
+  const char *kind_name = kind == TYPE_STRUCT ? "struct" : "union";
   Token name = {0};
   Tag *tag = NULL;
   Type *type;
@@ -622,16 +646,16 @@ static Type *parse_struct_specifier(Parser *p) {
                    p->current.kind == TOKEN_LBRACE ||
                        p->current.kind == TOKEN_SEMICOLON);
   } else if (p->current.kind != TOKEN_LBRACE) {
-    parse_error(p, "expect struct tag or '{'");
+    parse_error(p, "expect %s tag or '{'", kind_name);
   }
 
   if (tag) {
-    if (tag->type->kind != TYPE_STRUCT)
+    if (tag->type->kind != kind)
       error_at(p, name, "tag '%.*s' declared as a different kind", name.len,
                name.start);
     type = tag->type;
   } else {
-    type = struct_type();
+    type = record_type(kind);
     if (!type)
       error_at(p, loc, "out of memory");
     if (name.kind == TOKEN_IDENTIFIER) {
@@ -641,18 +665,21 @@ static Type *parse_struct_specifier(Parser *p) {
   if (p->current.kind != TOKEN_LBRACE)
     return type;
   if (type->size >= 0 || (tag && tag->is_defining))
-    error_at(p, name, "redefinition of struct '%.*s'", name.len, name.start);
+    error_at(p, name, "redefinition of %s '%.*s'", kind_name, name.len,
+             name.start);
   if (tag)
     tag->is_defining = true;
   parser_advance(p);
   tail = &type->members;
   while (p->current.kind != TOKEN_RBRACE) {
     Type *base;
+    bool anonymous;
     if (p->current.kind == TOKEN_EOF)
       parse_error(p, "expect '}'");
-    base = parse_declspecs(p, NULL);
+    base = parse_declspecs(p, NULL, &anonymous);
+    anonymous = anonymous && p->current.kind == TOKEN_SEMICOLON;
     for (;;) {
-      *tail = parse_struct_member(p, type, base, &size);
+      *tail = parse_record_member(p, type, base, &size, anonymous);
       tail = &(*tail)->next;
       if (p->current.kind != TOKEN_COMMA)
         break;
@@ -661,10 +688,10 @@ static Type *parse_struct_specifier(Parser *p) {
     parse_semicolon(p);
   }
   if (!type->members)
-    parse_error(p, "empty structs are not supported");
+    parse_error(p, "empty %ss are not supported", kind_name);
   int padding = (type->alignment - size % type->alignment) % type->alignment;
   if (size > INT_MAX - padding)
-    error_at(p, loc, "struct size exceeds supported limit");
+    error_at(p, loc, "%s size exceeds supported limit", kind_name);
   type->size = size + padding;
   if (tag)
     tag->is_defining = false;
@@ -681,8 +708,11 @@ static Type *parse_struct_specifier(Parser *p) {
  * NULL forbids storage classes in type names, members and parameters. A storage
  * class belongs to the declaration, independently of its type. Once a base type
  * is consumed, a typedef name can instead be the declarator's name.
+ * anonymous_record identifies an untagged struct or union definition, so member
+ * declarations can distinguish anonymous members from typedef or tag names.
  */
-static Type *parse_declspecs(Parser *p, StorageClass *storage_class) {
+static Type *parse_declspecs(Parser *p, StorageClass *storage_class,
+                             bool *anonymous_record) {
   enum {
     DECLSPEC_NONE = 0,
     DECLSPEC_INT = 1 << 0,
@@ -696,8 +726,9 @@ static Type *parse_declspecs(Parser *p, StorageClass *storage_class) {
     DECLSPEC_ENUM = 1 << 8,
     DECLSPEC_TYPEDEF_NAME = 1 << 9,
     DECLSPEC_BOOL = 1 << 10,
+    DECLSPEC_UNION = 1 << 11,
     DECLSPEC_EXCLUSIVE = DECLSPEC_VOID | DECLSPEC_STRUCT | DECLSPEC_ENUM |
-        DECLSPEC_TYPEDEF_NAME | DECLSPEC_BOOL,
+        DECLSPEC_TYPEDEF_NAME | DECLSPEC_BOOL | DECLSPEC_UNION,
   };
   unsigned specs = DECLSPEC_NONE;
   Type *specified_type = NULL;
@@ -706,6 +737,8 @@ static Type *parse_declspecs(Parser *p, StorageClass *storage_class) {
 
   if (storage_class)
     *storage_class = STORAGE_NONE;
+  if (anonymous_record)
+    *anonymous_record = false;
   while (is_declspec(p, p->current)) {
     TokenKind kind = p->current.kind;
     unsigned flag;
@@ -762,6 +795,9 @@ static Type *parse_declspecs(Parser *p, StorageClass *storage_class) {
     case TOKEN_STRUCT:
       flag = DECLSPEC_STRUCT;
       break;
+    case TOKEN_UNION:
+      flag = DECLSPEC_UNION;
+      break;
     case TOKEN_ENUM:
       flag = DECLSPEC_ENUM;
       break;
@@ -785,9 +821,11 @@ static Type *parse_declspecs(Parser *p, StorageClass *storage_class) {
          (specs & (DECLSPEC_INT | DECLSPEC_LONG | DECLSPEC_SHORT))) ||
         ((specs & DECLSPEC_SHORT) && (specs & DECLSPEC_LONG)))
       parse_error(p, "invalid combination of type specifiers");
-    if (kind == TOKEN_STRUCT)
-      specified_type = parse_struct_specifier(p);
-    else if (kind == TOKEN_ENUM)
+    if (kind == TOKEN_STRUCT || kind == TOKEN_UNION) {
+      if (anonymous_record)
+        *anonymous_record = p->lookahead.kind == TOKEN_LBRACE;
+      specified_type = parse_record_specifier(p);
+    } else if (kind == TOKEN_ENUM)
       specified_type = parse_enum_specifier(p);
     else {
       if (kind == TOKEN_IDENTIFIER)
@@ -804,6 +842,7 @@ static Type *parse_declspecs(Parser *p, StorageClass *storage_class) {
     type = &builtin_type_void;
     break;
   case DECLSPEC_STRUCT:
+  case DECLSPEC_UNION:
   case DECLSPEC_ENUM:
   case DECLSPEC_TYPEDEF_NAME:
     type = specified_type;
@@ -929,7 +968,7 @@ static Type *parse_declarator(Parser *p, Type *type, Token *name) {
  */
 static Type *parse_type_name(Parser *p) {
   Token name;
-  Type *type = parse_declspecs(p, NULL);
+  Type *type = parse_declspecs(p, NULL, NULL);
   type = parse_declarator(p, type, &name);
   if (name.kind == TOKEN_IDENTIFIER)
     error_at(p, name, "type name cannot contain an identifier");
@@ -943,7 +982,7 @@ static Type *parse_type_name(Parser *p) {
  */
 static AstNode *parse_typedef_declarators(Parser *p, Type *base) {
   AstNode *decl = new_ast_node(p, AST_DECL);
-  if ((base->kind == TYPE_STRUCT || base->kind == TYPE_ENUM) &&
+  if ((is_record(base) || base->kind == TYPE_ENUM) &&
       p->current.kind == TOKEN_SEMICOLON) {
     parser_advance(p);
     return decl;
@@ -974,8 +1013,9 @@ static AstNode *parse_typedef_declarators(Parser *p, Type *base) {
 static AstNode *parse_initializer(Parser *p, Type *type) {
   Token loc = p->current;
   AstNode *expr;
-  if (type->kind == TYPE_STRUCT)
-    parse_error(p, "struct initializers are not supported yet");
+  if (is_record(type))
+    parse_error(p, "%s initializers are not supported yet",
+                type->kind == TYPE_STRUCT ? "struct" : "union");
   parser_advance(p);
   if (type->kind == TYPE_ARRAY && p->current.kind == TOKEN_LBRACE) {
     if (p->lookahead.kind != TOKEN_STRING_LITERAL)
@@ -1002,7 +1042,7 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
   Type *type;
   StorageClass storage_class;
 
-  type = parse_declspecs(p, &storage_class);
+  type = parse_declspecs(p, &storage_class, NULL);
   if (storage_class == STORAGE_TYPEDEF) {
     if (!allow_typedef)
       error_at(p, loc, "typedef is not allowed in a for initializer");
@@ -1012,7 +1052,7 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
     error_at(p, loc, "static is not allowed in a for initializer");
   if (storage_class == STORAGE_EXTERN && !allow_typedef)
     error_at(p, loc, "extern is not allowed in a for initializer");
-  if ((type->kind == TYPE_STRUCT || type->kind == TYPE_ENUM) &&
+  if ((is_record(type) || type->kind == TYPE_ENUM) &&
       p->current.kind == TOKEN_SEMICOLON) {
     decl = new_ast_node(p, AST_DECL);
     parser_advance(p);
@@ -1409,11 +1449,12 @@ static AstNode *parse_condition(Parser *p) {
   return sema_check_condition(p, parse_expression(p));
 }
 
-/* Struct values need aggregate codegen, including in discarded expressions. */
+/* Record values need aggregate codegen, including in discarded expressions. */
 static AstNode *parse_discarded_expression(Parser *p) {
   AstNode *expr = parse_expression(p);
-  if (expr->type->kind == TYPE_STRUCT)
-    error_at(p, expr->loc, "struct values are not supported yet");
+  if (is_record(expr->type))
+    error_at(p, expr->loc, "%s values are not supported yet",
+             expr->type->kind == TYPE_STRUCT ? "struct" : "union");
   return expr;
 }
 
@@ -1579,8 +1620,9 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
   fn->loc = func_name;
   if (return_type->kind == TYPE_ARRAY)
     error_at(p, func_name, "function cannot return an array");
-  if (return_type->kind == TYPE_STRUCT)
-    error_at(p, func_name, "returning structs by value is not supported yet");
+  if (is_record(return_type))
+    error_at(p, func_name, "returning %ss by value is not supported yet",
+             return_type->kind == TYPE_STRUCT ? "struct" : "union");
 
   parse_expect(p, TOKEN_LPAREN, "expect '('");
   enter_scope(p);
@@ -1596,7 +1638,7 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
       Token param_loc = p->current;
       Type *param_type;
 
-      param_type = parse_declspecs(p, NULL);
+      param_type = parse_declspecs(p, NULL, NULL);
       param_type = parse_declarator(p, param_type, &param_name);
       if (param_type->kind == TYPE_ARRAY) {
         param_type = pointer_to(param_type->base);
@@ -1611,10 +1653,11 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
         error_at(p,
                  param_name.kind == TOKEN_IDENTIFIER ? param_name : p->current,
                  "parameter has void type");
-      if (param_type->kind == TYPE_STRUCT)
+      if (is_record(param_type))
         error_at(p,
                  param_name.kind == TOKEN_IDENTIFIER ? param_name : p->current,
-                 "passing structs by value is not supported yet");
+                 "passing %ss by value is not supported yet",
+                 param_type->kind == TYPE_STRUCT ? "struct" : "union");
       if (param_types.len >= INT_MAX)
         parse_error(p, "too many function parameters");
       if (!vector_push(&param_types, &param_type))
@@ -1682,12 +1725,12 @@ static AstNode *parse_external_declaration(Parser *p) {
   StorageClass storage_class;
 
   reset_function_state(p);
-  base = parse_declspecs(p, &storage_class);
+  base = parse_declspecs(p, &storage_class, NULL);
   if (storage_class == STORAGE_TYPEDEF) {
     parse_typedef_declarators(p, base);
     return NULL;
   }
-  if ((base->kind == TYPE_STRUCT || base->kind == TYPE_ENUM) &&
+  if ((is_record(base) || base->kind == TYPE_ENUM) &&
       p->current.kind == TOKEN_SEMICOLON) {
     parser_advance(p);
     return NULL;

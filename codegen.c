@@ -111,7 +111,8 @@ static void codegen_addr(AstNode *expr) {
   }
   case AST_MEMBER:
     /*
-     * Both '.' and '->' use the struct object's address plus its field offset.
+     * Both '.' and '->' use the record's address plus its member offset.
+     * Union members have offset zero; anonymous members form nested accesses.
      */
     codegen_addr(expr->d.member.base);
     fprintf(out, "\taddq $%d, %%rax\n", expr->d.member.member->offset);
@@ -268,7 +269,7 @@ static void codegen_expr(AstNode *expr) {
   case AST_STRING_LITERAL:
   case AST_MEMBER:
     codegen_addr(expr);
-    if (expr->type->kind != TYPE_ARRAY && expr->type->kind != TYPE_STRUCT)
+    if (expr->type->kind != TYPE_ARRAY && !is_record(expr->type))
       codegen_load(expr->type, "%rax");
     break;
   case AST_ADDR:

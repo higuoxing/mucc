@@ -167,6 +167,150 @@ function check_error() {
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
+# Union members share storage; anonymous records promote member names.
+for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' 'long' 'unsigned long' 'long long' 'unsigned long long'; do
+    check "union-scalar-member-$spec" 1 "union U { $spec value; char bytes[16]; }; int main(void) { union U u; u.value = 1; return u.value == 1 && sizeof u == 16; }"
+done
+check union-sizeof 8 'union U { char c; long n; }; int main(void) { return sizeof(union U); }'
+check union-tail-padding 16 'union U { char bytes[9]; long n; }; int main(void) { return sizeof(union U); }'
+check union-large-members-share-storage 1 'union U { char a[1073741824]; char b[1073741824]; }; int main(void) { return sizeof(union U) == 1073741824UL; }'
+check union-member-overlap 42 'union U { int a; int b; }; int main(void) { union U u; u.a = 42; return u.b; }'
+check union-member-overwrite 42 'union U { int a; int b; }; int main(void) { union U u; u.a = 20; u.b = 42; return u.a; }'
+check union-member-zero-offset 1 'union U { int a; long b; char c[9]; }; int main(void) { union U u; return (char *)&u == (char *)&u.a && (char *)&u == (char *)&u.b && (char *)&u == u.c; }'
+check union-arrow 42 'union U { int a; long b; }; int main(void) { union U u; union U *p = &u; p->b = 42; return u.b; }'
+check union-member-pointer 42 'union U { int *p; long n; }; int main(void) { int x = 42; union U u; u.p = &x; return *u.p; }'
+check union-member-narrow-values 1 'union U { char c; unsigned char b; short s; unsigned short us; }; int main(void) { union U u; u.c = 255; if (u.c != -1) return 0; u.b = 511; if (u.b != 255) return 0; u.s = 65535; if (u.s != -1) return 0; u.us = 131071; return u.us == 65535; }'
+check union-member-wide-values 1 'union U { long n; unsigned long u; }; int main(void) { union U v; v.n = -4294967296L; if (v.n != -4294967296L) return 0; v.u = 1UL << 63; return v.u >> 63 == 1; }'
+check union-member-bool 1 'union U { _Bool b; long n; }; int main(void) { union U u; u.b = 256; return u.b == 1; }'
+check union-member-compound-and-increment 42 'union U { int x; long y; }; int main(void) { union U u; u.x = 19; u.x *= 2; ++u.x; u.x++; u.x += 2; return u.x; }'
+check union-member-array 42 'union U { int a[2]; long n; }; int main(void) { union U u; u.a[0] = 20; u.a[1] = 22; int *p = u.a; return p[0] + u.a[1]; }'
+check union-array-stride 1 'union U { char a[9]; long n; }; int main(void) { union U a[2]; a[0].n = 20; a[1].n = 22; union U *p = a; return a[0].n + (p + 1)->n == 42 && (char *)&a[1] - (char *)&a[0] == 16 && &a[1] - p == 1; }'
+check union-pointer-increment 42 'union U { int x; long n; }; int main(void) { union U a[2]; union U *p = a; p++; p->x = 42; return a[1].x; }'
+check union-in-struct-layout 1 'union U { char a[9]; long n; }; struct S { char c; union U u; char end; }; int main(void) { struct S s; s.c = 7; s.u.n = 42; s.end = 9; return (char *)&s.u - (char *)&s == 8 && (char *)&s.end - (char *)&s == 24 && sizeof s == 32 && s.c == 7 && s.u.n == 42 && s.end == 9; }'
+check union-contains-struct 42 'struct S { int a; int b; }; union U { struct S s; long n; }; int main(void) { union U u; u.s.a = 20; u.s.b = 22; return u.s.a + u.s.b; }'
+check union-contains-union 42 'union I { int a; long b; }; union O { char c; union I inner; }; int main(void) { union O u; u.inner.a = 42; return u.inner.a; }'
+check union-anonymous-type 42 'int main(void) { union { int x; long y; } u; u.x = 42; return u.x; }'
+check union-typedef 42 'typedef union U { int x; long y; } U; int main(void) { U u; u.x = 42; return u.x; }'
+check union-anonymous-typedef 42 'typedef union { int x; long y; } U; int main(void) { U u; u.x = 42; return u.x; }'
+check union-forward-definition 42 'union U; union U { int x; long y; }; int main(void) { union U u; u.x = 42; return u.x; }'
+check union-self-pointer 42 'union U { int x; union U *next; }; int main(void) { union U a; union U b; b.x = 42; a.next = &b; return a.next->x; }'
+check union-pointer-function 42 'union U { int x; long y; }; union U *set(union U *p) { p->x = 42; return p; } int main(void) { union U u; return set(&u)->x; }'
+check union-global-zero 0 'union U { long n; char bytes[16]; } u; int main(void) { return u.n; }'
+check union-global-tentative 42 'union U { int x; long n; } u; union U u; int main(void) { u.x = 42; return u.x; }'
+check union-extern-before-definition 42 'extern union U u; union U { int x; long n; }; union U u; int main(void) { u.x = 42; return u.x; }'
+check union-const-member-access 42 'union U { int x; long n; }; int main(void) { union U u; u.x = 42; const union U *p = &u; return p->x; }'
+check union-const-forward-completion 1 'union U; const union U *p; union U { char a[9]; long n; }; int main(void) { union U a[2]; a[1].n = 42; p = a; return sizeof *p == 16 && (p + 1)->n == 42; }'
+check union-const-global-zero 0 'union U { int x; long n; }; const union U u; int main(void) { return u.x; }'
+check union-const-typedef-identity 42 'typedef union { int x; long n; } U; int main(void) { U u; u.x = 42; const U *p = &u; return p->x; }'
+check union-tag-and-ordinary-name 42 'union U { int U; }; int U; int main(void) { union U u; u.U = 42; return u.U; }'
+check union-tag-shadow-struct 42 'struct S { long n; }; int main(void) { union S { int x; char c; } u; u.x = 42; return u.x; }'
+check union-tag-shadow-restore 1 'union U { int x; }; int main(void) { { struct U { long a; long b; } s; if (sizeof s != 16) return 0; } union U u; return sizeof u == 4; }'
+check union-keyword-boundaries 42 'int main(void) { int union_ = 20; int union1 = 21; int unions = 1; return union_ + union1 + unions; }'
+check union-discard-void 42 'union U { int x; long n; }; int main(void) { union U u; (void)u; return 42; }'
+check union-global-member-address 42 'union U { int x; long n; } u; int *p = &u.x; int main(void) { *p = 42; return u.x; }'
+check union-anonymous-member 42 'struct S { char c; union { int x; long n; }; }; int main(void) { struct S s; s.c = 7; s.x = 42; return s.c == 7 ? s.x : 0; }'
+check union-anonymous-struct-member 42 'union U { struct { int x; int y; }; long n; }; int main(void) { union U u; u.x = 20; u.y = 22; return u.x + u.y; }'
+check union-anonymous-nested 42 'struct S { char c; union { char bytes[16]; struct { char before; union { int x; long y; }; }; }; }; int main(void) { struct S s; s.c = 7; s.before = 9; s.x = 42; return s.c == 7 && s.before == 9 ? s.x : 0; }'
+check union-anonymous-arrow 42 'struct S { union { int x; long n; }; }; int main(void) { struct S s; struct S *p = &s; p->x = 42; return p->x; }'
+check union-anonymous-address-offset 1 'struct S { char c; union { long n; struct { int a; int b; }; }; }; int main(void) { struct S s; return (char *)&s.a - (char *)&s == 8 && (char *)&s.b - (char *)&s == 12 && (char *)&s.n - (char *)&s == 8 && sizeof s == 16; }'
+check union-anonymous-array-member 42 'struct S { union { int values[2]; long n; }; }; int main(void) { struct S s; s.values[0] = 20; s.values[1] = 22; return s.values[0] + s.values[1]; }'
+check union-anonymous-const-container 42 'struct S { union { int x; long n; }; }; int main(void) { struct S s; s.x = 42; const struct S *p = &s; return p->x; }'
+check union-anonymous-const-prefix 0 'struct S { const union { int x; long n; }; } s; int main(void) { return s.x; }'
+check union-anonymous-const-suffix 0 'struct S { union { int x; long n; } const; } s; int main(void) { return s.x; }'
+check struct-anonymous-member 42 'struct S { char c; struct { int x; }; }; int main(void) { struct S s; s.c = 7; s.x = 42; return s.c == 7 ? s.x : 0; }'
+check union-named-members-separate-namespaces 42 'struct S { union { int x; } a; union { int x; } b; }; int main(void) { struct S s; s.a.x = 20; s.b.x = 22; return s.a.x + s.b.x; }'
+check union-anonymous-global-member-address 42 'struct S { char c; union { long n; struct { int a; int b; }; }; } s; int *p = &s.b; int main(void) { *p = 42; return s.b; }'
+check union-anonymous-base-evaluated-once 1 'struct S { union { int x; long n; }; }; struct S s; int calls; struct S *get(void) { calls++; return &s; } int main(void) { s.x = 41; get()->x++; return s.x == 42 && calls == 1; }'
+
+check_error union-empty 'union U {};' \
+            "1:10: error: empty unions are not supported"
+check_error union-missing-tag 'union;' \
+            "1:6: error: expect union tag or '{'"
+check_error union-missing-member-name 'union U { int; };' \
+            "1:14: error: expect member name"
+check_error union-duplicate-member 'union U { int x; long x; };' \
+            "1:23: error: duplicate union member"
+check_error union-incomplete-member 'union U { struct S s; };' \
+            "1:20: error: member has incomplete type"
+check_error union-self-member 'union U { union U value; };' \
+            "1:19: error: member has incomplete type"
+check_error union-void-member 'union U { void x; };' \
+            "1:16: error: member has void type"
+check_error union-incomplete-array-member 'union U { int a[]; };' \
+            "1:15: error: member has incomplete type"
+check_error union-redefinition 'union U { int x; }; union U { long n; };' \
+            "1:27: error: redefinition of union 'U'"
+check_error union-recursive-redefinition 'union U { union U { int x; } nested; };' \
+            "1:17: error: redefinition of union 'U'"
+check_error union-struct-tag-conflict 'struct S { int x; }; union S *p;' \
+            "1:28: error: tag 'S' declared as a different kind"
+check_error union-tag-struct-conflict 'union U { int x; }; struct U *p;' \
+            "1:28: error: tag 'U' declared as a different kind"
+check_error union-enum-tag-conflict 'enum E { A }; union E *p;' \
+            "1:21: error: tag 'E' declared as a different kind"
+check_error union-tag-enum-conflict 'union U { int x; }; enum U { A };' \
+            "1:26: error: tag 'U' declared as a different kind"
+check_error union-incomplete-local 'int main(void) { union U u; return 0; }' \
+            "1:26: error: variable has incomplete type"
+check_error union-incomplete-sizeof 'union U; int main(void) { return sizeof(union U); }' \
+            "1:34: error: sizeof cannot be applied to an incomplete type"
+check_error union-incomplete-member-access 'union U *p; int main(void) { return p->x; }' \
+            "1:38: error: member access on incomplete union"
+check_error union-incomplete-pointer-step 'union U *p; int main(void) { p++; return 0; }' \
+            "1:31: error: pointer arithmetic on incomplete type"
+check_error union-missing-member 'union U { int x; }; int main(void) { union U u; return u.y; }' \
+            "1:58: error: no member named 'y' in union"
+check_error union-type-identity 'union A { int x; }; union B { int x; }; int main(void) { union A a; union B *p = &a; return 0; }' \
+            "1:78: error: incompatible initializer type"
+check_error union-anonymous-type-identity 'int main(void) { union { int x; } a; union { int x; } *p = &a; return 0; }' \
+            "1:56: error: incompatible initializer type"
+check_error union-struct-pointer-mismatch 'union U { int x; }; struct S { int x; }; int main(void) { union U u; struct S *p = &u; return 0; }' \
+            "1:80: error: incompatible initializer type"
+check_error union-initializer-not-supported 'union U { int x; }; int main(void) { union U u = 0; return 0; }' \
+            "1:48: error: union initializers are not supported yet"
+check_error union-return-by-value 'union U { int x; }; union U f(void);' \
+            "1:29: error: returning unions by value is not supported yet"
+check_error union-parameter-by-value 'union U { int x; }; int f(union U u);' \
+            "1:35: error: passing unions by value is not supported yet"
+check_error union-assignment-by-value 'union U { int x; }; int main(void) { union U a; union U b; a = b; return 0; }' \
+            "1:64: error: union values are not supported yet"
+check_error union-unprototyped-value-argument 'int f(); union U { int x; }; int main(void) { union U u; return f(u); }' \
+            "1:67: error: passing unions by value is not supported yet"
+check_error union-condition 'union U { int x; }; int main(void) { union U u; if (u) return 1; return 0; }' \
+            "1:53: error: union values are not supported yet"
+check_error union-increment 'union U { int x; }; int main(void) { union U u; ++u; return 0; }' \
+            "1:49: error: invalid increment target"
+check_error union-discarded-value 'union U { int x; }; int main(void) { union U u; u; return 0; }' \
+            "1:49: error: union values are not supported yet"
+check_error union-const-member-write 'union U { int x; }; const union U u; int main(void) { u.x = 1; return 0; }' \
+            "1:59: error: invalid assignment target"
+check_error union-const-array-element-write 'union U { int a[2]; }; const union U u; int main(void) { u.a[0] = 1; return 0; }' \
+            "1:65: error: invalid assignment target"
+check_error union-anonymous-const-write 'struct S { union { int x; }; }; const struct S s; int main(void) { s.x = 1; return 0; }' \
+            "1:72: error: invalid assignment target"
+check_error union-anonymous-qualified-member-write 'struct S { const union { int x; }; } s; int main(void) { s.x = 1; return 0; }' \
+            "1:62: error: invalid assignment target"
+check_error union-anonymous-const-array-conversion 'struct S { union { int a[2]; }; }; const struct S s; int main(void) { int *p = s.a; return 0; }' \
+            "1:76: error: incompatible initializer type"
+check_error union-anonymous-duplicate-outer-before 'struct S { int x; union { int x; }; };' \
+            "1:31: error: duplicate struct member"
+check_error union-anonymous-duplicate-outer-after 'struct S { union { int x; }; int x; };' \
+            "1:34: error: duplicate struct member"
+check_error union-anonymous-duplicate-siblings 'struct S { union { int x; }; union { long x; }; };' \
+            "1:43: error: duplicate struct member"
+check_error union-anonymous-nested-duplicate 'union U { struct { union { int x; }; }; int x; };' \
+            "1:45: error: duplicate union member"
+check_error union-tagged-member-needs-name 'struct S { union U { int x; }; };' \
+            "1:30: error: expect member name"
+check_error union-typedef-member-needs-name 'typedef union { int x; } U; struct S { U; };' \
+            "1:41: error: expect member name"
+check_error union-tail-padding-overflow 'union U { char a[2147483647]; long n; };' \
+            "1:1: error: union size exceeds supported limit"
+check_error union-tag-outside-block 'int main(void) { { union U { int x; }; } union U u; return 0; }' \
+            "1:50: error: variable has incomplete type"
+check_error union-forward-shadow 'union U { int x; }; int main(void) { union U; union U u; return 0; }' \
+            "1:55: error: variable has incomplete type"
+
 # File-scope extern declarations share objects without allocating storage.
 check extern-object-before-definition 42 'extern int x; int x = 42; int main(void) { return x; }'
 check extern-object-after-definition 42 'int x = 42; extern int x; int main(void) { return x; }'
@@ -2213,21 +2357,21 @@ check member-conditional-pointer 42 'struct S { int x; }; int main(void) { struc
 check member-discarded-scalar 42 'struct S { int x; }; int main(void) { struct S s; s.x = 42; s.x; return (*(&s)).x; }'
 
 # Struct member access syntax and operand checks.
-check_error member-dot-integer 'int main(void) { int x; return x.y; }' '1:33: error: '\''.'\'' requires a struct operand'
-check_error member-dot-pointer 'struct S { int x; }; int main(void) { struct S *p; return p.x; }' '1:60: error: '\''.'\'' requires a struct operand'
-check_error member-dot-array 'struct S { int x; }; int main(void) { struct S a[2]; return a.x; }' '1:62: error: '\''.'\'' requires a struct operand'
-check_error member-arrow-integer 'int main(void) { int x; return x->y; }' '1:33: error: '\''->'\'' requires a pointer to struct'
-check_error member-arrow-integer-pointer 'int main(void) { int *p; return p->x; }' '1:34: error: '\''->'\'' requires a pointer to struct'
-check_error member-arrow-void-pointer 'int main(void) { void *p; return p->x; }' '1:35: error: '\''->'\'' requires a pointer to struct'
+check_error member-dot-integer 'int main(void) { int x; return x.y; }' '1:33: error: '\''.'\'' requires a struct or union operand'
+check_error member-dot-pointer 'struct S { int x; }; int main(void) { struct S *p; return p.x; }' '1:60: error: '\''.'\'' requires a struct or union operand'
+check_error member-dot-array 'struct S { int x; }; int main(void) { struct S a[2]; return a.x; }' '1:62: error: '\''.'\'' requires a struct or union operand'
+check_error member-arrow-integer 'int main(void) { int x; return x->y; }' '1:33: error: '\''->'\'' requires a pointer to struct or union'
+check_error member-arrow-integer-pointer 'int main(void) { int *p; return p->x; }' '1:34: error: '\''->'\'' requires a pointer to struct or union'
+check_error member-arrow-void-pointer 'int main(void) { void *p; return p->x; }' '1:35: error: '\''->'\'' requires a pointer to struct or union'
 check_error member-arrow-struct 'struct S { int x; }; int main(void) { struct S s; return s->x; }' '1:58: error: struct values are not supported yet'
-check_error member-arrow-pointer-to-pointer 'struct S { int x; }; int main(void) { struct S **p; return p->x; }' '1:61: error: '\''->'\'' requires a pointer to struct'
+check_error member-arrow-pointer-to-pointer 'struct S { int x; }; int main(void) { struct S **p; return p->x; }' '1:61: error: '\''->'\'' requires a pointer to struct or union'
 check_error member-incomplete-struct 'int main(void) { struct S *p; return p->x; }' '1:39: error: member access on incomplete struct'
 check_error member-missing-dot 'struct S { int x; }; int main(void) { struct S s; return s.y; }' '1:60: error: no member named '\''y'\'' in struct'
 check_error member-missing-arrow 'struct S { int x; }; int main(void) { struct S *p; return p->y; }' '1:62: error: no member named '\''y'\'' in struct'
 check_error member-name-after-dot 'struct S { int x; }; int main(void) { struct S s; return s.; }' '1:60: error: expect member name'
 check_error member-name-after-arrow 'struct S { int x; }; int main(void) { struct S *p; return p->; }' '1:62: error: expect member name'
 check_error member-keyword-name 'struct S { int x; }; int main(void) { struct S s; return s.int; }' '1:60: error: expect member name'
-check_error member-scalar-chain 'struct S { int x; }; int main(void) { struct S s; return s.x.y; }' '1:61: error: '\''.'\'' requires a struct operand'
+check_error member-scalar-chain 'struct S { int x; }; int main(void) { struct S s; return s.x.y; }' '1:61: error: '\''.'\'' requires a struct or union operand'
 check_error member-array-assignment 'struct S { int a[2]; }; int main(void) { struct S s; s.a = 0; return 0; }' '1:58: error: invalid assignment target'
 check_error member-array-increment 'struct S { int a[2]; }; int main(void) { struct S s; s.a++; return 0; }' '1:57: error: invalid increment target'
 check_error member-struct-increment 'struct T { int x; }; struct S { struct T t; }; int main(void) { struct S s; ++s.t; return 0; }' '1:77: error: invalid increment target'
@@ -2795,12 +2939,12 @@ for kw in \
 	     _Noreturn _Static_assert _Thread_local \
 	     auto break case continue default do double else \
 	     float for goto if inline register restrict signed sizeof \
-	     switch union volatile while; do
+	     switch volatile while; do
     check_error "reserved-kw-$kw" \
 		"int main() { int $kw; return 0; }" \
 		'1:18: error: expect variable name'
 done
-for kw in _Bool enum struct void; do
+for kw in _Bool enum struct union void; do
     check_error "reserved-kw-$kw" \
                 "int main() { int $kw; return 0; }" \
                 '1:18: error: invalid combination of type specifiers'

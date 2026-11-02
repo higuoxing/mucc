@@ -36,6 +36,7 @@ typedef enum {
   TYPE_ARRAY,
   TYPE_PTR,
   TYPE_STRUCT,
+  TYPE_UNION,
   TYPE_VOID,
 } TypeKind;
 
@@ -47,12 +48,12 @@ typedef struct Type {
   struct Type *unqualified; /* Original type for a const-qualified copy. */
   struct Type *base; /* Array element, pointee, or enum's compatible integer type. */
   int array_len; /* Element count for TYPE_ARRAY; -1 for an unknown bound. */
-  Member *members; /* Declaration order for TYPE_STRUCT. */
-  int alignment; /* Required alignment for TYPE_STRUCT. */
+  Member *members; /* Declaration order for structs and unions. */
+  int alignment; /* Required alignment for structs and unions. */
 } Type;
 
 struct Member {
-  Token name;
+  Token name; /* Non-identifier for an anonymous struct or union member. */
   Type *type;
   int offset;
   Member *next;
@@ -72,6 +73,8 @@ extern Type builtin_type_unsigned_long_long;
 extern Type builtin_type_void;
 
 extern bool is_integer(const Type *type);
+extern bool is_record(const Type *type);
+extern Member *find_member(const Type *type, Token name);
 extern Type *integer_promotion_type(Type *type);
 extern Type *common_integer_type(const Type *a, const Type *b);
 extern bool same_type(const Type *a, const Type *b);
@@ -82,7 +85,7 @@ extern Type *unqualified_type(Type *type);
 extern Type *const_type(Type *type);
 extern Type *pointer_to(Type *base);
 extern Type *array_of(Type *base, int length);
-extern Type *struct_type(void);
+extern Type *record_type(TypeKind kind);
 extern Type *enum_type(void);
 
 #endif

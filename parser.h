@@ -40,7 +40,7 @@ typedef struct {
   int64_t offset;
 } AddressConstant;
 
-/* Struct and enum tags share a namespace and follow block scope. */
+/* Struct, union and enum tags share a namespace and follow block scope. */
 typedef struct Tag {
   Token name;
   Type *type;
@@ -345,7 +345,7 @@ typedef struct AstNode {
     } unary;
 
     struct {
-      struct AstNode *base; /* Struct expression; arrow uses AST_DEREF. */
+      struct AstNode *base; /* Struct or union; arrow uses AST_DEREF. */
       Member *member;
     } member;
 

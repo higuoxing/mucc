@@ -19,6 +19,7 @@
 #ifndef _LEXER_H_
 #define _LEXER_H_
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -97,6 +98,7 @@ typedef enum {
   TOKEN_SWITCH,   /* 'switch' */
   TOKEN_TILDE,    /* '~' */
   TOKEN_TYPEDEF,  /* 'typedef' */
+  TOKEN_UNION,    /* 'union' */
   TOKEN_UNSIGNED, /* 'unsigned' */
   TOKEN_VOID, /* 'void' */
   TOKEN_WHILE, /* 'while' */
@@ -128,6 +130,7 @@ typedef struct {
   int line;
 } Lexer;
 
+extern bool same_identifier(Token a, Token b);
 extern void lexer_init(Lexer *l, const char *filename,
                        const char *source);
 extern Token lexer_next_token(Lexer *l);

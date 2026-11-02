@@ -16,14 +16,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <string.h>
-
 #include "sema.h"
 #include "type.h"
-
-bool same_identifier(Token a, Token b) {
-  return a.len == b.len && strncmp(a.start, b.start, a.len) == 0;
-}
 
 Symbol *find_symbol(Parser *p, Token name) {
   Symbol *sym;
@@ -141,7 +135,7 @@ Variable *new_variable(Parser *p, Token name, Type *type) {
  * declared extern (C11 6.9.2). A later initializer can provide its definition.
  * Compatible declarations share one variable, with a storage AST node created
  * only when a definition or tentative definition first appears.
- * An incomplete struct with external linkage may be completed later in the
+ * An incomplete record with external linkage may be completed later in the
  * translation unit.
  */
 AstNode *declare_global_variable(Parser *p, Token name, Type *type,
@@ -347,8 +341,9 @@ AstNode *sema_enumerator_expr(Parser *p, Enum *enumerator, Token loc) {
 static AstNode *convert_to_value(Parser *p, AstNode *expr) {
   AstNode *node;
   Type *type;
-  if (expr->type->kind == TYPE_STRUCT)
-    error_at(p, expr->loc, "struct values are not supported yet");
+  if (is_record(expr->type))
+    error_at(p, expr->loc, "%s values are not supported yet",
+             expr->type->kind == TYPE_STRUCT ? "struct" : "union");
   if (expr->type->kind == TYPE_ARRAY)
     type = pointer_to(expr->type->base);
   else if (expr->type->is_const)
@@ -622,7 +617,7 @@ AstNode *sema_cast(Parser *p, Type *target, AstNode *expr, Token loc) {
         expr->type->kind != TYPE_ARRAY)
       error_at(p, expr->loc, "cast operand must have scalar type");
   }
-  if (expr->type->kind != TYPE_STRUCT)
+  if (!is_record(expr->type))
     expr = convert_to_value(p, expr);
   node = new_expr(p, AST_CAST, target, loc);
   node->d.unary.operand = expr;
@@ -639,8 +634,9 @@ void sema_check_call(Parser *p, Function *func, AstNode *call, int nargs) {
     AstNode *arg = *link;
     AstNode *next = arg->next;
     arg->next = NULL;
-    if (arg->type->kind == TYPE_STRUCT)
-      error_at(p, arg->loc, "passing structs by value is not supported yet");
+    if (is_record(arg->type))
+      error_at(p, arg->loc, "passing %ss by value is not supported yet",
+               arg->type->kind == TYPE_STRUCT ? "struct" : "union");
     sema_check_nonvoid_expr(p, arg);
     if (func->has_prototype)
       *link =
@@ -665,8 +661,8 @@ void sema_check_return(Parser *p, AstNode *stmt) {
 
 static bool is_lvalue(const AstNode *expr) {
   /*
-   * A '.' member is an lvalue only if its struct operand is an lvalue
-   * (C11 6.5.2.3). A member of a struct returned by value is not an lvalue.
+   * A '.' member is an lvalue only if its record operand is an lvalue
+   * (C11 6.5.2.3). A member of a record returned by value is not an lvalue.
    * We represent p->member as (*p).member; AST_DEREF is an lvalue.
    */
   if (expr->kind == AST_MEMBER)
@@ -800,7 +796,7 @@ AstNode *sema_unary(Parser *p, AstKind op, AstNode *operand, Token loc) {
   case AST_PRE_DECREMENT:
   case AST_POST_INCREMENT:
   case AST_POST_DECREMENT:
-    if (!is_modifiable_lvalue(operand) || operand->type->kind == TYPE_STRUCT)
+    if (!is_modifiable_lvalue(operand) || is_record(operand->type))
       error_at(p, loc, "invalid %s target",
                is_increment_op(op) ? "increment" : "decrement");
     if (operand->type->kind == TYPE_PTR &&
@@ -962,38 +958,43 @@ AstNode *sema_subscript(Parser *p, AstNode *base, AstNode *index, Token loc) {
 }
 
 /*
- * C11 6.5.2.3: p->member is (*p).member. Keep struct and array member
+ * C11 6.5.2.3: p->member is (*p).member. Keep record and array member
  * types intact so further member access, address-of, and array decay work.
  */
 AstNode *sema_member(Parser *p, AstNode *base, Token op, Token name) {
-  Member *member;
-  AstNode *node;
-
   if (op.kind == TOKEN_ARROW) {
     base = convert_to_value(p, base);
-    if (base->type->kind != TYPE_PTR || base->type->base->kind != TYPE_STRUCT)
-      error_at(p, op, "'->' requires a pointer to struct");
+    if (base->type->kind != TYPE_PTR || !is_record(base->type->base))
+      error_at(p, op, "'->' requires a pointer to struct or union");
     base = sema_unary(p, AST_DEREF, base, op);
-  } else if (base->type->kind != TYPE_STRUCT) {
-    error_at(p, op, "'.' requires a struct operand");
+  } else if (!is_record(base->type)) {
+    error_at(p, op, "'.' requires a struct or union operand");
   }
   if (type_size(base->type) < 0)
-    error_at(p, op, "member access on incomplete struct");
-  for (member = unqualified_type(base->type)->members; member;
-       member = member->next)
-    if (same_identifier(member->name, name))
-      break;
-  if (!member)
-    error_at(p, name, "no member named '%.*s' in struct", name.len, name.start);
-  node = new_expr(p, AST_MEMBER, member->type, op);
-  if (base->type->is_const) {
-    node->type = const_type(node->type);
-    if (!node->type)
-      error_at(p, op, "out of memory");
+    error_at(p, op, "member access on incomplete %s",
+             base->type->kind == TYPE_STRUCT ? "struct" : "union");
+  for (;;) {
+    Member *member = find_member(base->type, name);
+    AstNode *node;
+    if (!member)
+      error_at(p, name, "no member named '%.*s' in %s", name.len, name.start,
+               base->type->kind == TYPE_STRUCT ? "struct" : "union");
+    node = new_expr(p, AST_MEMBER, member->type, op);
+    if (base->type->is_const) {
+      node->type = const_type(node->type);
+      if (!node->type)
+        error_at(p, op, "out of memory");
+    }
+    node->d.member.base = base;
+    node->d.member.member = member;
+    if (member->name.kind == TOKEN_IDENTIFIER)
+      return node;
+    /*
+     * Preserve each anonymous container so layout offsets and const
+     * qualification apply at every step of the member path.
+     */
+    base = node;
   }
-  node->d.member.base = base;
-  node->d.member.member = member;
-  return node;
 }
 
 AstNode *sema_assignment(Parser *p, Token operator, AstNode *left,

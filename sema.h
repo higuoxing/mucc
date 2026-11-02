@@ -29,7 +29,6 @@
  * Parser remains the shared context during this incremental extraction.
  */
 
-extern bool same_identifier(Token a, Token b);
 /*
  * Expression and type-name lookup finds the nearest visible binding.
  * Redeclaration checks look only in the scope receiving the declaration.

@@ -45,6 +45,29 @@ bool is_integer(const Type *type) {
          type->kind == TYPE_ENUM;
 }
 
+bool is_record(const Type *type) {
+  return type->kind == TYPE_STRUCT || type->kind == TYPE_UNION;
+}
+
+/*
+ * Return the immediate member containing name. For an anonymous struct or
+ * union, callers follow this member and repeat lookup in its type.
+ */
+Member *find_member(const Type *type, Token name) {
+  Member *member;
+  if (type->unqualified)
+    type = type->unqualified;
+  for (member = type->members; member; member = member->next) {
+    if (member->name.kind == TOKEN_IDENTIFIER) {
+      if (same_identifier(member->name, name))
+        return member;
+    } else if (find_member(member->type, name)) {
+      return member;
+    }
+  }
+  return NULL;
+}
+
 /*
  * On our target, int represents every char and short value, including
  * unsigned char and unsigned short. _Bool and enums also promote to int.
@@ -84,9 +107,9 @@ Type *common_integer_type(const Type *a, const Type *b) {
 }
 
 /*
- * Structs and enums have distinct identities. An enum is also compatible with
- * its chosen integer type. Other supported types compare structurally.
- * A void pointer is convertible, not identical, to another object pointer.
+ * Structs, unions and enums have distinct identities. An enum is compatible
+ * with its chosen integer type. Other supported types compare structurally. A
+ * void pointer is convertible, not identical, to another object pointer.
  */
 bool same_type(const Type *a, const Type *b) {
   if (a->is_const != b->is_const)
@@ -101,7 +124,7 @@ bool same_type(const Type *a, const Type *b) {
     return same_type(a, b->base);
   if (a->kind != b->kind)
     return false;
-  if (a->kind == TYPE_STRUCT || a->kind == TYPE_ENUM)
+  if (is_record(a) || a->kind == TYPE_ENUM)
     return a == b;
   if (is_integer(a) && a->is_unsigned != b->is_unsigned)
     return false;
@@ -122,7 +145,7 @@ Type *unqualified_type(Type *type) {
 
 /*
  * Qualifying a typedef must not change its original type. In C11, qualifying
- * an array qualifies its elements. Struct copies share the original tag so
+ * an array qualifies its elements. Record copies share the original tag so
  * later completion and type identity remain visible through the qualifier.
  */
 Type *const_type(Type *type) {
@@ -143,7 +166,7 @@ Type *const_type(Type *type) {
 }
 
 /*
- * Sizes are stored in Type: an array's or struct's size is data, not
+ * Sizes are stored in Type: an array's or record's size is data, not
  * derivable from its kind. Void must never reach this.
  */
 int type_size(const Type *type) {
@@ -153,16 +176,16 @@ int type_size(const Type *type) {
 int type_alignment(const Type *type) {
   if (type->unqualified)
     type = type->unqualified;
-  if (type->kind == TYPE_STRUCT)
+  if (is_record(type))
     return type->alignment;
   return type->kind == TYPE_ARRAY ? type_alignment(type->base) : type->size;
 }
 
-Type *struct_type(void) {
+Type *record_type(TypeKind kind) {
   Type *type = calloc(1, sizeof(Type));
   if (!type)
     return NULL;
-  type->kind = TYPE_STRUCT;
+  type->kind = kind;
   type->size = -1; /* Incomplete until the definition is finished. */
   type->alignment = 1;
   return type;

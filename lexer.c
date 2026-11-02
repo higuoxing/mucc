@@ -73,7 +73,7 @@ static const Keyword keywords[] = {
     KW("struct", TOKEN_STRUCT),
     KW("switch", TOKEN_SWITCH),
     KW("typedef", TOKEN_TYPEDEF),
-    KW("union", TOKEN_RESERVED),
+    KW("union", TOKEN_UNION),
     KW("unsigned", TOKEN_UNSIGNED),
     KW("void", TOKEN_VOID),
     KW("volatile", TOKEN_RESERVED),
@@ -92,6 +92,10 @@ static TokenKind kw_token_type(const Token *tok) {
   }
 
   return TOKEN_IDENTIFIER;
+}
+
+bool same_identifier(Token a, Token b) {
+  return a.len == b.len && strncmp(a.start, b.start, a.len) == 0;
 }
 
 void lexer_init(Lexer *l, const char *filename, const char *source) {
