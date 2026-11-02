@@ -49,6 +49,7 @@ typedef enum {
   TOKEN_ELSE,       /* 'else' */
   TOKEN_ENUM,       /* 'enum' */
   TOKEN_EQ_EQ,      /* '==' */
+  TOKEN_EXTERN,     /* 'extern' */
   TOKEN_FOR,        /* 'for' */
   TOKEN_GOTO,       /* 'goto' */
   TOKEN_GREATER,    /* '>' */

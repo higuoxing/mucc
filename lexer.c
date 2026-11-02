@@ -55,7 +55,7 @@ static const Keyword keywords[] = {
     KW("double", TOKEN_RESERVED),
     KW("else", TOKEN_ELSE),
     KW("enum", TOKEN_ENUM),
-    KW("extern", TOKEN_RESERVED),
+    KW("extern", TOKEN_EXTERN),
     KW("float", TOKEN_RESERVED),
     KW("for", TOKEN_FOR),
     KW("goto", TOKEN_GOTO),

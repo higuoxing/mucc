@@ -167,6 +167,136 @@ function check_error() {
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
+# File-scope extern declarations share objects without allocating storage.
+check extern-object-before-definition 42 'extern int x; int x = 42; int main(void) { return x; }'
+check extern-object-after-definition 42 'int x = 42; extern int x; int main(void) { return x; }'
+check extern-object-tentative-definition 0 'extern int x; int x; extern int x; int main(void) { return x; }'
+check extern-object-initializer-definition 42 'extern int x = 42; int main(void) { return x; }'
+check extern-object-initializer-after-declaration 42 'extern int x; extern int x = 42; extern int x; int main(void) { return x; }'
+check extern-object-initializer-after-tentative 42 'int x; extern int x = 42; int x; int main(void) { return x; }'
+check extern-object-repeated-declarations 42 'extern int x; extern int x; int x = 42; extern int x; int main(void) { return x; }'
+check extern-object-declaration-list 42 'extern int a, b; int a = 20, b = 22; int main(void) { return a + b; }'
+check extern-definition-list 42 'extern int a = 20, b = 22; int main(void) { return a + b; }'
+check extern-after-type 42 'int extern x; int x = 42; int main(void) { return x; }'
+check extern-between-type-specifiers 1 'unsigned extern long x; unsigned long x = 1UL << 40; int main(void) { return x == (1UL << 40); }'
+check extern-with-const 42 'const extern int x; const int x = 42; int main(void) { return x; }'
+check extern-typedef-type 42 'typedef int I; I extern x; I x = 42; int main(void) { return x; }'
+check extern-incomplete-struct-declaration 0 'extern struct S x; int main(void) { return 0; }'
+check extern-incomplete-array-declaration 0 'extern int a[]; int main(void) { return 0; }'
+check extern-incomplete-struct-completed 42 'extern struct S x; struct S { int value; }; struct S x; int main(void) { x.value = 42; return x.value; }'
+check extern-array-completes-tentative-definition 12 'int a[]; extern int a[3]; int main(void) { return sizeof a; }'
+check extern-array-composite-bound 12 'extern int a[3]; int a[]; int main(void) { return sizeof a; }'
+check extern-string-array-definition 42 'extern char text[]; char text[] = "*"; int main(void) { return text[0]; }'
+check extern-string-array-initializer 42 'extern char text[] = "*"; extern char text[]; int main(void) { return text[0]; }'
+check extern-pointer-address-initializer 42 'extern int x; int *p = &x; int x = 42; int main(void) { return *p; }'
+check extern-preserves-static-object-linkage 42 'static int x = 42; extern int x; int main(void) { return x; }'
+check extern-initializer-preserves-static-linkage 42 'static int x; extern int x = 42; int main(void) { return x; }'
+check extern-then-repeat-static-object 42 'static int x; extern int x; static int x = 42; int main(void) { return x; }'
+check extern-function-prototype 42 'extern int f(int); int f(int x) { return x; } int main(void) { return f(42); }'
+check extern-function-definition 42 'extern int f(void) { return 42; } int main(void) { return f(); }'
+check extern-function-after-definition 42 'int f(void) { return 42; } extern int f(void); int main(void) { return f(); }'
+check extern-function-inherits-static-linkage 42 'static int f(void); extern int f(void) { return 42; } int main(void) { return f(); }'
+check extern-function-then-repeat-static 42 'static int f(void); extern int f(void); static int f(void) { return 42; } int main(void) { return f(); }'
+check extern-function-refines-prototype 42 'extern int f(); extern int f(int); int f(int x) { return x; } int main(void) { return f(42); }'
+check extern-object-local-shadowing 42 'extern int x; int x = 42; int main(void) { { int x = 1; x++; } return x; }'
+check extern-unused-object-no-definition 42 'extern int missing; int main(void) { return 42; }'
+check extern-keyword-boundaries 42 'int main(void) { int external = 20; int extern_ = 21; int extern1 = 1; return external + extern_ + extern1; }'
+check \
+    extern-object-another-translation-unit \
+    42 \
+    'extern int shared; int main(void) { return shared; }' \
+    'int shared = 42;'
+check \
+    extern-object-write-another-translation-unit \
+    42 \
+    'extern int shared; int read_shared(void); int main(void) { shared = 42; return read_shared(); }' \
+    'int shared; int read_shared(void) { return shared; }'
+check \
+    extern-function-another-translation-unit \
+    42 \
+    'extern int other(int); int main(void) { return other(42); }' \
+    'int other(int x) { return x; }'
+check \
+    extern-definition-exports-object \
+    42 \
+    'extern int shared = 42; int other(void); int main(void) { return other(); }' \
+    'extern int shared; int other(void) { return shared; }'
+check \
+    extern-static-object-separate-translation-units \
+    42 \
+    'static int shared = 20; extern int shared; int other(void); int main(void) { return shared + other(); }' \
+    'int shared = 22; int other(void) { return shared; }'
+check \
+    extern-static-function-separate-translation-units \
+    42 \
+    'static int shared(void); extern int shared(void) { return 20; } int other(void); int main(void) { return shared() + other(); }' \
+    'int shared(void) { return 22; } int other(void) { return shared(); }'
+
+check_error extern-duplicate-storage 'extern extern int x;' \
+            "1:8: error: duplicate extern specifier"
+check_error extern-duplicate-storage-after-type 'extern int extern x;' \
+            "1:12: error: duplicate extern specifier"
+check_error extern-with-static 'extern static int x;' \
+            "1:8: error: multiple storage classes in declaration"
+check_error extern-after-static 'static int extern x;' \
+            "1:12: error: multiple storage classes in declaration"
+check_error extern-with-typedef 'extern typedef int T;' \
+            "1:8: error: multiple storage classes in declaration"
+check_error extern-after-typedef 'typedef int extern T;' \
+            "1:13: error: multiple storage classes in declaration"
+check_error extern-parameter 'int f(extern int x);' \
+            "1:7: error: extern is not allowed here"
+check_error extern-member 'struct S { extern int x; };' \
+            "1:12: error: extern is not allowed here"
+check_error extern-sizeof-type 'int main(void) { return sizeof(extern int); }' \
+            "1:32: error: extern is not allowed here"
+check_error extern-cast-type 'int main(void) { return (extern int)1; }' \
+            "1:26: error: extern is not allowed here"
+check_error extern-for-initializer 'int main(void) { for (extern int x; ; ) {} }' \
+            "1:23: error: extern is not allowed in a for initializer"
+check_error extern-static-variable-conflict 'extern int x; static int x;' \
+            "1:26: error: static declaration of 'x' follows non-static declaration"
+check_error extern-static-function-conflict 'extern int f(void); static int f(void);' \
+            "1:32: error: static declaration of 'f' follows non-static declaration"
+check_error extern-object-type-conflict 'extern int x; long x;' \
+            "1:20: error: conflicting declaration of variable 'x'"
+check_error extern-object-const-conflict 'extern const int x; int x;' \
+            "1:25: error: conflicting declaration of variable 'x'"
+check_error extern-array-bound-conflict 'extern int a[2]; int a[3];' \
+            "1:22: error: conflicting declaration of variable 'a'"
+check_error extern-function-type-conflict 'extern int f(int); int f(long);' \
+            "1:24: error: conflicting declaration of function 'f'"
+check_error extern-variable-redefinition 'extern int x = 1; int x = 2;' \
+            "1:23: error: redefinition of variable 'x'"
+check_error extern-static-variable-redefinition 'static int x = 1; extern int x = 2;' \
+            "1:30: error: redefinition of variable 'x'"
+check_error extern-variable-typedef-conflict 'typedef int T; extern int T;' \
+            "1:27: error: variable conflicts with typedef 'T'"
+check_error extern-function-variable-conflict 'int f; extern int f(void);' \
+            "1:19: error: function conflicts with variable 'f'"
+check_error extern-variable-function-conflict 'int f(void); extern int f;' \
+            "1:25: error: variable conflicts with function 'f'"
+check_error extern-void-object 'extern void x;' \
+            "1:13: error: variable has void type"
+check_error extern-incomplete-object-definition 'extern struct S x; struct S x;' \
+            "1:29: error: variable has incomplete type"
+check_error extern-incomplete-array-sizeof 'extern int a[]; int main(void) { return sizeof a; }' \
+            "1:41: error: sizeof cannot be applied to an incomplete type"
+check_error extern-nonconstant-initializer 'int f(void); extern int x = f();' \
+            "1:29: error: global initializer is not a constant expression"
+check_error extern-missing-type 'extern x;' \
+            "1:8: error: expect type specifier"
+check_error extern-missing-name 'int extern;' \
+            "1:11: error: expect declaration name"
+check_error extern-keyword-as-variable 'int main() { int extern; return 0; }' \
+            "1:24: error: expect variable name"
+check_error extern-unbraced-declaration 'int main(void) { if (1) extern int x; return 0; }' \
+            "1:25: error: expect statement"
+check_error extern-block-object-not-supported 'int main(void) { extern int x; return 0; }' \
+            "1:29: error: block-scope extern declarations are not supported yet"
+check_error extern-block-function-not-supported 'int main(void) { extern int f(void); return 0; }' \
+            "1:29: error: block-scope extern declarations are not supported yet"
+
 # File-scope static declarations retain internal linkage across redeclarations.
 check static-global-zero 0 'static int x; int main(void) { return x; }'
 check static-global-initializer 42 'static int x = 42; int main(void) { return x; }'
@@ -2663,7 +2793,7 @@ check_error invalid-int-char-specifiers 'int main() { int char; return 0; }' '1:
 for kw in \
     _Alignas _Alignof _Atomic _Complex _Generic _Imaginary \
 	     _Noreturn _Static_assert _Thread_local \
-	     auto break case continue default do double else extern \
+	     auto break case continue default do double else \
 	     float for goto if inline register restrict signed sizeof \
 	     switch union volatile while; do
     check_error "reserved-kw-$kw" \

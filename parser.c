@@ -28,12 +28,6 @@
 #include "type.h"
 #include "vector.h"
 
-typedef enum {
-  STORAGE_NONE,
-  STORAGE_TYPEDEF,
-  STORAGE_STATIC,
-} StorageClass;
-
 static AstNode *new_ast_node(Parser *p, AstKind kind);
 static AstNode *new_expr(Parser *p, AstKind kind, Type *type);
 static void reset_function_state(Parser *p);
@@ -76,10 +70,11 @@ static bool is_declspec(Parser *p, Token token) {
     Symbol *sym = find_symbol(p, token);
     return sym && sym->kind == SYMBOL_TYPEDEF;
   }
-  return kind == TOKEN_TYPEDEF || kind == TOKEN_STATIC || kind == TOKEN_CONST ||
-         kind == TOKEN_BOOL || kind == TOKEN_CHAR || kind == TOKEN_SHORT ||
-         kind == TOKEN_INT || kind == TOKEN_LONG || kind == TOKEN_UNSIGNED ||
-         kind == TOKEN_VOID || kind == TOKEN_STRUCT || kind == TOKEN_ENUM;
+  return kind == TOKEN_TYPEDEF || kind == TOKEN_STATIC ||
+         kind == TOKEN_EXTERN || kind == TOKEN_CONST || kind == TOKEN_BOOL ||
+         kind == TOKEN_CHAR || kind == TOKEN_SHORT || kind == TOKEN_INT ||
+         kind == TOKEN_LONG || kind == TOKEN_UNSIGNED || kind == TOKEN_VOID ||
+         kind == TOKEN_STRUCT || kind == TOKEN_ENUM;
 }
 
 /* assignment-operator: = += -= *= /= %= <<= >>= &= ^= |=  (C11 6.5.16) */
@@ -719,9 +714,12 @@ static Type *parse_declspecs(Parser *p, StorageClass *storage_class) {
       parser_advance(p);
       continue;
     }
-    if (kind == TOKEN_TYPEDEF || kind == TOKEN_STATIC) {
-      StorageClass storage =
-          kind == TOKEN_TYPEDEF ? STORAGE_TYPEDEF : STORAGE_STATIC;
+    if (kind == TOKEN_TYPEDEF || kind == TOKEN_STATIC || kind == TOKEN_EXTERN) {
+      StorageClass storage = STORAGE_EXTERN;
+      if (kind == TOKEN_TYPEDEF)
+        storage = STORAGE_TYPEDEF;
+      else if (kind == TOKEN_STATIC)
+        storage = STORAGE_STATIC;
       if (!storage_class)
         parse_error(p, "%.*s is not allowed here", p->current.len,
                     p->current.start);
@@ -1012,6 +1010,8 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
   }
   if (storage_class == STORAGE_STATIC && !allow_typedef)
     error_at(p, loc, "static is not allowed in a for initializer");
+  if (storage_class == STORAGE_EXTERN && !allow_typedef)
+    error_at(p, loc, "extern is not allowed in a for initializer");
   if ((type->kind == TYPE_STRUCT || type->kind == TYPE_ENUM) &&
       p->current.kind == TOKEN_SEMICOLON) {
     decl = new_ast_node(p, AST_DECL);
@@ -1028,6 +1028,8 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
 
   if (storage_class == STORAGE_STATIC)
     error_at(p, name, "static local variables are not supported yet");
+  if (storage_class == STORAGE_EXTERN)
+    error_at(p, name, "block-scope extern declarations are not supported yet");
 
   decl = new_ast_node(p, AST_DECL);
   decl->loc = name;
@@ -1524,11 +1526,13 @@ static AstNode *parse_block(Parser *p) {
 
 /*
  * File-scope objects support scalar constants and character array strings.
- * Each declarator uses the same base type; compatible redeclarations produce
- * no additional AST node.
+ * Each declarator uses the same base type. Only the first definition or
+ * tentative definition produces a storage AST node; extern-only declarations
+ * and compatible redeclarations add no node.
  */
 static AstNode *parse_global_declaration(Parser *p, Type *base, Type *type,
-                                         Token name, bool is_static) {
+                                         Token name,
+                                         StorageClass storage_class) {
   AstNode *head = NULL;
   AstNode **tail = &head;
   for (;;) {
@@ -1538,7 +1542,7 @@ static AstNode *parse_global_declaration(Parser *p, Type *base, Type *type,
     if (p->current.kind == TOKEN_LPAREN)
       parse_error(p, "function declarations in a declaration list are not "
                      "supported yet");
-    decl = declare_global_variable(p, name, type, is_static,
+    decl = declare_global_variable(p, name, type, storage_class,
                                    p->current.kind == TOKEN_ASSIGN);
     if (p->current.kind == TOKEN_ASSIGN) {
       sema_initialize_global_variable(p, name, parse_initializer(p, type));
@@ -1694,8 +1698,7 @@ static AstNode *parse_external_declaration(Parser *p) {
   if (p->current.kind == TOKEN_LPAREN)
     return parse_function_declaration(p, type, name,
                                       storage_class == STORAGE_STATIC);
-  return parse_global_declaration(p, base, type, name,
-                                  storage_class == STORAGE_STATIC);
+  return parse_global_declaration(p, base, type, name, storage_class);
 }
 
 /*

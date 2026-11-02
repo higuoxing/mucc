@@ -24,6 +24,13 @@
 
 typedef struct AstNode AstNode;
 
+typedef enum {
+  STORAGE_NONE,
+  STORAGE_TYPEDEF,
+  STORAGE_STATIC,
+  STORAGE_EXTERN,
+} StorageClass;
+
 /*
  * An address constant names a global object or string literal plus a byte
  * offset. Without a base, offset holds absolute pointer bits (zero for null).
@@ -48,6 +55,7 @@ typedef struct Variable {
   int offset; /* Positive distance below %rbp for stack variables. */
   bool is_global;
   bool is_static; /* Internal linkage for file-scope objects. */
+  bool is_defined; /* Global storage is provided by this translation unit. */
   bool is_parameter;
   bool has_initializer;
   /*
