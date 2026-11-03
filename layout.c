@@ -60,6 +60,8 @@ typedef struct {
   int size;
 } StackLayout;
 
+static void layout_initializer(StackLayout *layout, Initializer *init);
+
 static void layout_error(StackLayout *layout, Token loc, const char *message)
     __attribute__((noreturn));
 
@@ -95,6 +97,15 @@ static void layout_expr(StackLayout *layout, AstNode *expr) {
   case AST_INT_LITERAL:
   case AST_STRING_LITERAL:
     break;
+  case AST_COMPOUND_LITERAL: {
+    Variable *var = expr->d.variable.var;
+    /*
+     * One slot per literal occurrence, retained for the enclosing block.
+     */
+    var->offset = layout_slot(layout, var->type, expr->loc);
+    layout_initializer(layout, var->initializer);
+    break;
+  }
   case AST_CAST:
     layout_expr(layout, expr->d.unary.operand);
     if (is_record(expr->type))

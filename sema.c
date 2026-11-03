@@ -500,6 +500,33 @@ Initializer *sema_initialize_variable(Parser *p, Variable *var, Token name,
   return init;
 }
 
+/*
+ * Compound literals are lvalues backed by unnamed automatic objects. Do not
+ * add them to the symbol table; their AST nodes retain the checked initializer
+ * and receive storage from stack layout just like named local variables.
+ */
+AstNode *sema_compound_literal(Parser *p, Type *type,
+                               const Initializer *initializer, Token loc) {
+  Variable *var;
+  AstNode *node;
+  if (!p->current_function)
+    error_at(p, loc, "file-scope compound literals are not supported yet");
+  if (type->kind == TYPE_VOID)
+    error_at(p, loc, "compound literal has void type");
+  if (type_size(type) < 0 &&
+      !(type->kind == TYPE_ARRAY && type_size(type->base) > 0))
+    error_at(p, loc, "compound literal has incomplete type");
+  var = calloc(1, sizeof(Variable));
+  if (!var)
+    error_at(p, loc, "out of memory");
+  var->name = loc;
+  var->type = type;
+  sema_initialize_variable(p, var, loc, initializer);
+  node = new_expr(p, AST_COMPOUND_LITERAL, var->type, loc);
+  node->d.variable.var = var;
+  return node;
+}
+
 void sema_check_global_variables(Parser *p) {
   Symbol *sym;
   for (sym = p->symbols; sym; sym = sym->next) {
@@ -929,8 +956,8 @@ static bool is_lvalue(const AstNode *expr) {
    */
   if (expr->kind == AST_MEMBER)
     return is_lvalue(expr->d.member.base);
-  return expr->kind == AST_VAR || expr->kind == AST_DEREF ||
-         expr->kind == AST_STRING_LITERAL;
+  return expr->kind == AST_VAR || expr->kind == AST_COMPOUND_LITERAL ||
+         expr->kind == AST_DEREF || expr->kind == AST_STRING_LITERAL;
 }
 
 static bool is_modifiable_lvalue(const AstNode *expr) {

@@ -45,6 +45,9 @@ extern AstNode *declare_global_variable(Parser *p, Token name, Type *type,
 extern Initializer *sema_initialize_variable(Parser *p, Variable *var,
                                              Token name,
                                              const Initializer *parsed);
+extern AstNode *sema_compound_literal(Parser *p, Type *type,
+                                      const Initializer *initializer,
+                                      Token loc);
 extern void sema_check_global_variables(Parser *p);
 extern void declare_typedef(Parser *p, Token name, Type *type);
 extern Enum *declare_enumerator(Parser *p, Token name, AstNode *initializer,

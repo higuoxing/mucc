@@ -40,6 +40,9 @@ static AstNode *parse_cast(Parser *p);
 static AstNode *parse_unary(Parser *p);
 static AstNode *parse_call_expr(Parser *p, Function *func);
 static AstNode *parse_postfix(Parser *p);
+static AstNode *parse_postfix_suffix(Parser *p, AstNode *expr);
+static AstNode *parse_compound_literal(Parser *p, Type *type, Token loc);
+static Initializer *parse_initializer(Parser *p);
 static AstNode *parse_primary(Parser *p);
 static AstNode *parse_string_literal(Parser *p);
 static AstNode *parse_decl(Parser *p, bool allow_typedef);
@@ -202,6 +205,7 @@ static void parse_semicolon(Parser *p) {
  * (C11 6.5.4)
  *
  * A visible typedef name distinguishes a type name from a grouped expression.
+ * A brace list after the type name starts a compound literal instead of a cast.
  */
 static AstNode *parse_cast(Parser *p) {
   if (p->current.kind == TOKEN_LPAREN && is_declspec(p, p->lookahead)) {
@@ -210,6 +214,8 @@ static AstNode *parse_cast(Parser *p) {
     parser_advance(p);
     type = parse_type_name(p);
     parse_expect(p, TOKEN_RPAREN, "expect ')'");
+    if (p->current.kind == TOKEN_LBRACE)
+      return parse_postfix_suffix(p, parse_compound_literal(p, type, loc));
     return sema_cast(p, type, parse_cast(p), loc);
   }
   return parse_unary(p);
@@ -229,9 +235,14 @@ static AstNode *parse_unary(Parser *p) {
     Type *type;
     parser_advance(p);
     if (p->current.kind == TOKEN_LPAREN && is_declspec(p, p->lookahead)) {
+      Token operand_loc = p->current;
       parser_advance(p);
       type = parse_type_name(p);
       parse_expect(p, TOKEN_RPAREN, "expect ')'");
+      if (p->current.kind == TOKEN_LBRACE)
+        type = parse_postfix_suffix(
+                   p, parse_compound_literal(p, type, operand_loc))
+                   ->type;
     } else {
       type = parse_unary(p)->type;
     }
@@ -285,6 +296,12 @@ static AstNode *parse_unary(Parser *p) {
   return parse_postfix(p);
 }
 
+static AstNode *parse_compound_literal(Parser *p, Type *type, Token loc) {
+  if (p->current.kind != TOKEN_LBRACE)
+    parse_error(p, "expect '{'");
+  return sema_compound_literal(p, type, parse_initializer(p), loc);
+}
+
 /*
  * postfix-expression:
  *   identifier '(' argument-expression-list_opt ')'
@@ -333,7 +350,8 @@ static AstNode *parse_call_expr(Parser *p, Function *func) {
 /*
  * postfix-expression:
  *   primary-expression
- *   identifier '(' ')'
+ *   '(' type-name ')' '{' initializer-list ','_opt '}'
+ *   identifier '(' argument-expression-list_opt ')'
  *   postfix-expression '[' expression ']'
  *   postfix-expression '.' identifier
  *   postfix-expression '->' identifier
@@ -342,8 +360,15 @@ static AstNode *parse_call_expr(Parser *p, Function *func) {
 static AstNode *parse_postfix(Parser *p) {
   AstNode *left;
 
-  if (p->current.kind == TOKEN_IDENTIFIER &&
-      p->lookahead.kind == TOKEN_LPAREN) {
+  if (p->current.kind == TOKEN_LPAREN && is_declspec(p, p->lookahead)) {
+    Token loc = p->current;
+    Type *type;
+    parser_advance(p);
+    type = parse_type_name(p);
+    parse_expect(p, TOKEN_RPAREN, "expect ')'");
+    left = parse_compound_literal(p, type, loc);
+  } else if (p->current.kind == TOKEN_IDENTIFIER &&
+             p->lookahead.kind == TOKEN_LPAREN) {
     Symbol *sym = find_symbol(p, p->current);
     if (!sym)
       parse_error(p, "function '%.*s' not declared", p->current.len,
@@ -356,7 +381,10 @@ static AstNode *parse_postfix(Parser *p) {
   } else {
     left = parse_primary(p);
   }
+  return parse_postfix_suffix(p, left);
+}
 
+static AstNode *parse_postfix_suffix(Parser *p, AstNode *left) {
   while (p->current.kind == TOKEN_PLUS_PLUS ||
          p->current.kind == TOKEN_MINUS_MINUS ||
          p->current.kind == TOKEN_LBRACKET || p->current.kind == TOKEN_DOT ||
@@ -1013,8 +1041,6 @@ static AstNode *parse_typedef_declarators(Parser *p, Type *base) {
  * designator: '[' constant-expression ']' | '.' identifier
  * (C11 6.7.9)
  */
-static Initializer *parse_initializer(Parser *p);
-
 static Designator *parse_designation(Parser *p) {
   Designator *head = NULL;
   Designator **tail = &head;

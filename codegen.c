@@ -65,6 +65,7 @@ static const char *argregs16[] = {"%di", "%si", "%dx", "%cx", "%r8w", "%r9w"};
 static const char *argregs8[] = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
 
 static void codegen_expr(AstNode *expr);
+static void codegen_local_initializer(Initializer *init, int offset);
 
 static void codegen_bytes(const unsigned char *bytes, int length) {
   int i;
@@ -113,6 +114,12 @@ static void codegen_local_string_array(Type *type, AstNode *expr, int offset) {
 
 static void codegen_addr(AstNode *expr) {
   switch (expr->kind) {
+  case AST_COMPOUND_LITERAL: {
+    Variable *var = expr->d.variable.var;
+    codegen_local_initializer(var->initializer, var->offset);
+    fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", var->offset);
+    break;
+  }
   case AST_VAR: {
     Variable *var = expr->d.variable.var;
     if (var->is_global)
@@ -449,6 +456,7 @@ static void codegen_call(AstNode *expr) {
 static void codegen_expr(AstNode *expr) {
   switch (expr->kind) {
   case AST_VAR:
+  case AST_COMPOUND_LITERAL:
   case AST_DEREF:
   case AST_STRING_LITERAL:
   case AST_MEMBER:

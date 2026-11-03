@@ -214,6 +214,7 @@ typedef enum {
   AST_CAST,
   AST_COMMA,
   AST_COMPOUND_ASSIGN,
+  AST_COMPOUND_LITERAL,
   AST_CONDITIONAL,
   AST_CONTINUE,
   AST_DECL,
@@ -358,7 +359,7 @@ typedef struct AstNode {
     } expr_stmt;
 
     struct {
-      Variable *var;
+      Variable *var; /* Named object or compound literal storage. */
     } variable;
 
     struct {

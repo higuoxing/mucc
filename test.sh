@@ -174,6 +174,126 @@ function check_error() {
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
+# Block-scope compound literals are lvalues with enclosing-block lifetime.
+check compound-literal-int 42 'int main(void) { return (int){42}; }'
+check compound-literal-trailing-comma 42 'int main(void) { return (int){42,}; }'
+check compound-literal-assignment 42 'int main(void) { return ((int){1} = 42); }'
+check compound-literal-address 42 'int main(void) { int *p = &(int){42}; return *p; }'
+check compound-literal-address-write 42 'int main(void) { int *p = &(int){1}; *p = 42; return *p; }'
+check compound-literal-distinct-objects 1 'int main(void) { int *a = &(int){1}; int *b = &(int){1}; *a = 42; return a != b && *a == 42 && *b == 1; }'
+check compound-literal-char 1 'int main(void) { return (char){255} == -1; }'
+check compound-literal-unsigned-char 1 'int main(void) { return (unsigned char){511} == 255; }'
+check compound-literal-short 1 'int main(void) { return (short){65535} == -1; }'
+check compound-literal-long 1 'int main(void) { return (long){4294967297L} == 4294967297L; }'
+check compound-literal-bool 1 'int main(void) { return (_Bool){42} == 1 && (_Bool){0} == 0; }'
+check compound-literal-bool-address 1 'int main(void) { return (_Bool){&(int){42}}; }'
+check compound-literal-typedef 42 'typedef int T; int main(void) { return (T){42}; }'
+check compound-literal-enum 42 'enum E { A = 42 }; int main(void) { return (enum E){A}; }'
+check compound-literal-struct-member 42 'struct S { int x; }; int main(void) { return (struct S){42}.x; }'
+check compound-literal-anonymous-struct 42 'int main(void) { return (struct { int x; }){42}.x; }'
+check compound-literal-struct-pointer 42 'struct S { int x; int y; }; int main(void) { struct S *p = &(struct S){.y = 42}; return p->x + p->y; }'
+check compound-literal-struct-arrow 42 'struct S { int x; }; int main(void) { return (&(struct S){42})->x; }'
+check compound-literal-member-address 42 'struct S { int x; }; int main(void) { int *p = &(struct S){42}.x; return *p; }'
+check compound-literal-member-assignment 42 'struct S { int x; }; int main(void) { return ((struct S){1}.x = 42); }'
+check compound-literal-union 1 'union U { int x; long y; }; int main(void) { return (union U){.y = 4294967297L}.y == 4294967297L; }'
+check compound-literal-nested-initializer 42 'struct S { int a[3]; int end; }; int main(void) { return (struct S){.a[2] = 40, .end = 2}.a[2] + (struct S){.end = 2}.end; }'
+check compound-literal-nested-object-lifetime 42 'struct I { int x; }; struct S { struct I *p; }; int main(void) { struct S s = (struct S){&(struct I){42}}; return s.p->x; }'
+check compound-literal-array 42 'int main(void) { return (int[3]){1, 2, 42}[2]; }'
+check compound-literal-array-inferred-bound 1 'int main(void) { return sizeof (int[]){1, 2, 42} == 12; }'
+check compound-literal-array-designated 1 'int main(void) { int *p = (int[]){[3] = 42}; return p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 42; }'
+check compound-literal-array-modification 42 'int main(void) { int *p = (int[]){1, 2}; p[1] = 42; return p[1]; }'
+check compound-literal-reversed-subscript 42 'int main(void) { return 2[(int[]){1, 2, 42}]; }'
+check compound-literal-array-of-records 42 'struct S { int x; }; int main(void) { return (struct S[]){{1}, {42}}[1].x; }'
+check compound-literal-array-of-strings 99 'int main(void) { return (char *[]) {"ab", "cd"}[1][0]; }'
+check compound-literal-char-array 1 'int main(void) { char *p = (char[]){"abc"}; p[0] = 42; return p[0] == 42 && p[2] == 99 && p[3] == 0; }'
+check compound-literal-char-array-no-terminator 99 'int main(void) { return (char[3]){"abc"}[2]; }'
+check compound-literal-prefix-increment 42 'int main(void) { return ++(int){41}; }'
+check compound-literal-prefix-decrement 42 'int main(void) { return --(int){43}; }'
+check compound-literal-postfix-increment 42 'int main(void) { return (int){42}++; }'
+check compound-literal-postfix-decrement 42 'int main(void) { return (int){42}--; }'
+check compound-literal-compound-assignment 42 'int main(void) { return ((int){40} += 2); }'
+check compound-literal-member-compound-assignment 42 'struct S { int x; }; int main(void) { return ((struct S){40}.x += 2); }'
+check compound-literal-evaluate-once 1 'int count; int next(void) { count++; return 42; } int main(void) { return (int){next()}++ == 42 && count == 1; }'
+check compound-literal-member-evaluate-once 1 'int count; int next(void) { count++; return 42; } struct S { int x; }; int main(void) { return (struct S){next()}.x++ == 42 && count == 1; }'
+check compound-literal-address-evaluate-once 1 'int count; int next(void) { count++; return 42; } int main(void) { int *p = &(int){next()}; return *p == 42 && *p == 42 && count == 1; }'
+check compound-literal-cast-precedence 42 'struct S { int x; }; int main(void) { return (int)(struct S){42}.x; }'
+check compound-literal-unary-precedence 42 'struct S { int x; }; int main(void) { return -(struct S){-42}.x; }'
+check compound-literal-conditional 42 'struct S { int x; }; int main(void) { struct S s = 1 ? (struct S){42} : (struct S){7}; return s.x; }'
+check compound-literal-const-read 42 'int main(void) { const int *p = &(const int){42}; return *p; }'
+check compound-literal-const-member-read 42 'struct S { int x; }; int main(void) { return (const struct S){42}.x; }'
+check compound-literal-sizeof-unevaluated 1 'int count; int main(void) { int n = sizeof (int){count++}; return n == 4 && count == 0; }'
+check compound-literal-sizeof-subscript 1 'int main(void) { return sizeof (int[]){1, 2}[0] == 4; }'
+check compound-literal-sizeof-member 1 'struct S { long x; int y; }; int main(void) { return sizeof (struct S){42, 1}.y == 4; }'
+check compound-literal-sizeof-prefix 1 'int count; int main(void) { return sizeof ++(int){count++} == 4 && count == 0; }'
+check compound-literal-sizeof-address 1 'int count; int main(void) { return sizeof &(int){count++} == 8 && count == 0; }'
+check compound-literal-sizeof-large-no-storage 1 'int main(void) { return sizeof (char[2147483647]){0} == 2147483647UL; }'
+check compound-literal-short-circuit 1 'int count; int main(void) { return (0 && (int){count++}) == 0 && count == 0; }'
+check compound-literal-array-argument 42 'int sum(int a[2]) { return a[0] + a[1]; } int main(void) { return sum((int[]){40, 2}); }'
+check compound-literal-record-argument 42 'struct S { int x; int y; }; int sum(struct S s) { return s.x + s.y; } int main(void) { return sum((struct S){40, 2}); }'
+check compound-literal-record-return 42 'struct S { int x; int y; }; struct S make(int x) { return (struct S){x, 2}; } int main(void) { return make(40).x + make(40).y; }'
+check compound-literal-large-record-return 42 'struct S { int a[9]; }; struct S make(int x) { return (struct S){.a[8] = x}; } int main(void) { return make(42).a[8]; }'
+check compound-literal-repeated-evaluation 1 'struct S { int x; int y; }; int main(void) { struct S *p = 0; struct S *q; int n = 0; again: q = p; p = &(struct S){n++}; if (n < 2) { p->y = 7; goto again; } return p == q && q->x == 1 && p->y == 0; }'
+check compound-literal-recursion 1 'int f(int n) { int *p = &(int){n}; if (n && !f(n - 1)) return 0; return *p == n; } int main(void) { return f(4); }'
+check compound-literal-nested-blocks 1 'int main(void) { int *p = &(int){42}; { int *q = &(int){7}; if (*p != 42 || *q != 7 || p == q) return 0; } return *p == 42; }'
+check compound-literal-array-member-lifetime 1 'struct S { int a[2]; }; int main(void) { int *p = (struct S){{40, 2}}.a; int other[32] = {7}; return p[0] + p[1] == 42 && other[0] == 7; }'
+check compound-literal-self-host-token-assignment 42 'typedef struct { int kind; int line; int col; char *text; } Token; int main(void) { Token t = {1, 2, 3, "abc"}; t = (Token){0}; t.line = 42; return t.kind + t.line + t.col + (t.text != 0); }'
+check compound-literal-self-host-address-assignment 1 'typedef struct { void *base; long offset; } AddressConstant; int main(void) { AddressConstant a = {0}; a = (AddressConstant){.offset = 42}; return a.base == 0 && a.offset == 42; }'
+check compound-literal-pointer 42 'int main(void) { return *(int *){&(int){42}}; }'
+check compound-literal-array-alignment 1 'struct S { char c; long n; }; int main(void) { struct S *p = &(struct S){1, 42}; return (unsigned long)p % 8 == 0 && p->c == 1 && p->n == 42; }'
+
+check compound-literal-large-record-argument 42 'struct S { int a[9]; }; int f(struct S s) { return s.a[0] + s.a[8]; } int main(void) { return f((struct S){.a[0] = 40, .a[8] = 2}); }'
+check compound-literal-register-and-stack-arguments 42 'struct S { int a[9]; }; int f(int a,int b,int c,int d,int e,int f,struct S s,int g,int h) { return a+b+c+d+e+f+s.a[8]+g+h; } int main(void) { return f(1,2,3,4,5,6,(struct S){.a[8] = 6},7,8); }'
+check compound-literal-two-address-arguments 42 'struct S { int x; }; int f(struct S *a, struct S *b) { return a->x + b->x; } int main(void) { return f(&(struct S){40}, &(struct S){2}); }'
+
+check_error compound-literal-file-scope 'int x = (int){42};' \
+            "1:9: error: file-scope compound literals are not supported yet"
+check_error compound-literal-file-scope-address 'int *p = &(int){42};' \
+            "1:11: error: file-scope compound literals are not supported yet"
+check_error compound-literal-file-scope-after-function 'int f(void) { return 0; } int x = (int){42};' \
+            "1:35: error: file-scope compound literals are not supported yet"
+check_error compound-literal-void 'int main(void) { (void){0}; return 0; }' \
+            "1:18: error: compound literal has void type"
+check_error compound-literal-incomplete 'struct S; int main(void) { &(struct S){0}; return 0; }' \
+            "1:29: error: compound literal has incomplete type"
+check_error compound-literal-type-name-identifier 'int main(void) { return (int x){42}; }' \
+            "1:30: error: type name cannot contain an identifier"
+check_error compound-literal-empty 'int main(void) { return (int){}; }' \
+            "1:31: error: empty initializer lists are not supported in C11"
+check_error compound-literal-excess-scalar 'int main(void) { return (int){1, 2}; }' \
+            "1:34: error: excess elements in initializer"
+check_error compound-literal-excess-array 'int main(void) { return (int[1]){1, 2}[0]; }' \
+            "1:37: error: excess elements in initializer"
+check_error compound-literal-missing-rbrace 'int main(void) { return (int){42; }' \
+            "1:33: error: expect '}'"
+check_error compound-literal-unknown-member 'struct S { int x; }; int main(void) { return (struct S){.y = 42}.x; }' \
+            "1:58: error: no member named 'y'"
+check_error compound-literal-out-of-bounds 'int main(void) { return (int[1]){[1] = 42}[0]; }' \
+            "1:34: error: array designator index is out of bounds"
+check_error compound-literal-const-assignment 'int main(void) { (const int){1} = 42; return 0; }' \
+            "1:33: error: invalid assignment target"
+check_error compound-literal-const-increment 'int main(void) { return ++(const int){1}; }' \
+            "1:25: error: invalid increment target"
+check_error compound-literal-const-member-assignment 'struct S { int x; }; int main(void) { (const struct S){1}.x = 42; return 0; }' \
+            "1:61: error: invalid assignment target"
+check_error compound-literal-const-array-assignment 'int main(void) { (const int[]){1}[0] = 42; return 0; }' \
+            "1:38: error: invalid assignment target"
+check_error compound-literal-array-assignment 'int main(void) { (int[]){1} = (int[]){42}; return 0; }' \
+            "1:29: error: invalid assignment target"
+check_error compound-literal-array-increment 'int main(void) { (int[]){1}++; return 0; }' \
+            "1:28: error: invalid increment target"
+check_error compound-literal-discarded-const 'int main(void) { int *p = &(const int){42}; return 0; }' \
+            "1:23: error: incompatible initializer type"
+check_error compound-literal-incompatible-initializer 'int main(void) { return *(int *){42}; }' \
+            "1:26: error: incompatible initializer type"
+check_error compound-literal-nonconstant-enumerator 'int main(void) { enum { A = (int){42} }; return 0; }' \
+            "1:39: error: not an integer constant expression"
+check_error compound-literal-nonconstant-array-bound 'int main(void) { int a[(int){3}]; return 0; }' \
+            "1:32: error: not an integer constant expression"
+check_error compound-literal-nonconstant-case 'int main(void) { switch (0) { case (int){0}: return 42; } return 0; }' \
+            "1:44: error: not an integer constant expression"
+check_error compound-literal-stack-overflow 'int main(void) { &(char[2147483647]){0}; return 0; }' \
+            "1:19: error: local variables exceed supported stack size"
+
 # Local aggregate initializers.
 check aggregate-init-local-array-partial 1 'int main(void) { int a[4] = {1, 2}; return a[0] == 1 && a[1] == 2 && a[2] == 0 && a[3] == 0; }'
 check aggregate-init-local-array-zero 1 'int main(void) { int a[4] = {0}; return a[0] == 0 && a[1] == 0 && a[2] == 0 && a[3] == 0; }'
