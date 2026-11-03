@@ -13,7 +13,7 @@ for arg in "$@"; do
     case "$arg" in
         --compare) compare=1 ;;
         -h|--help)
-            printf 'Usage: %s [--compare]\nCompare exit codes with CC (default: gcc) when --compare is specified.\n' "$0"
+            printf 'Usage: %s [--compare]\nCompare exit codes and check mixed-compiler ABI calls with CC (default: gcc).\n' "$0"
             exit 0
             ;;
         *)
@@ -48,6 +48,12 @@ function check() {
     local expected=$2
     local source=$3
     local extra_source=${4:-} # Optional second translation unit.
+    local extra_compiler=${5:-$TEST_CC}
+    local extra_flags=()
+    # An explicit host compiler builds the second unit for ABI interop tests.
+    if [[ -n "${5:-}" ]]; then
+        extra_flags=(-std=c11 -O2 -S)
+    fi
     local base="$WORK_DIR/execute-$((passed + 1))"
     local input="$base.c"
     local assembly_inputs=("$base.s")
@@ -66,12 +72,12 @@ function check() {
 
     if [[ -n "$extra_source" ]]; then
         printf '%s' "$extra_source" > "$base.extra.c"
-        if "$TEST_CC" "$base.extra.c" -o "$base.extra.s" 2> "$base.extra.compile.err"; then
+        if "$extra_compiler" "${extra_flags[@]}" "$base.extra.c" -o "$base.extra.s" 2> "$base.extra.compile.err"; then
             :
         else
             actual_code=$?
             cat "$base.extra.compile.err" >&2
-            fail "$name: compiler exited with status $actual_code for second translation unit"
+            fail "$name: compiler ($extra_compiler) exited with status $actual_code for second translation unit"
         fi
         assembly_inputs+=("$base.extra.s")
         reference_inputs+=("$base.extra.c")
@@ -166,6 +172,165 @@ function check_error() {
     rejected=$((rejected + 1))
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
+
+# Aggregate calls share the System V ABI with the selected host compiler.
+for record in struct union; do
+    for size in 1 3 7 8 9 15 16 17 24 40 257; do
+        decl="$record S { unsigned char bytes[$size]; };"
+        implementation="$record S make(int seed) { $record S s; int i; for (i=0; i<$size; i++) s.bytes[i]=seed+i; return s; } int sum($record S s) { int i; for (i=0; i<$size; i++) if (s.bytes[i]!=(unsigned char)(42+i)) return 1; s.bytes[0]=7; return 42; }"
+        caller="$record S make(int); int sum($record S); int main(void) { $record S a=make(42); int result=sum(a); return a.bytes[0]==42 ? result : 2; }"
+        check "aggregate-call-$record-$size" 42 "$decl $implementation $caller"
+        if ((compare)); then
+            check \
+                "aggregate-call-$record-$size-host-callee" \
+                42 \
+                "$decl $caller" \
+                "$decl $implementation" \
+                "$CC"
+            check \
+                "aggregate-call-$record-$size-host-caller" \
+                42 \
+                "$decl $implementation" \
+                "$decl $caller" \
+                "$CC"
+        fi
+    done
+done
+
+# A two-register argument spills as a whole and leaves one register available.
+for count in 0 4 5 6 7; do
+    for size in 9 17; do
+        decl="struct S { unsigned char bytes[$size]; };"
+        params=''
+        args=''
+        sum='z'
+        for ((i=0; i<count; i++)); do
+            params+="long a$i, "
+            args+="$((i+1)), "
+            sum+=" + a$i"
+        done
+        params+='struct S s, long z'
+        args+='s, 9'
+        expected=$((count*(count+1)/2+9))
+        implementation="struct S change($params) { int i; for (i=0; i<$size; i++) if (s.bytes[i]!=(unsigned char)(42+i)) s.bytes[0]=0; if ($sum != $expected) s.bytes[0]=0; return s; }"
+        caller="struct S change($params); int main(void) { struct S s; int i; for (i=0; i<$size; i++) s.bytes[i]=42+i; struct S t=change($args); return t.bytes[0]; }"
+        check "aggregate-placement-$count-$size" 42 "$decl $implementation $caller"
+        if ((compare)); then
+            check \
+                "aggregate-placement-$count-$size-host-callee" \
+                42 \
+                "$decl $caller" \
+                "$decl $implementation" \
+                "$CC"
+            check \
+                "aggregate-placement-$count-$size-host-caller" \
+                42 \
+                "$decl $implementation" \
+                "$decl $caller" \
+                "$CC"
+        fi
+    done
+done
+check aggregate-return-wide-bits 1 'struct S { unsigned long x; long y; }; struct S make(void) { struct S s; s.x=18446744073709551615UL; s.y=-4294967296L; return s; } int main(void) { struct S s=make(); return s.x==18446744073709551615UL && s.y==-4294967296L; }'
+check aggregate-return-pointers 42 'struct S { int *p; long x; }; struct S make(int *p) { struct S s; s.p=p; s.x=20; return s; } int main(void) { int n=22; struct S s=make(&n); return *s.p+s.x; }'
+check aggregate-return-const 42 'struct S { int x; }; const struct S make(void) { struct S s; s.x=42; return s; } int main(void) { struct S s=make(); return s.x; }'
+check aggregate-return-forward-declaration 42 'struct S; struct S make(void); struct S { long x; }; int main(void) { return make().x; } struct S make(void) { struct S s; s.x=42; return s; }'
+check aggregate-parameter-forward-declaration 42 'struct S; int sum(struct S); struct S { int x; }; int sum(struct S s) { return s.x; } int main(void) { struct S s; s.x=42; return sum(s); }'
+check aggregate-parameter-const 42 'struct S { int x; }; int sum(const struct S s) { return s.x; } int main(void) { struct S s; s.x=42; return sum(s); }'
+check aggregate-parameter-independent-copy 42 'struct S { long x; long y; long z; }; int copy(struct S s, struct S *p) { p->x=7; return s.x; } int main(void) { struct S s; s.x=42; s.y=0; s.z=0; int n=copy(s,&s); return s.x==7 ? n : 1; }'
+check aggregate-parameter-independent-small-copy 42 'struct S { int x; }; int copy(struct S s, struct S *p) { s.x=7; return p->x; } int main(void) { struct S s; s.x=42; return copy(s,&s); }'
+check aggregate-return-recursive-small 42 'struct S { int x; }; struct S recurse(int n) { struct S s; if (n==0) { s.x=20; return s; } s=recurse(n-1); s.x++; return s; } int main(void) { return recurse(22).x; }'
+check aggregate-return-recursive-large 42 'struct S { long x; long y; long z; }; struct S recurse(int n) { struct S s; if (n==0) { s.x=20; s.y=0; s.z=0; return s; } s=recurse(n-1); s.x++; return s; } int main(void) { return recurse(22).x; }'
+check aggregate-return-conditional 42 'struct S { int x; }; struct S choose(int n) { struct S a; struct S b; a.x=20; b.x=22; return n ? a : b; } int main(void) { return choose(1).x+choose(0).x; }'
+check aggregate-return-nested-members 42 'struct I { int x; }; struct S { struct I i; long y; }; struct S make(void) { struct S s; s.i.x=42; s.y=0; return s; } int main(void) { return make().i.x; }'
+check aggregate-return-temporary-array 42 'struct S { int a[2]; } s; struct S make(void) { return s; } int main(void) { s.a[0]=42; s.a[1]=0; int *p; return (p=make().a, s.a[0]=7, p[0]); }'
+check aggregate-return-large-temporary-array 42 'struct S { int a[9]; } s; struct S make(void) { return s; } int main(void) { s.a[0]=42; int *p; return (p=make().a, s.a[0]=7, p[0]); }'
+check aggregate-return-distinct-call-results 42 'struct S { long a[3]; }; struct S make(int n) { struct S s; s.a[0]=n; s.a[1]=0; s.a[2]=0; return s; } int sum(struct S a, struct S b) { return a.a[0]+b.a[0]; } int main(void) { return sum(make(20),make(22)); }'
+check aggregate-return-argument-side-effects-once 42 'struct S { int x; }; struct S make(int n) { struct S s; s.x=n; return s; } int sum(struct S s) { return s.x; } int main(void) { int n=41; int result=sum(make(n++)); return result+n-41; }'
+check aggregate-return-const-member 42 'struct S { const int x; int y; } s; struct S make(void) { struct S a=s; a.y=42; return a; } int sum(struct S a) { return a.x+a.y; } int main(void) { return sum(make()); }'
+check aggregate-return-token-shaped 42 'typedef struct { int kind; union { long val; char *text; } data; int line; int col; } Token; Token make(int val) { Token t; t.kind=1; t.data.val=val; t.line=10; t.col=11; return t; } int value(Token t) { return t.kind+t.data.val+t.line+t.col; } int main(void) { return value(make(20)); }'
+check aggregate-return-sizeof-unevaluated 42 'struct S { long a[3]; }; int count; struct S make(void) { struct S s; count++; return s; } int main(void) { return sizeof(make())+18+count; }'
+check aggregate-call-large-then-register-record 42 'struct L { long x[3]; }; struct S { int x; }; int sum(struct L a, struct S b, long c) { return a.x[0]+b.x+c; } int main(void) { struct L a; struct S b; a.x[0]=20; a.x[1]=0; a.x[2]=0; b.x=21; return sum(a,b,1); }'
+check aggregate-call-rollback-then-small-record 42 'struct P { long x; long y; }; struct S { int x; }; int sum(int a, int b, int c, int d, int e, struct P p, struct S s, long z) { return a+b+c+d+e+p.x+p.y+s.x+z; } int main(void) { struct P p; p.x=10; p.y=10; struct S s; s.x=6; return sum(1,2,3,4,5,p,s,1); }'
+check aggregate-call-unprototyped-return 42 'struct S { long x[3]; }; struct S make(); int main(void) { return make(42).x[0]; } struct S make(int n) { struct S s; s.x[0]=n; s.x[1]=0; s.x[2]=0; return s; }'
+check_error aggregate-return-incomplete-definition 'struct S; struct S make(void) { return make(); }' \
+            '1:20: error: function return type is incomplete'
+check_error aggregate-return-incomplete-call 'struct S; struct S make(void); int main(void) { make(); return 0; }' \
+            '1:49: error: function return type is incomplete'
+check_error aggregate-parameter-incomplete-definition 'struct S; int sum(struct S s) { return 0; }' \
+            '1:28: error: parameter has incomplete type'
+check_error aggregate-return-incompatible-record 'struct S { int x; }; struct T { int x; }; struct S make(void) { struct T s; return s; }' \
+            '1:77: error: incompatible return type'
+check_error aggregate-return-scalar 'struct S { int x; }; struct S make(void) { return 42; }' \
+            '1:44: error: incompatible return type'
+check_error aggregate-return-missing-value 'struct S { int x; }; struct S make(void) { return; }' \
+            '1:44: error: expect return expr'
+check_error aggregate-parameter-incompatible-record 'struct S { int x; }; struct T { int x; }; int sum(struct S s); int main(void) { struct T t; return sum(t); }' \
+            '1:104: error: incompatible argument type'
+check_error aggregate-parameter-scalar-argument 'struct S { int x; }; int sum(struct S s); int main(void) { return sum(42); }' \
+            '1:71: error: incompatible argument type'
+check_error aggregate-parameter-pointer-argument 'struct S { int x; }; int sum(struct S s); int main(void) { struct S s; return sum(&s); }' \
+            '1:83: error: incompatible argument type'
+check_error aggregate-parameter-conflicting-prototype 'struct S { int x; }; struct T { int x; }; int sum(struct S s); int sum(struct T t);' \
+            '1:68: error: conflicting declaration of function '\''sum'\'''
+check_error aggregate-return-member-not-lvalue 'struct S { int x; }; struct S make(void); int main(void) { make().x=42; return 0; }' \
+            '1:68: error: invalid assignment target'
+check_error aggregate-return-member-no-address 'struct S { int x; }; struct S make(void); int main(void) { int *p=&make().x; return 0; }' \
+            '1:67: error: invalid address-of target'
+check_error aggregate-return-result-not-lvalue 'struct S { int x; }; struct S make(void); int main(void) { struct S s; make()=s; return 0; }' \
+            '1:78: error: invalid assignment target'
+check_error aggregate-return-const-parameter-write 'struct S { int x; }; int sum(const struct S s) { s.x=42; return s.x; }' \
+            '1:53: error: invalid assignment target'
+check_error aggregate-call-temporary-stack-overflow 'struct S { char a[2147483647]; }; struct S make(void); int main(void) { make(); return 0; }' \
+            '1:73: error: local variables exceed supported stack size'
+check_error aggregate-parameter-stack-overflow 'struct S { char a[2147483647]; }; int sum(struct S s) { return 0; }' \
+            '1:52: error: local variables exceed supported stack size'
+
+check aggregate-sret-small-parameter-3 42 'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + z + q; r.z=99; return r; }struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, p, 9, -11); return r.x==42 && r.y==4 && r.z==99 ? 42 : 1; }'
+if ((compare)); then
+    check \
+        aggregate-sret-small-parameter-3-host-callee \
+        42 \
+        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, p, 9, -11); return r.x==42 && r.y==4 && r.z==99 ? 42 : 1; }' \
+        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + z + q; r.z=99; return r; }' \
+        "$CC"
+    check \
+        aggregate-sret-small-parameter-3-host-caller \
+        42 \
+        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + z + q; r.z=99; return r; }' \
+        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, p, 9, -11); return r.x==42 && r.y==4 && r.z==99 ? 42 : 1; }' \
+        "$CC"
+fi
+check aggregate-sret-small-parameter-4 42 'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + a3 + z + q; r.z=99; return r; }struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, 4, p, 9, -11); return r.x==42 && r.y==8 && r.z==99 ? 42 : 1; }'
+if ((compare)); then
+    check \
+        aggregate-sret-small-parameter-4-host-callee \
+        42 \
+        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, 4, p, 9, -11); return r.x==42 && r.y==8 && r.z==99 ? 42 : 1; }' \
+        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + a3 + z + q; r.z=99; return r; }' \
+        "$CC"
+    check \
+        aggregate-sret-small-parameter-4-host-caller \
+        42 \
+        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + a3 + z + q; r.z=99; return r; }' \
+        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, 4, p, 9, -11); return r.x==42 && r.y==8 && r.z==99 ? 42 : 1; }' \
+        "$CC"
+fi
+check aggregate-multiple-register-and-stack-parameters 42 'struct P { long x; long y; }; struct P combine(struct P a, struct P b, struct P c, struct P d) { struct P r; r.x=a.x+b.x+c.x+d.x; r.y=a.y+b.y+c.y+d.y; return r; }struct P combine(struct P,struct P,struct P,struct P); int main(void) { struct P a; a.x=4; a.y=6; struct P b=a; struct P c=a; struct P d=a; d.y=8; struct P r=combine(a,b,c,d); return r.x+r.y; }'
+if ((compare)); then
+    check \
+        aggregate-multiple-register-and-stack-parameters-host-callee \
+        42 \
+        'struct P { long x; long y; }; struct P combine(struct P,struct P,struct P,struct P); int main(void) { struct P a; a.x=4; a.y=6; struct P b=a; struct P c=a; struct P d=a; d.y=8; struct P r=combine(a,b,c,d); return r.x+r.y; }' \
+        'struct P { long x; long y; }; struct P combine(struct P a, struct P b, struct P c, struct P d) { struct P r; r.x=a.x+b.x+c.x+d.x; r.y=a.y+b.y+c.y+d.y; return r; }' \
+        "$CC"
+    check \
+        aggregate-multiple-register-and-stack-parameters-host-caller \
+        42 \
+        'struct P { long x; long y; }; struct P combine(struct P a, struct P b, struct P c, struct P d) { struct P r; r.x=a.x+b.x+c.x+d.x; r.y=a.y+b.y+c.y+d.y; return r; }' \
+        'struct P { long x; long y; }; struct P combine(struct P,struct P,struct P,struct P); int main(void) { struct P a; a.x=4; a.y=6; struct P b=a; struct P c=a; struct P d=a; d.y=8; struct P r=combine(a,b,c,d); return r.x+r.y; }' \
+        "$CC"
+fi
 
 # Aggregate values copy records and preserve non-lvalue expression results.
 check struct-assignment-by-value 42 'struct S { int x; }; int main(void) { struct S a; struct S b; b.x = 42; a = b; b.x = 7; return a.x; }'
@@ -385,12 +550,9 @@ check_error union-struct-pointer-mismatch 'union U { int x; }; struct S { int x;
             "1:80: error: incompatible initializer type"
 check_error union-initializer-not-supported 'union U { int x; }; int main(void) { union U u = 0; return 0; }' \
             "1:46: error: incompatible initializer type"
-check_error union-return-by-value 'union U { int x; }; union U f(void);' \
-            "1:29: error: returning unions by value is not supported yet"
-check_error union-parameter-by-value 'union U { int x; }; int f(union U u);' \
-            "1:35: error: passing unions by value is not supported yet"
-check_error union-unprototyped-value-argument 'int f(); union U { int x; }; int main(void) { union U u; return f(u); }' \
-            "1:67: error: passing unions by value is not supported yet"
+check union-return-by-value 42 'union U { int x; }; union U f(void) { union U u; u.x=42; return u; } int main(void) { return f().x; }'
+check union-parameter-by-value 42 'union U { int x; }; int f(union U u) { return u.x; } int main(void) { union U u; u.x=42; return f(u); }'
+check union-unprototyped-value-argument 42 'int f(); union U { int x; }; int main(void) { union U u; u.x=42; return f(u); } int f(union U u) { return u.x; }'
 check_error union-condition 'union U { int x; }; int main(void) { union U u; if (u) return 1; return 0; }' \
             "1:53: error: condition must have scalar type"
 check_error union-increment 'union U { int x; }; int main(void) { union U u; ++u; return 0; }' \
@@ -2422,8 +2584,8 @@ check_error struct-array-overflow 'struct S { long x[268435455]; long y[2]; };' 
 check_error struct-tail-padding-overflow 'struct S { long x; char a[2147483639]; };' '1:1: error: struct size exceeds supported limit'
 check_error struct-initializer 'struct S { int x; }; int main(void) { struct S s = 0; return 0; }' \
             "1:48: error: incompatible initializer type"
-check_error struct-return-by-value 'struct S { int x; }; struct S f(void);' '1:31: error: returning structs by value is not supported yet'
-check_error struct-parameter-by-value 'struct S { int x; }; int f(struct S s);' '1:37: error: passing structs by value is not supported yet'
+check struct-return-by-value 42 'struct S { int x; }; struct S f(void) { struct S s; s.x=42; return s; } int main(void) { return f().x; }'
+check struct-parameter-by-value 42 'struct S { int x; }; int f(struct S s) { return s.x; } int main(void) { struct S s; s.x=42; return f(s); }'
 check_error struct-pointer-type-mismatch 'struct A { int x; }; struct B { int x; }; int main(void) { struct A *a; struct B *b = a; return 0; }' '1:83: error: incompatible initializer type'
 check_error struct-anonymous-type-identity 'int main(void) { struct { int x; } a; struct { int x; } *p = &a; return 0; }' '1:58: error: incompatible initializer type'
 check_error struct-local-tag-outside-block 'int main(void) { { struct S { int x; }; } struct S s; return 0; }' '1:52: error: variable has incomplete type'
@@ -2433,7 +2595,7 @@ check_error struct-prototype-tag-scope 'int f(struct S *p); struct S { int x; };
 check_error struct-incomplete-pointer-add 'int main(void) { struct S *p; p + 1; return 0; }' '1:33: error: pointer arithmetic on incomplete type'
 check_error struct-incomplete-pointer-increment 'int main(void) { struct S *p; p++; return 0; }' '1:32: error: pointer arithmetic on incomplete type'
 check_error struct-incomplete-pointer-compound 'int main(void) { struct S *p; p += 1; return 0; }' '1:33: error: pointer arithmetic on incomplete type'
-check_error struct-unprototyped-call 'int f(); struct S { int x; }; int main(void) { struct S a; return f(a); }' '1:69: error: passing structs by value is not supported yet'
+check struct-unprototyped-call 42 'int f(); struct S { int x; }; int main(void) { struct S s; s.x=42; return f(s); } int f(struct S s) { return s.x; }'
 check_error struct-condition 'struct S { int x; }; int main(void) { struct S a; if (a) return 1; return 0; }' \
             "1:55: error: condition must have scalar type"
 check_error struct-prefix-increment 'struct S { int x; }; int main(void) { struct S a; ++a; return 0; }' '1:51: error: invalid increment target'

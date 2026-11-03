@@ -302,7 +302,7 @@ static AstNode *parse_call_expr(Parser *p, Function *func) {
   ref->next = p->call_refs;
   p->call_refs = ref;
 
-  call = new_expr(p, AST_CALL, func->return_type);
+  call = new_expr(p, AST_CALL, unqualified_type(func->return_type));
   call->d.call.function = func;
   ref->call = call;
   /* Consume the function name. */
@@ -1601,6 +1601,7 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
   AstNode *fn = new_ast_node(p, AST_FUNCTION);
   Function *func;
   Variable *params = NULL;
+  Variable **param_tail = &params;
   Vector param_types;
   int nparams;
   int definition = 0;
@@ -1611,9 +1612,6 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
   fn->loc = func_name;
   if (return_type->kind == TYPE_ARRAY)
     error_at(p, func_name, "function cannot return an array");
-  if (is_record(return_type))
-    error_at(p, func_name, "returning %ss by value is not supported yet",
-             return_type->kind == TYPE_STRUCT ? "struct" : "union");
 
   parse_expect(p, TOKEN_LPAREN, "expect '('");
   enter_scope(p);
@@ -1644,11 +1642,6 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
         error_at(p,
                  param_name.kind == TOKEN_IDENTIFIER ? param_name : p->current,
                  "parameter has void type");
-      if (is_record(param_type))
-        error_at(p,
-                 param_name.kind == TOKEN_IDENTIFIER ? param_name : p->current,
-                 "passing %ss by value is not supported yet",
-                 param_type->kind == TYPE_STRUCT ? "struct" : "union");
       if (param_types.len >= INT_MAX)
         parse_error(p, "too many function parameters");
       if (!vector_push(&param_types, &param_type))
@@ -1659,8 +1652,8 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
 
         param = new_variable(p, param_name, param_type);
         param->is_parameter = true;
-        param->next = params;
-        params = param;
+        *param_tail = param;
+        param_tail = &param->next;
       } else {
         if (p->current.kind != TOKEN_COMMA && p->current.kind != TOKEN_RPAREN)
           parse_error(p, "expect parameter name");
@@ -1683,6 +1676,14 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
   definition = p->current.kind == TOKEN_LBRACE;
   if (definition && unnamed_param.start)
     error_at(p, unnamed_param, "expect parameter name in function definition");
+  if (definition) {
+    Variable *param;
+    if (is_record(return_type) && type_size(return_type) < 0)
+      error_at(p, func_name, "function return type is incomplete");
+    for (param = params; param; param = param->next)
+      if (type_size(param->type) < 0)
+        error_at(p, param->name, "parameter has incomplete type");
+  }
 
   nparams = (int)param_types.len;
   func = declare_function(p, func_name, return_type, param_types.data, nparams,

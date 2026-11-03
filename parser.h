@@ -68,7 +68,7 @@ typedef struct Variable {
     AddressConstant address;
     AstNode *string;
   } initializer;
-  struct Variable *next; /* Parameter list, in reverse declaration order. */
+  struct Variable *next; /* Parameter list, in declaration order. */
 } Variable;
 
 typedef struct Enum {
@@ -242,11 +242,12 @@ typedef struct AstNode {
       Function *declaration; /* Shared type and linkage across redeclarations. */
       struct AstNode *body;
       /*
-       * Parameters in reverse declaration order. This list is retained for
+       * Parameters in declaration order. This list is retained for
        * codegen independently of their scope-bound symbol entries.
        */
       struct Variable *params;
       int stack_size; /* Assigned by stack layout after parsing. */
+      int return_offset; /* Saved hidden result pointer for a MEMORY return. */
     } function;
 
     struct {
@@ -307,6 +308,7 @@ typedef struct AstNode {
     struct {
       Function *function;
       struct AstNode *args; /* First argument expression, or NULL. */
+      int offset; /* Stack storage for an aggregate result, set by layout. */
     } call;
 
     struct {

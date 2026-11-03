@@ -1,5 +1,5 @@
 /*
- * Stack layout for the self-hosted C compiler
+ * Stack and argument layout for the self-hosted C compiler
  * Copyright (C) 2026  Xing Guo
  *
  * This program is free software: you can redistribute it and/or modify
@@ -22,6 +22,38 @@
 
 #include "layout.h"
 #include "type.h"
+
+/*
+ * Our supported scalars and naturally aligned records use INTEGER eightbytes.
+ * Records larger than two eightbytes use MEMORY. Floating-point, vector and
+ * packed record types will require additional ABI classes when introduced.
+ */
+int register_count(const Type *type) {
+  if (type->kind == TYPE_VOID)
+    return 0;
+  if (!is_record(type))
+    return 1;
+  return type_size(type) > 16 ? 0 : (type_size(type) + 7) / 8;
+}
+
+bool return_in_memory(const Type *type) {
+  return is_record(type) && register_count(type) == 0;
+}
+
+int layout_argument(const Type *type, int *nregs, int64_t *stack_size) {
+  int count = register_count(type);
+  /*
+   * An argument must fit entirely in the remaining registers. A record that
+   * does not fit leaves those registers available for subsequent arguments.
+   */
+  if (count && count <= 6 - *nregs) {
+    int reg = *nregs;
+    *nregs += count;
+    return reg;
+  }
+  *stack_size += ((int64_t)type_size(type) + 7) / 8 * 8;
+  return -1;
+}
 
 typedef struct {
   const char *filename;
@@ -84,8 +116,17 @@ static void layout_expr(StackLayout *layout, AstNode *expr) {
     break;
   case AST_CALL: {
     AstNode *arg;
-    for (arg = expr->d.call.args; arg; arg = arg->next)
+    int nregs = return_in_memory(expr->type) ? 1 : 0;
+    int64_t stack_size = 0;
+    for (arg = expr->d.call.args; arg; arg = arg->next) {
       layout_expr(layout, arg);
+      layout_argument(arg->type, &nregs, &stack_size);
+    }
+    if (stack_size + nregs * 8 > INT_MAX - 15)
+      layout_error(layout, expr->loc,
+                   "function arguments exceed supported stack size");
+    if (is_record(expr->type))
+      expr->d.call.offset = layout_slot(layout, expr->type, expr->loc);
     break;
   }
   case AST_CONDITIONAL:
@@ -189,23 +230,31 @@ void assign_stack_offsets(const char *filename, AstNode *ast) {
   AstNode *fn;
   for (fn = ast; fn; fn = fn->next) {
     Variable *param;
-    int nparams = 0;
     StackLayout layout = {.filename = filename};
+    bool memory_return;
+    int nregs;
+    int64_t stack_size = 0;
     if (fn->kind != AST_FUNCTION)
       continue;
 
+    memory_return = return_in_memory(fn->d.function.declaration->return_type);
+    nregs = memory_return ? 1 : 0;
+    if (memory_return)
+      fn->d.function.return_offset =
+          layout_slot(&layout, &builtin_type_long, fn->loc);
     /*
-     * Keep an eight-byte home for each parameter in declaration order.
-     * The list is reversed; its first entry receives the highest offset.
+     * Scalars retain eight-byte homes; aggregate parameters need their full
+     * object size. Every parameter has its own writable local copy.
      */
     for (param = fn->d.function.params; param; param = param->next) {
-      if (nparams >= (INT_MAX - 15) / 8)
-        layout_error(&layout, param->name, "too many function parameters");
-      ++nparams;
+      Type *slot_type =
+          is_record(param->type) ? param->type : &builtin_type_long;
+      param->offset = layout_slot(&layout, slot_type, param->name);
+      layout_argument(param->type, &nregs, &stack_size);
+      if (stack_size > INT_MAX - 16)
+        layout_error(&layout, param->name,
+                     "function parameters exceed supported stack size");
     }
-    layout.size = 8 * nparams;
-    for (param = fn->d.function.params; param; param = param->next)
-      param->offset = 8 * nparams--;
 
     layout_stmt(&layout, fn->d.function.body);
     fn->d.function.stack_size = layout.size;

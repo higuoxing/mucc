@@ -350,7 +350,7 @@ static AstNode *convert_to_value(Parser *p, AstNode *expr) {
      * results still refer to their destination and need a copy when consumed.
      */
     if (expr->kind == AST_CAST || expr->kind == AST_COMMA ||
-        expr->kind == AST_CONDITIONAL)
+        expr->kind == AST_CONDITIONAL || expr->kind == AST_CALL)
       return expr;
     type = unqualified_type(expr->type);
   } else if (expr->type->kind == TYPE_ARRAY)
@@ -636,6 +636,8 @@ AstNode *sema_cast(Parser *p, Type *target, AstNode *expr, Token loc) {
 void sema_check_call(Parser *p, Function *func, AstNode *call, int nargs) {
   AstNode **link;
   int i = 0;
+  if (is_record(call->type) && type_size(call->type) < 0)
+    error_at(p, call->loc, "function return type is incomplete");
   if (func->has_prototype && nargs != func->nparams)
     error_at(p, call->loc, "wrong number of arguments to function '%.*s'",
              func->name.len, func->name.start);
@@ -643,9 +645,6 @@ void sema_check_call(Parser *p, Function *func, AstNode *call, int nargs) {
     AstNode *arg = *link;
     AstNode *next = arg->next;
     arg->next = NULL;
-    if (is_record(arg->type))
-      error_at(p, arg->loc, "passing %ss by value is not supported yet",
-               arg->type->kind == TYPE_STRUCT ? "struct" : "union");
     sema_check_nonvoid_expr(p, arg);
     if (func->has_prototype)
       *link =

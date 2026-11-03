@@ -17,11 +17,24 @@
  */
 
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 
 #include "codegen.h"
+#include "layout.h"
 #include "parser.h"
 #include "type.h"
+
+/*
+ * Function and control-flow state for statement emission. Loops and switches
+ * copy this context before replacing their break and continue targets.
+ */
+typedef struct {
+  const AstNode *function;
+  int break_label;    /* -1 when there is no enclosing loop or switch. */
+  int continue_label; /* -1 when there is no enclosing loop. */
+  int ret_label; /* Unique return label, also used to qualify user labels. */
+} CodegenContext;
 
 /*
  * Counts generated labels so that each control-flow construct gets unique
@@ -178,6 +191,74 @@ static void codegen_store(Type *type) {
 }
 
 /*
+ * Pack at most eight bytes from %r10 into an ABI result register. Partial
+ * eightbytes must not read beyond the object. Clobbers %r11.
+ * size must be 1..8; offset must be nonnegative and leave room for every byte.
+ */
+static void codegen_load_bytes(const char *dst, int offset, int size) {
+  int i;
+  if (size < 1 || size > 8 || offset < 0 || offset > INT_MAX - (size - 1)) {
+    fprintf(stderr, "invalid byte load in codegen: offset %d, size %d\n",
+            offset, size);
+    exit(1);
+  }
+  if (size == 8) {
+    fprintf(out, "\tmovq %d(%%r10), %s\n", offset, dst);
+    return;
+  }
+  fprintf(out, "\txorq %s, %s\n", dst, dst);
+  for (i = size - 1; i >= 0; --i) {
+    if (i != size - 1)
+      fprintf(out, "\tshlq $8, %s\n", dst);
+    fprintf(out, "\tmovzbq %d(%%r10), %%r11\n", offset + i);
+    fprintf(out, "\torq %%r11, %s\n", dst);
+  }
+}
+
+/*
+ * Unpack an ABI register into a local object without touching adjacent bytes.
+ * offset is the positive distance below %rbp. Clobbers %r10.
+ * size must be 1..8 and offset must be at least size to stay below %rbp.
+ */
+static void codegen_store_bytes(const char *src, int offset, int size) {
+  int i;
+  if (size < 1 || size > 8 || offset < size) {
+    fprintf(stderr, "invalid byte store in codegen: offset %d, size %d\n",
+            offset, size);
+    exit(1);
+  }
+  if (size == 8) {
+    fprintf(out, "\tmovq %s, -%d(%%rbp)\n", src, offset);
+    return;
+  }
+  fprintf(out, "\tmovq %s, %%r10\n", src);
+  for (i = 0; i < size; ++i) {
+    fprintf(out, "\tmovb %%r10b, -%d(%%rbp)\n", offset - i);
+    if (i != size - 1)
+      fprintf(out, "\tshrq $8, %%r10\n");
+  }
+}
+
+static void codegen_return(const CodegenContext *ctx) {
+  const AstNode *function = ctx->function;
+  Type *type = function->d.function.declaration->return_type;
+  int size = type_size(type);
+  if (!is_record(type))
+    return;
+  if (return_in_memory(type)) {
+    fprintf(out, "\tmovq %%rax, %%rcx\n");
+    fprintf(out, "\tmovq -%d(%%rbp), %%rax\n",
+            function->d.function.return_offset);
+    codegen_store(type);
+  } else {
+    fprintf(out, "\tmovq %%rax, %%r10\n");
+    codegen_load_bytes("%rax", 0, size < 8 ? size : 8);
+    if (size > 8)
+      codegen_load_bytes("%rdx", 8, size - 8);
+  }
+}
+
+/*
  * Normalize the value in %rax to its integer type: truncate to the type's
  * width, then sign- or zero-extend. _Bool converts any nonzero value to 1.
  * Long, pointer and void need no change.
@@ -266,6 +347,76 @@ static void codegen_pointer_offset(AstKind kind, Type *type) {
   fprintf(out, "\timulq $%d, %%rcx\n", type_size(type->base));
   fprintf(out, kind == AST_PTR_ADD ? "\taddq %%rcx, %%rax\n"
                                    : "\tsubq %%rcx, %%rax\n");
+}
+
+static void codegen_call(AstNode *expr) {
+  AstNode *arg;
+  bool memory_return = return_in_memory(expr->type);
+  /*
+   * A hidden return-buffer pointer reserves the first argument register, %rdi.
+   */
+  int nregs = memory_return ? 1 : 0;
+  int64_t stack_offset = 0;
+  int stack_size;
+  int slots;
+  int i;
+
+  for (arg = expr->d.call.args; arg; arg = arg->next)
+    layout_argument(arg->type, &nregs, &stack_offset);
+  stack_size = (int)stack_offset;
+  /*
+   * Stack arguments precede staging slots for register arguments. Padding
+   * stays above both, leaving the first stack argument at 0(%rsp).
+   */
+  slots = stack_size / 8 + nregs;
+  slots += (push_depth + slots) % 2;
+  if (slots)
+    fprintf(out, "\tsubq $%d, %%rsp\n", slots * 8);
+  push_depth += slots;
+
+  nregs = memory_return ? 1 : 0;
+  stack_offset = 0;
+  for (arg = expr->d.call.args; arg; arg = arg->next) {
+    int offset = (int)stack_offset;
+    int reg = layout_argument(arg->type, &nregs, &stack_offset);
+    if (reg >= 0)
+      offset = stack_size + reg * 8;
+    /* Stage values before loading registers; nested calls may clobber them. */
+    codegen_expr(arg);
+    if (is_record(arg->type)) {
+      fprintf(out, "\tmovq %%rax, %%rcx\n");
+      fprintf(out, "\tleaq %d(%%rsp), %%rax\n", offset);
+      codegen_store(arg->type);
+    } else {
+      fprintf(out, "\tmovq %%rax, %d(%%rsp)\n", offset);
+    }
+  }
+  for (i = memory_return ? 1 : 0; i < nregs; ++i)
+    fprintf(out, "\tmovq %d(%%rsp), %s\n", stack_size + i * 8, argregs64[i]);
+  if (memory_return)
+    fprintf(out, "\tleaq -%d(%%rbp), %%rdi\n", expr->d.call.offset);
+  /* Prototype-less calls must report that no vector registers were used. */
+  fprintf(out, "\txorl %%eax, %%eax\n");
+  fprintf(out, "\tcall %.*s\n", expr->d.call.function->name.len,
+          expr->d.call.function->name.start);
+  if (slots)
+    fprintf(out, "\taddq $%d, %%rsp\n", slots * 8);
+  push_depth -= slots;
+
+  if (is_record(expr->type)) {
+    int size = type_size(expr->type);
+    if (!memory_return) {
+      codegen_store_bytes("%rax", expr->d.call.offset, size < 8 ? size : 8);
+      if (size > 8)
+        codegen_store_bytes("%rdx", expr->d.call.offset - 8, size - 8);
+    }
+    fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", expr->d.call.offset);
+  } else if (expr->type->kind == TYPE_BOOL) {
+    /* Only the low byte of a _Bool result is defined by the ABI. */
+    fprintf(out, "\tmovzbl %%al, %%eax\n");
+  } else {
+    codegen_normalize(expr->type);
+  }
 }
 
 static void codegen_expr(AstNode *expr) {
@@ -497,56 +648,9 @@ static void codegen_expr(AstNode *expr) {
     fprintf(out, ".L.end.%d:\n", seq);
     break;
   }
-  case AST_CALL: {
-    AstNode *arg;
-    int nargs = 0;
-    int nregisters;
-    int nstack;
-    int slots;
-    int i;
-
-    for (arg = expr->d.call.args; arg; arg = arg->next)
-      nargs++;
-    nregisters = nargs < 6 ? nargs : 6;
-    nstack = nargs - nregisters;
-
-    /*
-     * Reserve outgoing stack arguments first, followed by temporary slots
-     * for register arguments and any alignment padding. Argument seven is
-     * at 0(%rsp) at the call; padding must stay above the arguments.
-     * Count the entire reservation so nested calls also align their stack.
-     */
-    slots = nargs + (push_depth + nargs) % 2;
-    if (slots)
-      fprintf(out, "\tsubq $%d, %%rsp\n", slots * 8);
-    push_depth += slots;
-
-    /*
-     * Preserve left-to-right evaluation. Stage all arguments in memory
-     * before loading registers, since an argument may itself contain calls.
-     */
-    for (arg = expr->d.call.args, i = 0; arg; arg = arg->next, ++i) {
-      int slot = i < 6 ? nstack + i : i - 6;
-      codegen_expr(arg);
-      fprintf(out, "\tmovq %%rax, %d(%%rsp)\n", slot * 8);
-    }
-    for (i = 0; i < nregisters; ++i)
-      fprintf(out, "\tmovq %d(%%rsp), %s\n", (nstack + i) * 8, argregs64[i]);
-
-    fprintf(out, "\tcall %.*s\n", expr->d.call.function->name.len,
-            expr->d.call.function->name.start);
-    if (slots)
-      fprintf(out, "\taddq $%d, %%rsp\n", slots * 8);
-    push_depth -= slots;
-    /*
-     * Only the low byte of a _Bool return value is defined by the ABI.
-     */
-    if (expr->type->kind == TYPE_BOOL)
-      fprintf(out, "\tmovzbl %%al, %%eax\n");
-    else
-      codegen_normalize(expr->type);
+  case AST_CALL:
+    codegen_call(expr);
     break;
-  }
   case AST_NEG:
     codegen_expr(expr->d.unary.operand);
     fprintf(out, expr->type->size == 8 ? "\tnegq %%rax\n" : "\tnegl %%eax\n");
@@ -607,35 +711,28 @@ static void codegen_expr(AstNode *expr) {
   return;
 }
 
-/*
- * break_label and continue_label are the label_seq values of the enclosing
- * loop's .L.end.N and .L.continue.N labels, or -1 outside any loop (the
- * parser rejects break/continue there, so -1 is defensive). ret_label is
- * this function's .Lreturn.N label: with several functions in one
- * translation unit, a fixed '.Lreturn' would be defined once per function
- * and collide.
- */
-static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
-                         int ret_label) {
+static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
   switch (stmt->kind) {
   case AST_RETURN:
-    if (stmt->d.ret.expr)
+    if (stmt->d.ret.expr) {
       codegen_expr(stmt->d.ret.expr);
-    fprintf(out, "\tjmp .Lreturn.%d\n", ret_label);
+      codegen_return(ctx);
+    }
+    fprintf(out, "\tjmp .Lreturn.%d\n", ctx->ret_label);
     break;
   case AST_BREAK:
-    if (break_label < 0) {
+    if (ctx->break_label < 0) {
       fprintf(stderr, "break outside loop in codegen\n");
       exit(1);
     }
-    fprintf(out, "\tjmp .L.end.%d\n", break_label);
+    fprintf(out, "\tjmp .L.end.%d\n", ctx->break_label);
     break;
   case AST_CONTINUE:
-    if (continue_label < 0) {
+    if (ctx->continue_label < 0) {
       fprintf(stderr, "continue outside loop in codegen\n");
       exit(1);
     }
-    fprintf(out, "\tjmp .L.continue.%d\n", continue_label);
+    fprintf(out, "\tjmp .L.continue.%d\n", ctx->continue_label);
     break;
   case AST_IF: {
     int seq = label_seq++;
@@ -644,18 +741,19 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
     codegen_expr(stmt->d.if_stmt.cond);
     codegen_test(stmt->d.if_stmt.cond->type);
     fprintf(out, "\tje .L.else.%d\n", seq);
-    codegen_stmt(stmt->d.if_stmt.then_stmt, break_label, continue_label,
-                 ret_label);
+    codegen_stmt(ctx, stmt->d.if_stmt.then_stmt);
     fprintf(out, "\tjmp .L.end.%d\n", seq);
     fprintf(out, ".L.else.%d:\n", seq);
     if (stmt->d.if_stmt.else_stmt)
-      codegen_stmt(stmt->d.if_stmt.else_stmt, break_label, continue_label,
-                   ret_label);
+      codegen_stmt(ctx, stmt->d.if_stmt.else_stmt);
     fprintf(out, ".L.end.%d:\n", seq);
     break;
   }
   case AST_WHILE: {
     int seq = label_seq++;
+    CodegenContext loop_ctx = *ctx;
+    loop_ctx.break_label = seq;
+    loop_ctx.continue_label = seq;
 
     /*
      * .L.continue.N coincides with the head: 'continue' re-tests the
@@ -666,17 +764,19 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
     codegen_expr(stmt->d.while_stmt.cond);
     codegen_test(stmt->d.while_stmt.cond->type);
     fprintf(out, "\tje .L.end.%d\n", seq);
-    codegen_stmt(stmt->d.while_stmt.body, seq, seq, ret_label);
+    codegen_stmt(&loop_ctx, stmt->d.while_stmt.body);
     fprintf(out, "\tjmp .L.begin.%d\n", seq);
     fprintf(out, ".L.end.%d:\n", seq);
     break;
   }
   case AST_FOR: {
     int seq = label_seq++;
+    CodegenContext loop_ctx = *ctx;
+    loop_ctx.break_label = seq;
+    loop_ctx.continue_label = seq;
 
     if (stmt->d.for_stmt.init)
-      codegen_stmt(stmt->d.for_stmt.init, break_label, continue_label,
-                   ret_label);
+      codegen_stmt(ctx, stmt->d.for_stmt.init);
     fprintf(out, ".L.begin.%d:\n", seq);
     if (stmt->d.for_stmt.cond) {
       /* An omitted condition is a nonzero constant: skip the test. */
@@ -684,7 +784,7 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
       codegen_test(stmt->d.for_stmt.cond->type);
       fprintf(out, "\tje .L.end.%d\n", seq);
     }
-    codegen_stmt(stmt->d.for_stmt.body, seq, seq, ret_label);
+    codegen_stmt(&loop_ctx, stmt->d.for_stmt.body);
     /* 'continue' must skip to the post expression, not the condition. */
     fprintf(out, ".L.continue.%d:\n", seq);
     if (stmt->d.for_stmt.post)
@@ -695,13 +795,16 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
   }
   case AST_DO: {
     int seq = label_seq++;
+    CodegenContext loop_ctx = *ctx;
+    loop_ctx.break_label = seq;
+    loop_ctx.continue_label = seq;
 
     /*
      * The test sits after the body, so the loop always runs at least once;
      * 'continue' jumps to the test and 'break' to the end label.
      */
     fprintf(out, ".L.begin.%d:\n", seq);
-    codegen_stmt(stmt->d.do_stmt.body, seq, seq, ret_label);
+    codegen_stmt(&loop_ctx, stmt->d.do_stmt.body);
     fprintf(out, ".L.continue.%d:\n", seq);
     codegen_expr(stmt->d.do_stmt.cond);
     codegen_test(stmt->d.do_stmt.cond->type);
@@ -713,23 +816,24 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
     /*
      * User labels have function scope, but the assembler's symbol
      * namespace is file-wide, so the same label name in two functions
-     * would collide. Prefixing with the function's ret_label number
+     * would collide. Prefixing with the function's return label number
      * keeps them distinct; the dot then also keeps them clear of the
      * generated '.L.begin.N' family.
      */
-    fprintf(out, "\tjmp .L%d.%.*s\n", ret_label, stmt->d.goto_stmt.name.len,
-            stmt->d.goto_stmt.name.start);
+    fprintf(out, "\tjmp .L%d.%.*s\n", ctx->ret_label,
+            stmt->d.goto_stmt.name.len, stmt->d.goto_stmt.name.start);
     break;
   case AST_LABEL:
-    fprintf(out, ".L%d.%.*s:\n", ret_label, stmt->d.label_stmt.name.len,
+    fprintf(out, ".L%d.%.*s:\n", ctx->ret_label, stmt->d.label_stmt.name.len,
             stmt->d.label_stmt.name.start);
-    codegen_stmt(stmt->d.label_stmt.stmt, break_label, continue_label,
-                 ret_label);
+    codegen_stmt(ctx, stmt->d.label_stmt.stmt);
     break;
   case AST_SWITCH: {
     int seq = label_seq++;
+    CodegenContext switch_ctx = *ctx;
     CaseList *cl;
     AstNode *default_node = NULL;
+    switch_ctx.break_label = seq;
 
     /*
      * Dispatch is a chain of compares and jumps over the cases collected
@@ -757,7 +861,7 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
     fprintf(out, "\tjmp .L.end.%d\n", seq);
 
     /* 'break' inside the body exits this switch, not any outer loop. */
-    codegen_stmt(stmt->d.switch_stmt.body, seq, continue_label, ret_label);
+    codegen_stmt(&switch_ctx, stmt->d.switch_stmt.body);
 
     fprintf(out, ".L.end.%d:\n", seq);
     break;
@@ -767,8 +871,7 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
       fprintf(out, ".L.default.%d:\n", stmt->d.case_stmt.label);
     else
       fprintf(out, ".L.case.%d:\n", stmt->d.case_stmt.label);
-    codegen_stmt(stmt->d.case_stmt.stmt, break_label, continue_label,
-                 ret_label);
+    codegen_stmt(ctx, stmt->d.case_stmt.stmt);
     break;
   case AST_DECL:
     if (stmt->d.decl.init) {
@@ -800,7 +903,7 @@ static void codegen_stmt(AstNode *stmt, int break_label, int continue_label,
   case AST_BLOCK: {
     AstNode *cur;
     for (cur = stmt->d.block.first_stmt; cur; cur = cur->next)
-      codegen_stmt(cur, break_label, continue_label, ret_label);
+      codegen_stmt(ctx, cur);
     break;
   }
   default:
@@ -894,6 +997,58 @@ static void codegen_global_variable(Variable *var) {
   fprintf(out, "\t.popsection\n");
 }
 
+/*
+ * Save every incoming register before copying stack parameters: a record copy
+ * uses %rdi, %rsi and %rcx, which may still contain other parameter values.
+ */
+static void codegen_function_params(const AstNode *fn) {
+  Variable *param;
+  bool memory_return =
+      return_in_memory(fn->d.function.declaration->return_type);
+  /*
+   * A hidden return-buffer pointer reserves the first argument register, %rdi.
+   */
+  int nregs = memory_return ? 1 : 0;
+  int64_t stack_size = 0;
+  if (memory_return)
+    fprintf(out, "\tmovq %%rdi, -%d(%%rbp)\n", fn->d.function.return_offset);
+  for (param = fn->d.function.params; param; param = param->next) {
+    int reg = layout_argument(param->type, &nregs, &stack_size);
+    int size = type_size(param->type);
+    if (reg < 0)
+      continue;
+    if (is_record(param->type)) {
+      codegen_store_bytes(argregs64[reg], param->offset, size < 8 ? size : 8);
+      if (size > 8)
+        codegen_store_bytes(argregs64[reg + 1], param->offset - 8, size - 8);
+    } else if (size == 8) {
+      fprintf(out, "\tmovq %s, -%d(%%rbp)\n", argregs64[reg], param->offset);
+    } else if (size == 1) {
+      fprintf(out, "\tmovb %s, -%d(%%rbp)\n", argregs8[reg], param->offset);
+    } else if (size == 2) {
+      fprintf(out, "\tmovw %s, -%d(%%rbp)\n", argregs16[reg], param->offset);
+    } else {
+      fprintf(out, "\tmovl %s, -%d(%%rbp)\n", argregs32[reg], param->offset);
+    }
+  }
+  nregs = memory_return ? 1 : 0;
+  stack_size = 0;
+  for (param = fn->d.function.params; param; param = param->next) {
+    int64_t offset = 16 + stack_size;
+    int reg = layout_argument(param->type, &nregs, &stack_size);
+    if (reg >= 0)
+      continue;
+    if (is_record(param->type)) {
+      fprintf(out, "\tleaq %" PRId64 "(%%rbp), %%rcx\n", offset);
+    } else {
+      fprintf(out, "\tleaq %" PRId64 "(%%rbp), %%rax\n", offset);
+      codegen_load(param->type, "%rcx");
+    }
+    fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", param->offset);
+    codegen_store(param->type);
+  }
+}
+
 void codegen(const AstNode *ast, FILE *out_file) {
   const AstNode *decl;
 
@@ -911,7 +1066,12 @@ void codegen(const AstNode *ast, FILE *out_file) {
     Function *func;
     Token name;
     int stack_size;
-    int ret_label = label_seq++;
+    CodegenContext ctx = {
+        .function = decl,
+        .break_label = -1,
+        .continue_label = -1,
+        .ret_label = label_seq++,
+    };
 
     if (decl->kind != AST_FUNCTION) {
       fprintf(stderr, "expected function AST\n");
@@ -929,56 +1089,13 @@ void codegen(const AstNode *ast, FILE *out_file) {
     if (stack_size)
       fprintf(out, "\tsubq $%d, %%rsp\n", stack_size);
 
-    /*
-     * Copy incoming parameters into writable local slots. The first six
-     * arrive in registers; later ones start at 16(%rbp), above saved rbp
-     * and the return address. The locals chain is in reverse parameter order.
-     */
-    if (decl->d.function.params) {
-      Variable *param;
-      int nparams = 0;
+    codegen_function_params(decl);
 
-      for (param = decl->d.function.params; param; param = param->next)
-        nparams++;
-      for (param = decl->d.function.params; param; param = param->next) {
-        --nparams;
-        if (nparams < 6) {
-          if (param->type->size == 8)
-            fprintf(out, "\tmovq %s, -%d(%%rbp)\n", argregs64[nparams],
-                    param->offset);
-          else if (param->type->size == 1)
-            fprintf(out, "\tmovb %s, -%d(%%rbp)\n", argregs8[nparams],
-                    param->offset);
-          else if (param->type->kind == TYPE_SHORT)
-            fprintf(out, "\tmovw %s, -%d(%%rbp)\n", argregs16[nparams],
-                    param->offset);
-          else
-            fprintf(out, "\tmovl %s, -%d(%%rbp)\n", argregs32[nparams],
-                    param->offset);
-        } else {
-          int offset = 16 + (nparams - 6) * 8;
-          if (param->type->size == 8) {
-            fprintf(out, "\tmovq %d(%%rbp), %%rax\n", offset);
-            fprintf(out, "\tmovq %%rax, -%d(%%rbp)\n", param->offset);
-          } else if (param->type->size == 1) {
-            fprintf(out, "\tmovb %d(%%rbp), %%al\n", offset);
-            fprintf(out, "\tmovb %%al, -%d(%%rbp)\n", param->offset);
-          } else if (param->type->kind == TYPE_SHORT) {
-            fprintf(out, "\tmovw %d(%%rbp), %%ax\n", offset);
-            fprintf(out, "\tmovw %%ax, -%d(%%rbp)\n", param->offset);
-          } else {
-            fprintf(out, "\tmovl %d(%%rbp), %%eax\n", offset);
-            fprintf(out, "\tmovl %%eax, -%d(%%rbp)\n", param->offset);
-          }
-        }
-      }
-    }
-
-    codegen_stmt(decl->d.function.body, -1, -1, ret_label);
+    codegen_stmt(&ctx, decl->d.function.body);
 
     /* Reaching the end of the function returns zero. */
     fprintf(out, "\tmovl $0, %%eax\n");
-    fprintf(out, ".Lreturn.%d:\n", ret_label);
+    fprintf(out, ".Lreturn.%d:\n", ctx.ret_label);
     fprintf(out, "\tmovq %%rbp, %%rsp\n");
     fprintf(out, "\tpopq %%rbp\n");
     fprintf(out, "\tret\n");

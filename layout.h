@@ -1,5 +1,5 @@
 /*
- * Stack layout for the self-hosted C compiler
+ * Stack and argument layout for the self-hosted C compiler
  * Copyright (C) 2026  Xing Guo
  *
  * This program is free software: you can redistribute it and/or modify
@@ -19,7 +19,18 @@
 #ifndef _LAYOUT_H_
 #define _LAYOUT_H_
 
+#include <stdint.h>
+
 #include "parser.h"
+
+extern int register_count(const Type *type);
+extern bool return_in_memory(const Type *type);
+/*
+ * Return the first argument register, or -1 for a stack argument, and advance
+ * the counters. A stack argument starts at stack_size's value before the call.
+ */
+extern int layout_argument(const Type *type, int *nregisters,
+                           int64_t *stack_size);
 
 /*
  * Assign parameter and local offsets and function stack sizes in a completed
