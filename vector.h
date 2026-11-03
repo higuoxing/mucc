@@ -45,6 +45,7 @@ extern bool vector_push(Vector *vector, const void *element);
 
 /* Both operations leave an empty vector that retains its element size. */
 extern void vector_free(Vector *vector);
-extern void *vector_release(Vector *vector); /* Caller owns the returned buffer. */
+extern void *
+vector_release(Vector *vector); /* Caller owns the returned buffer. */
 
 #endif

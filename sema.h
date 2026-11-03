@@ -42,21 +42,22 @@ extern Variable *new_variable(Parser *p, Token name, Type *type);
 extern AstNode *declare_global_variable(Parser *p, Token name, Type *type,
                                         StorageClass storage_class,
                                         bool has_initializer);
-extern void sema_initialize_global_variable(Parser *p, Token name, AstNode *expr);
-extern void sema_initialize_string_array(Parser *p, Variable *var, AstNode *expr);
+extern Initializer *sema_initialize_variable(Parser *p, Variable *var,
+                                             Token name,
+                                             const Initializer *parsed);
 extern void sema_check_global_variables(Parser *p);
 extern void declare_typedef(Parser *p, Token name, Type *type);
 extern Enum *declare_enumerator(Parser *p, Token name, AstNode *initializer,
-                                     int64_t next_value);
+                                int64_t next_value);
 extern AstNode *sema_enumerator_expr(Parser *p, Enum *enumerator, Token loc);
 extern int64_t eval_const_expr(Parser *p, AstNode *expr);
 extern void check_calls(Parser *p);
 extern void check_gotos(Parser *p);
 
 extern Function *declare_function(Parser *p, Token name, Type *return_type,
-                                   Type **param_types, int nparams,
-                                   bool has_prototype, bool definition,
-                                   bool is_static);
+                                  Type **param_types, int nparams,
+                                  bool has_prototype, bool definition,
+                                  bool is_static);
 extern AstNode *sema_switch_condition(Parser *p, AstNode *expr);
 extern AstNode *sema_check_condition(Parser *p, AstNode *expr);
 extern AstNode *sema_subscript(Parser *p, AstNode *base, AstNode *index,
@@ -66,7 +67,8 @@ extern void sema_check_nonvoid_expr(Parser *p, AstNode *expr);
 extern AstNode *sema_convert_expr(Parser *p, Type *target, AstNode *expr,
                                   Token loc, const char *context);
 extern AstNode *sema_cast(Parser *p, Type *target, AstNode *expr, Token loc);
-extern void sema_check_call(Parser *p, Function *func, AstNode *call, int nargs);
+extern void sema_check_call(Parser *p, Function *func, AstNode *call,
+                            int nargs);
 extern void sema_check_return(Parser *p, AstNode *stmt);
 
 extern AstNode *sema_integer_literal(Parser *p, Token loc);
@@ -74,10 +76,10 @@ extern AstNode *sema_string_literal(Parser *p, Token loc);
 extern AstNode *sema_sizeof(Parser *p, Type *type, Token loc);
 extern AstNode *sema_unary(Parser *p, AstKind op, AstNode *operand, Token loc);
 extern AstNode *sema_binary(Parser *p, AstKind kind, AstNode *lhs, AstNode *rhs,
-                           Token loc);
+                            Token loc);
 extern AstNode *sema_assignment(Parser *p, Token op, AstNode *lhs,
-                               AstNode *rhs);
+                                AstNode *rhs);
 extern AstNode *sema_conditional(Parser *p, AstNode *cond, AstNode *then_expr,
-                                AstNode *else_expr, Token loc);
+                                 AstNode *else_expr, Token loc);
 
 #endif

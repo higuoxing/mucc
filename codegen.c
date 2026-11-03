@@ -96,12 +96,12 @@ static int codegen_string_literal(AstNode *expr) {
  * Copy the string into the local array, then zero any remaining elements.
  * Repeated byte instructions keep large padding from bloating the code.
  */
-static void codegen_local_string_array(Variable *var, AstNode *expr) {
-  int size = type_size(var->type);
+static void codegen_local_string_array(Type *type, AstNode *expr, int offset) {
+  int size = type_size(type);
   int length = expr->type->array_len < size ? expr->type->array_len : size;
   int seq = codegen_string_literal(expr);
   fprintf(out, "\tleaq .L.string.%d(%%rip), %%rsi\n", seq);
-  fprintf(out, "\tleaq -%d(%%rbp), %%rdi\n", var->offset);
+  fprintf(out, "\tleaq -%d(%%rbp), %%rdi\n", offset);
   fprintf(out, "\tmovl $%d, %%ecx\n", length);
   fprintf(out, "\trep movsb\n");
   if (size > length) {
@@ -188,6 +188,33 @@ static void codegen_store(Type *type) {
     fprintf(out, "\tmovw %%cx, (%%rax)\n");
   else
     fprintf(out, "\tmovl %%ecx, (%%rax)\n");
+}
+
+/*
+ * A list initializes its whole object before writing explicit subobjects.
+ * A designator's intermediate nodes only apply their children, preserving
+ * any preceding whole-object copy or string initialization.
+ */
+static void codegen_local_initializer(Initializer *init, int offset) {
+  Initializer *child;
+  if (init->zero_fill) {
+    fprintf(out, "\tleaq -%d(%%rbp), %%rdi\n", offset);
+    fprintf(out, "\txorl %%eax, %%eax\n");
+    fprintf(out, "\tmovl $%d, %%ecx\n", type_size(init->type));
+    fprintf(out, "\trep stosb\n");
+  }
+  if (init->expr) {
+    if (init->type->kind == TYPE_ARRAY) {
+      codegen_local_string_array(init->type, init->expr, offset);
+    } else {
+      codegen_expr(init->expr);
+      fprintf(out, "\tmovq %%rax, %%rcx\n");
+      fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", offset);
+      codegen_store(init->type);
+    }
+  }
+  for (child = init->children; child; child = child->next)
+    codegen_local_initializer(child, offset - child->offset);
 }
 
 /*
@@ -874,27 +901,8 @@ static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
     codegen_stmt(ctx, stmt->d.case_stmt.stmt);
     break;
   case AST_DECL:
-    if (stmt->d.decl.init) {
-      if (stmt->d.decl.var->type->kind == TYPE_ARRAY) {
-        codegen_local_string_array(stmt->d.decl.var, stmt->d.decl.init);
-        break;
-      }
-      codegen_expr(stmt->d.decl.init);
-      if (is_record(stmt->d.decl.var->type)) {
-        fprintf(out, "\tmovq %%rax, %%rcx\n");
-        fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", stmt->d.decl.var->offset);
-        codegen_store(stmt->d.decl.var->type);
-        break;
-      }
-      if (stmt->d.decl.var->type->size == 8)
-        fprintf(out, "\tmovq %%rax, -%d(%%rbp)\n", stmt->d.decl.var->offset);
-      else if (stmt->d.decl.var->type->size == 1)
-        fprintf(out, "\tmovb %%al, -%d(%%rbp)\n", stmt->d.decl.var->offset);
-      else if (stmt->d.decl.var->type->kind == TYPE_SHORT)
-        fprintf(out, "\tmovw %%ax, -%d(%%rbp)\n", stmt->d.decl.var->offset);
-      else
-        fprintf(out, "\tmovl %%eax, -%d(%%rbp)\n", stmt->d.decl.var->offset);
-    }
+    if (stmt->d.decl.init)
+      codegen_local_initializer(stmt->d.decl.init, stmt->d.decl.var->offset);
     break;
   case AST_EXPR_STMT:
     if (stmt->d.expr_stmt.expr)
@@ -934,46 +942,68 @@ static void codegen_address_constant(AddressConstant *address) {
 }
 
 /*
- * Zero-initialized globals use .bss; nonzero initializers use .data.
- * Preserve the current section because objects can appear between functions.
+ * String bytes supply the gaps between explicit character overrides.
  */
-static void codegen_global_variable(Variable *var) {
-  Token name = var->name;
-  int size = type_size(var->type);
-  bool nonzero = false;
-  AstNode *string = NULL;
+static bool initializer_range_nonzero(Initializer *init, int begin, int end) {
+  int i;
+  if (!init->expr || init->type->kind != TYPE_ARRAY)
+    return false;
+  if (end > init->expr->type->array_len)
+    end = init->expr->type->array_len;
+  for (i = begin; i < end; ++i)
+    if (init->expr->d.string_literal.val[i])
+      return true;
+  return false;
+}
+
+static bool initializer_nonzero(Initializer *init) {
+  Initializer *child;
+  int offset = 0;
+  if (!init)
+    return false;
+  if (init->type->kind == TYPE_PTR)
+    return init->constant.address.base != NULL ||
+           init->constant.address.offset != 0;
+  if (is_integer(init->type))
+    return init->constant.value != 0;
+  for (child = init->children; child; child = child->next) {
+    if (initializer_range_nonzero(init, offset, child->offset) ||
+        initializer_nonzero(child))
+      return true;
+    offset = child->offset + type_size(child->type);
+  }
+  return initializer_range_nonzero(init, offset, type_size(init->type));
+}
+
+/*
+ * Emit unoverridden string bytes or implicit zeros. Large gaps use .zero,
+ * without constructing an in-memory image of the global object.
+ */
+static void codegen_initializer_range(Initializer *init, int begin, int end) {
   int length = 0;
-  if (var->has_initializer) {
-    if (var->type->kind == TYPE_ARRAY) {
-      int i;
-      string = var->initializer.string;
-      length = string->type->array_len < size ? string->type->array_len : size;
-      for (i = 0; i < length; ++i)
-        if (string->d.string_literal.val[i])
-          nonzero = true;
-    } else if (var->type->kind == TYPE_PTR) {
-      nonzero = var->initializer.address.base != NULL ||
-                var->initializer.address.offset != 0;
-    } else {
-      nonzero = var->initializer.value != 0;
+  if (init->expr && init->type->kind == TYPE_ARRAY) {
+    int string_end = init->expr->type->array_len;
+    if (string_end > end)
+      string_end = end;
+    if (string_end > begin) {
+      length = string_end - begin;
+      codegen_bytes(init->expr->d.string_literal.val + begin, length);
     }
   }
-  fprintf(out, "\t.pushsection %s\n", nonzero ? ".data" : ".bss");
-  fprintf(out, "\t.%s %.*s\n", var->is_static ? "local" : "globl", name.len,
-          name.start);
-  fprintf(out, "\t.type %.*s, @object\n", name.len, name.start);
-  fprintf(out, "\t.size %.*s, %d\n", name.len, name.start, size);
-  fprintf(out, "\t.balign %d\n", type_alignment(var->type));
-  fprintf(out, "%.*s:\n", name.len, name.start);
-  if (nonzero && string) {
-    codegen_bytes(string->d.string_literal.val, length);
-    if (size > length)
-      fprintf(out, "\t.zero %d\n", size - length);
-  } else if (nonzero && var->type->kind == TYPE_PTR) {
-    codegen_address_constant(&var->initializer.address);
-  } else if (nonzero) {
+  if (end - begin > length)
+    fprintf(out, "\t.zero %d\n", end - begin - length);
+}
+
+static void codegen_global_initializer(Initializer *init) {
+  Initializer *child;
+  int offset = 0;
+  if (init->type->kind == TYPE_PTR) {
+    codegen_address_constant(&init->constant.address);
+    return;
+  }
+  if (is_integer(init->type)) {
     const char *directive;
-    switch (size) {
+    switch (type_size(init->type)) {
     case 1:
       directive = ".byte";
       break;
@@ -990,10 +1020,36 @@ static void codegen_global_variable(Variable *var) {
       fprintf(stderr, "unsupported global initializer size\n");
       exit(1);
     }
-    fprintf(out, "\t%s %" PRId64 "\n", directive, var->initializer.value);
-  } else {
-    fprintf(out, "\t.zero %d\n", size);
+    fprintf(out, "\t%s %" PRId64 "\n", directive, init->constant.value);
+    return;
   }
+  for (child = init->children; child; child = child->next) {
+    codegen_initializer_range(init, offset, child->offset);
+    codegen_global_initializer(child);
+    offset = child->offset + type_size(child->type);
+  }
+  codegen_initializer_range(init, offset, type_size(init->type));
+}
+
+/*
+ * Zero-initialized globals use .bss; nonzero initializers use .data.
+ * Preserve the current section because objects can appear between functions.
+ */
+static void codegen_global_variable(Variable *var) {
+  Token name = var->name;
+  int size = type_size(var->type);
+  bool nonzero = initializer_nonzero(var->initializer);
+  fprintf(out, "\t.pushsection %s\n", nonzero ? ".data" : ".bss");
+  fprintf(out, "\t.%s %.*s\n", var->is_static ? "local" : "globl", name.len,
+          name.start);
+  fprintf(out, "\t.type %.*s, @object\n", name.len, name.start);
+  fprintf(out, "\t.size %.*s, %d\n", name.len, name.start, size);
+  fprintf(out, "\t.balign %d\n", type_alignment(var->type));
+  fprintf(out, "%.*s:\n", name.len, name.start);
+  if (nonzero)
+    codegen_global_initializer(var->initializer);
+  else
+    fprintf(out, "\t.zero %d\n", size);
   fprintf(out, "\t.popsection\n");
 }
 

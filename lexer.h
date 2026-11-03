@@ -36,7 +36,7 @@ typedef enum {
   TOKEN_BIT_OR_EQ,  /* '|=' */
   TOKEN_BIT_XOR,    /* '^' */
   TOKEN_BIT_XOR_EQ, /* '^=' */
-  TOKEN_BOOL,      /* '_Bool' */
+  TOKEN_BOOL,       /* '_Bool' */
   TOKEN_BREAK,      /* 'break' */
   TOKEN_CASE,       /* 'case' */
   TOKEN_CHAR,       /* 'char' */
@@ -100,8 +100,8 @@ typedef enum {
   TOKEN_TYPEDEF,  /* 'typedef' */
   TOKEN_UNION,    /* 'union' */
   TOKEN_UNSIGNED, /* 'unsigned' */
-  TOKEN_VOID, /* 'void' */
-  TOKEN_WHILE, /* 'while' */
+  TOKEN_VOID,     /* 'void' */
+  TOKEN_WHILE,    /* 'while' */
 } TokenKind;
 
 enum {
@@ -118,8 +118,9 @@ typedef struct {
   int col; /* One-based byte column; tabs count as one byte. */
   uint64_t int_literal_val;
   unsigned int_literal_suffix;
-  unsigned char *string_literal_val; /* Owned decoded bytes, including final zero. */
-  int string_literal_len; /* Decoded byte count, including final zero. */
+  unsigned char
+      *string_literal_val; /* Owned decoded bytes, including final zero. */
+  int string_literal_len;  /* Decoded byte count, including final zero. */
 } Token;
 
 typedef struct {
@@ -131,8 +132,7 @@ typedef struct {
 } Lexer;
 
 extern bool same_identifier(Token a, Token b);
-extern void lexer_init(Lexer *l, const char *filename,
-                       const char *source);
+extern void lexer_init(Lexer *l, const char *filename, const char *source);
 extern Token lexer_next_token(Lexer *l);
 
 #endif

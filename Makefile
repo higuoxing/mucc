@@ -25,6 +25,6 @@ test: $(TARGET)
 
 fmt:
 	@echo "Formatting ..."
-	@clang-format -i $(SRCS)
+	@clang-format -i *.h *.c
 
 .PHONY: all test clean fmt

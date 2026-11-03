@@ -169,6 +169,15 @@ static void layout_expr(StackLayout *layout, AstNode *expr) {
   }
 }
 
+static void layout_initializer(StackLayout *layout, Initializer *init) {
+  Initializer *child;
+  if (!init)
+    return;
+  layout_expr(layout, init->expr);
+  for (child = init->children; child; child = child->next)
+    layout_initializer(layout, child);
+}
+
 /* Case-list entries refer to nodes already reached through the switch body. */
 static void layout_stmt(StackLayout *layout, AstNode *stmt) {
   if (!stmt)
@@ -178,7 +187,7 @@ static void layout_stmt(StackLayout *layout, AstNode *stmt) {
     if (stmt->d.decl.var)
       stmt->d.decl.var->offset =
           layout_slot(layout, stmt->d.decl.var->type, stmt->d.decl.var->name);
-    layout_expr(layout, stmt->d.decl.init);
+    layout_initializer(layout, stmt->d.decl.init);
     break;
   case AST_EXPR_STMT:
     layout_expr(layout, stmt->d.expr_stmt.expr);

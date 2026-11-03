@@ -1006,28 +1006,68 @@ static AstNode *parse_typedef_declarators(Parser *p, Type *base) {
 }
 
 /*
- * initializer: assignment-expression | '{' string-literal ','_opt '}'
- * Brace lists other than a single string remain unsupported.
- * The caller is positioned at '='.
+ * initializer: assignment-expression | '{' initializer-list ','_opt '}'
+ * initializer-list: designation_opt initializer
+ *                   initializer-list ',' designation_opt initializer
+ * designation: designator+ '='
+ * designator: '[' constant-expression ']' | '.' identifier
+ * (C11 6.7.9)
  */
-static AstNode *parse_initializer(Parser *p, Type *type) {
-  Token loc = p->current;
-  AstNode *expr;
-  parser_advance(p);
-  if (is_record(type) && p->current.kind == TOKEN_LBRACE)
-    error_at(p, loc, "%s initializer lists are not supported yet",
-             type->kind == TYPE_STRUCT ? "struct" : "union");
-  if (type->kind == TYPE_ARRAY && p->current.kind == TOKEN_LBRACE) {
-    if (p->lookahead.kind != TOKEN_STRING_LITERAL)
-      error_at(p, loc, "array initializers are not supported yet");
+static Initializer *parse_initializer(Parser *p);
+
+static Designator *parse_designation(Parser *p) {
+  Designator *head = NULL;
+  Designator **tail = &head;
+  while (p->current.kind == TOKEN_DOT || p->current.kind == TOKEN_LBRACKET) {
+    Designator *designator = calloc(1, sizeof(Designator));
+    if (!designator)
+      parse_error(p, "out of memory");
+    designator->loc = p->current;
     parser_advance(p);
-    expr = parse_assignment(p);
-    if (p->current.kind == TOKEN_COMMA)
+    if (designator->loc.kind == TOKEN_DOT) {
+      if (p->current.kind != TOKEN_IDENTIFIER)
+        parse_error(p, "expect member name");
+      designator->member = p->current;
       parser_advance(p);
-    parse_expect(p, TOKEN_RBRACE, "expect '}'");
-    return expr;
+    } else {
+      designator->index = parse_conditional(p);
+      parse_expect(p, TOKEN_RBRACKET, "expect ']'");
+    }
+    *tail = designator;
+    tail = &designator->next;
   }
-  return parse_assignment(p);
+  if (head)
+    parse_expect(p, TOKEN_ASSIGN, "expect '='");
+  return head;
+}
+
+static Initializer *parse_initializer(Parser *p) {
+  Initializer *init = calloc(1, sizeof(Initializer));
+  Initializer **tail;
+  if (!init)
+    parse_error(p, "out of memory");
+  tail = &init->children;
+  init->loc = p->current;
+  if (p->current.kind != TOKEN_LBRACE) {
+    init->expr = parse_assignment(p);
+    return init;
+  }
+  parser_advance(p);
+  if (p->current.kind == TOKEN_RBRACE)
+    parse_error(p, "empty initializer lists are not supported in C11");
+  for (;;) {
+    Designator *designators = parse_designation(p);
+    *tail = parse_initializer(p);
+    (*tail)->designators = designators;
+    tail = &(*tail)->next;
+    if (p->current.kind != TOKEN_COMMA)
+      break;
+    parser_advance(p);
+    if (p->current.kind == TOKEN_RBRACE)
+      break;
+  }
+  parse_expect(p, TOKEN_RBRACE, "expect '}'");
+  return init;
 }
 
 /*
@@ -1077,12 +1117,9 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
   decl->d.decl.var = new_variable(p, name, type);
 
   if (p->current.kind == TOKEN_ASSIGN) {
-    decl->d.decl.init = parse_initializer(p, type);
-    if (type->kind == TYPE_ARRAY)
-      sema_initialize_string_array(p, decl->d.decl.var, decl->d.decl.init);
-    else
-      decl->d.decl.init =
-          sema_convert_expr(p, type, decl->d.decl.init, name, "initializer");
+    parser_advance(p);
+    decl->d.decl.init = sema_initialize_variable(p, decl->d.decl.var, name,
+                                                 parse_initializer(p));
   }
   if (type_size(decl->d.decl.var->type) < 0)
     error_at(p, name, "variable has incomplete type");
@@ -1557,7 +1594,6 @@ static AstNode *parse_block(Parser *p) {
 }
 
 /*
- * File-scope objects support scalar constants and character array strings.
  * Each declarator uses the same base type. Only the first definition or
  * tentative definition produces a storage AST node; extern-only declarations
  * and compatible redeclarations add no node.
@@ -1577,7 +1613,10 @@ static AstNode *parse_global_declaration(Parser *p, Type *base, Type *type,
     decl = declare_global_variable(p, name, type, storage_class,
                                    p->current.kind == TOKEN_ASSIGN);
     if (p->current.kind == TOKEN_ASSIGN) {
-      sema_initialize_global_variable(p, name, parse_initializer(p, type));
+      Variable *var = find_symbol_in_scope(p, name, 0)->d.variable;
+      parser_advance(p);
+      Initializer *initializer = parse_initializer(p);
+      sema_initialize_variable(p, var, name, initializer);
     }
     if (decl) {
       *tail = decl;

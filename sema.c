@@ -16,8 +16,11 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <limits.h>
+
 #include "sema.h"
 #include "type.h"
+#include "vector.h"
 
 Symbol *find_symbol(Parser *p, Token name) {
   Symbol *sym;
@@ -192,12 +195,160 @@ AstNode *declare_global_variable(Parser *p, Token name, Type *type,
   return decl;
 }
 
+static Initializer *new_initializer(Parser *p, Type *type, Token loc) {
+  Initializer *init = calloc(1, sizeof(Initializer));
+  if (!init)
+    error_at(p, loc, "out of memory");
+  init->type = type;
+  init->loc = loc;
+  return init;
+}
+
+static Member *initializer_member(Parser *p, Type *type, int index, Token loc) {
+  Member *member = unqualified_type(type)->members;
+  int remaining = index;
+  while (member && remaining > 0) {
+    member = member->next;
+    --remaining;
+  }
+  if (index < 0 || !member)
+    error_at(p, loc, "invalid initializer member index %d", index);
+  return member;
+}
+
+/*
+ * Keep only explicitly initialized children, in subobject order. This avoids
+ * allocating an entry for every zero in a large, sparsely initialized array.
+ * Selecting a different union member replaces the previously selected member.
+ */
+static Initializer *initializer_child(Parser *p, Initializer *parent, int index,
+                                      Token loc) {
+  Initializer **link = &parent->children;
+  Initializer *child;
+  Type *type = parent->type;
+  int offset;
+  if (type->kind == TYPE_ARRAY) {
+    int size = type_size(type->base);
+    if (index < 0 || index >= INT_MAX / size)
+      error_at(p, loc, "array initializer exceeds supported size");
+    if (type->array_len >= 0 && index >= type->array_len)
+      error_at(p, loc, "array designator index is out of bounds");
+    offset = index * size;
+    type = type->base;
+  } else {
+    Member *member = initializer_member(p, type, index, loc);
+    if (type->kind == TYPE_UNION && *link && (*link)->index != index)
+      *link = NULL;
+    offset = member->offset;
+    type = member->type;
+  }
+  while (*link && (*link)->index < index)
+    link = &(*link)->next;
+  if (*link && (*link)->index == index)
+    return *link;
+  child = new_initializer(p, type, loc);
+  child->index = index;
+  child->offset = offset;
+  child->next = *link;
+  *link = child;
+  return child;
+}
+
+/*
+ * A position names the next subobject without creating its initializer. The
+ * path allows initialization after .inner.x to continue at .inner.y, then at
+ * the next member of the enclosing record.
+ */
+typedef struct {
+  Initializer *parent;
+  int index;
+} InitializerPosition;
+
+static void push_initializer_position(Parser *p, Vector *path,
+                                      Initializer *parent, int index,
+                                      Token loc) {
+  InitializerPosition position = {.parent = parent, .index = index};
+  if (!vector_push(path, &position))
+    error_at(p, loc, "out of memory");
+}
+
+static void advance_initializer_position(Parser *p, Vector *path) {
+  while (path->len) {
+    InitializerPosition *position =
+        &((InitializerPosition *)path->data)[path->len - 1];
+    Type *type = position->parent->type;
+    if (type->kind != TYPE_UNION) {
+      if (type->kind == TYPE_ARRAY) {
+        ++position->index;
+        if (type->array_len < 0 || position->index < type->array_len)
+          return;
+      } else {
+        Member *member =
+            initializer_member(p, type, position->index, position->parent->loc);
+        if (member->next) {
+          ++position->index;
+          return;
+        }
+      }
+    }
+    --path->len;
+  }
+}
+
+static void designate_initializer(Parser *p, Initializer *root, Vector *path,
+                                  const Designator *designator) {
+  Initializer *parent = root;
+  path->len = 0;
+  for (; designator; designator = designator->next) {
+    int index = 0;
+    if (designator->index) {
+      int64_t value;
+      if (parent->type->kind != TYPE_ARRAY)
+        error_at(p, designator->loc, "array designator requires an array");
+      if (!is_integer(designator->index->type))
+        error_at(p, designator->index->loc,
+                 "array designator index must have integer type");
+      if (!eval_constant_expr(p, designator->index, /*allow_addr=*/false,
+                              &value))
+        error_at(p, designator->index->loc,
+                 "not an integer constant expression");
+      if (value < 0 || (uint64_t)value >= INT_MAX)
+        error_at(p, designator->index->loc,
+                 "array designator index is out of range");
+      index = (int)value;
+    } else {
+      Member *member;
+      if (!is_record(parent->type))
+        error_at(p, designator->loc,
+                 "member designator requires a struct or union");
+      /* Anonymous members add intermediate steps to the subobject path. */
+      for (;;) {
+        Member *found = find_member(parent->type, designator->member);
+        if (!found)
+          error_at(p, designator->member, "no member named '%.*s'",
+                   designator->member.len, designator->member.start);
+        index = 0;
+        for (member = unqualified_type(parent->type)->members; member != found;
+             member = member->next)
+          ++index;
+        if (found->name.kind == TOKEN_IDENTIFIER)
+          break;
+        push_initializer_position(p, path, parent, index, designator->loc);
+        parent = initializer_child(p, parent, index, designator->loc);
+      }
+    }
+    push_initializer_position(p, path, parent, index, designator->loc);
+    parent = initializer_child(p, parent, index, designator->loc);
+  }
+}
+
 /*
  * A string initializes character array elements, including its terminator
  * when space permits. Complete the object's type without changing a typedef.
  */
-void sema_initialize_string_array(Parser *p, Variable *var, AstNode *expr) {
-  Type *type = var->type;
+static void initialize_string_array(Parser *p, Initializer *init,
+                                    AstNode *expr) {
+  Type *type = init->type;
   int length;
   if (type->base->kind != TYPE_CHAR)
     error_at(p, expr->loc, "string initializer requires a character array");
@@ -206,44 +357,147 @@ void sema_initialize_string_array(Parser *p, Variable *var, AstNode *expr) {
              "character array initializer must be a string literal");
   length = expr->type->array_len;
   if (type->array_len < 0) {
-    type = array_of(type->base, length);
-    if (!type)
+    init->type = array_of(type->base, length);
+    if (!init->type)
       error_at(p, expr->loc, "out of memory");
-    var->type = type;
   } else if (type->array_len < length - 1) {
     error_at(p, expr->loc, "string literal is too long for character array");
   }
-  var->initializer.string = expr;
-  var->has_initializer = true;
+  init->expr = expr;
+}
+
+/* Evaluate each static scalar after conversion to its destination type. */
+static void initialize_expression(Parser *p, Initializer *init, AstNode *expr,
+                                  bool is_global) {
+  init->expr = NULL;
+  init->children = NULL;
+  init->zero_fill = false;
+  if (init->type->kind == TYPE_ARRAY) {
+    initialize_string_array(p, init, expr);
+    return;
+  }
+  if (is_global && is_record(init->type))
+    error_at(p, init->loc, "global initializer requires a scalar type");
+  expr = sema_convert_expr(p, init->type, expr, init->loc, "initializer");
+  init->expr = expr;
+  if (!is_global)
+    return;
+  if (init->type->kind == TYPE_PTR) {
+    if (!eval_address_constant(p, expr, &init->constant.address))
+      error_at(p, expr->loc, "global initializer is not a constant expression");
+  } else if (!eval_constant_expr(p, expr, /*allow_addr=*/true,
+                                 &init->constant.value)) {
+    error_at(p, expr->loc, "global initializer is not a constant expression");
+  }
+}
+
+static void initialize_object(Parser *p, Initializer *init,
+                              const Initializer **input, bool allow_elision,
+                              bool is_global);
+
+static void initialize_list(Parser *p, Initializer *init,
+                            const Initializer **input, bool braced,
+                            bool is_global) {
+  Vector path;
+  bool first = true;
+  vector_init(&path, sizeof(InitializerPosition));
+  push_initializer_position(p, &path, init, 0, init->loc);
+  while (*input) {
+    InitializerPosition *position;
+    Initializer *child;
+    /* A designator after an elided list belongs to the enclosing braces. */
+    if ((*input)->designators && (braced || !first)) {
+      if (!braced)
+        break;
+      designate_initializer(p, init, &path, (*input)->designators);
+    }
+    if (!path.len)
+      break;
+    position = &((InitializerPosition *)path.data)[path.len - 1];
+    child =
+        initializer_child(p, position->parent, position->index, (*input)->loc);
+    child->loc = (*input)->loc;
+    initialize_object(p, child, input, true, is_global);
+    advance_initializer_position(p, &path);
+    first = false;
+  }
+  vector_free(&path);
+}
+
+static bool initializes_whole_object(Type *type, AstNode *expr) {
+  if (type->kind == TYPE_ARRAY)
+    return type->base->kind == TYPE_CHAR && expr->kind == AST_STRING_LITERAL;
+  if (is_record(type))
+    return same_type(unqualified_type(type), unqualified_type(expr->type));
+  return true;
 }
 
 /*
- * Evaluate after conversion so narrowing and signedness match the object's
- * type. Integers keep their evaluated values, pointers keep a base and byte
- * offset, and character arrays keep the string whose bytes initialize them.
+ * An explicit brace pair limits its own list. Without braces, an aggregate
+ * consumes just enough entries to initialize its subobjects (C11 6.7.9p20).
  */
-void sema_initialize_global_variable(Parser *p, Token name, AstNode *expr) {
-  Variable *var = find_symbol_in_scope(p, name, 0)->d.variable;
-  int64_t value;
-  if (var->has_initializer)
+static void initialize_object(Parser *p, Initializer *init,
+                              const Initializer **input, bool allow_elision,
+                              bool is_global) {
+  const Initializer *parsed = *input;
+  Type *type = init->type;
+  if (type_size(type) < 0 &&
+      !(type->kind == TYPE_ARRAY && type_size(type->base) > 0))
+    error_at(p, parsed->loc, "initializer has incomplete type");
+  if (!parsed->expr) {
+    const Initializer *entry = parsed->children;
+    init->expr = NULL;
+    init->children = NULL;
+    init->zero_fill = true;
+    if (type->kind == TYPE_ARRAY && type->base->kind == TYPE_CHAR &&
+        entry->expr && entry->expr->kind == AST_STRING_LITERAL &&
+        !entry->designators) {
+      initialize_string_array(p, init, entry->expr);
+      entry = entry->next;
+    } else if (type->kind == TYPE_ARRAY || is_record(type)) {
+      initialize_list(p, init, &entry, true, is_global);
+    } else {
+      if (entry->designators)
+        error_at(p, entry->designators->loc,
+                 "designator is not allowed in a scalar initializer");
+      if (!entry->expr)
+        error_at(p, entry->loc, "too many braces around scalar initializer");
+      initialize_object(p, init, &entry, false, is_global);
+    }
+    if (entry)
+      error_at(p, entry->loc, "excess elements in initializer");
+    *input = parsed->next;
+    return;
+  }
+  if (allow_elision && !initializes_whole_object(type, parsed->expr)) {
+    init->expr = NULL;
+    init->children = NULL;
+    init->zero_fill = true;
+    initialize_list(p, init, input, false, is_global);
+    return;
+  }
+  initialize_expression(p, init, parsed->expr, is_global);
+  *input = parsed->next;
+}
+
+Initializer *sema_initialize_variable(Parser *p, Variable *var, Token name,
+                                      const Initializer *parsed) {
+  Initializer *init;
+  if (var->initializer)
     error_at(p, name, "redefinition of variable '%.*s'", name.len, name.start);
-  if (var->type->kind == TYPE_ARRAY) {
-    sema_initialize_string_array(p, var, expr);
-    return;
+  init = new_initializer(p, var->type, name);
+  initialize_object(p, init, &parsed, false, var->is_global);
+  if (init->type->kind == TYPE_ARRAY && init->type->array_len < 0) {
+    Initializer *last = init->children;
+    while (last->next)
+      last = last->next;
+    init->type = array_of(init->type->base, last->index + 1);
+    if (!init->type)
+      error_at(p, init->loc, "out of memory");
   }
-  if (!is_integer(var->type) && var->type->kind != TYPE_PTR)
-    error_at(p, name, "global initializer requires a scalar type");
-  expr = sema_convert_expr(p, var->type, expr, name, "initializer");
-  if (var->type->kind == TYPE_PTR) {
-    if (!eval_address_constant(p, expr, &var->initializer.address))
-      error_at(p, expr->loc, "global initializer is not a constant expression");
-    var->has_initializer = true;
-    return;
-  }
-  if (!eval_constant_expr(p, expr, /*allow_addr=*/true, &value))
-    error_at(p, expr->loc, "global initializer is not a constant expression");
-  var->initializer.value = value;
-  var->has_initializer = true;
+  var->type = init->type;
+  var->initializer = init;
+  return init;
 }
 
 void sema_check_global_variables(Parser *p) {

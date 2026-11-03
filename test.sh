@@ -25,6 +25,7 @@ done
 
 passed=0
 rejected=0
+compiled=0
 
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/test-mucc.XXXXXX")
 function cleanup() {
@@ -172,6 +173,222 @@ function check_error() {
     rejected=$((rejected + 1))
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
+
+# Local aggregate initializers.
+check aggregate-init-local-array-partial 1 'int main(void) { int a[4] = {1, 2}; return a[0] == 1 && a[1] == 2 && a[2] == 0 && a[3] == 0; }'
+check aggregate-init-local-array-zero 1 'int main(void) { int a[4] = {0}; return a[0] == 0 && a[1] == 0 && a[2] == 0 && a[3] == 0; }'
+check aggregate-init-local-array-inferred 1 'int main(void) { int a[] = {1, 2, 42,}; return sizeof(a) == 12 && a[0] == 1 && a[1] == 2 && a[2] == 42; }'
+check aggregate-init-local-array-designated 1 'int main(void) { int a[] = {[2] = 5, 6, [0] = 7}; return sizeof(a) == 16 && a[0] == 7 && a[1] == 0 && a[2] == 5 && a[3] == 6; }'
+check aggregate-init-local-array-override 1 'int main(void) { int a[3] = {[1] = 7, [1] = 42}; return a[0] == 0 && a[1] == 42 && a[2] == 0; }'
+check aggregate-init-local-char-narrowing 1 'int main(void) { unsigned char a[3] = {257, -1}; return a[0] == 1 && a[1] == 255 && a[2] == 0; }'
+check aggregate-init-local-scalar-element-braces 1 'int main(void) { int a[1] = {{42}}; return sizeof(a) == 4 && a[0] == 42; }'
+check aggregate-init-local-short-conversions 1 'int main(void) { struct S { short x; unsigned short y; _Bool b; } s = {-2, -1, 42}; return sizeof(s) == 6 && s.x == -2 && s.y == 65535 && s.b == 1; }'
+check aggregate-init-local-constant-designator 1 'int main(void) { enum { I = 2 }; int a[] = {[I + 1] = 42}; return sizeof(a) == 16 && a[0] == 0 && a[1] == 0 && a[2] == 0 && a[3] == 42; }'
+check aggregate-init-local-integer-widths 1 'int main(void) { struct S { char c; unsigned short s; int i; long l; unsigned long long ll; _Bool b; } a = {-1, -1, -42, -4294967297L, 18446744073709551615ULL, 42}; return a.c == -1 && a.s == 65535 && a.i == -42 && a.l == -4294967297L && a.ll == 18446744073709551615ULL && a.b == 1; }'
+check aggregate-init-local-struct-padding 1 'int main(void) { struct S { char c; long l; short s; } a = {1, 42}; return a.c == 1 && a.l == 42 && a.s == 0; }'
+check aggregate-init-local-const-members 1 'int main(void) { const struct S { const int x; const int y; } a = {42}; return a.x == 42 && a.y == 0; }'
+check aggregate-init-local-nested-array 1 'int main(void) { struct S { int a[3]; int end; } s = {{1, 2}, 42}; return s.a[0] == 1 && s.a[1] == 2 && s.a[2] == 0 && s.end == 42; }'
+check aggregate-init-local-brace-elision 1 'int main(void) { struct S { int a[3]; int end; } s = {1, 2, 3, 42}; return s.a[0] == 1 && s.a[1] == 2 && s.a[2] == 3 && s.end == 42; }'
+check aggregate-init-local-record-array 1 'int main(void) { struct S { int x; int y; }; struct S a[] = {{1, 2}, {42}}; return sizeof(a) == 16 && a[0].x == 1 && a[0].y == 2 && a[1].x == 42 && a[1].y == 0; }'
+check aggregate-init-local-record-array-elision 1 'int main(void) { struct S { int x; int y; }; struct S a[] = {1, 2, 42}; return sizeof(a) == 16 && a[0].x == 1 && a[0].y == 2 && a[1].x == 42 && a[1].y == 0; }'
+check aggregate-init-local-array-continuation 1 'int main(void) { struct S { int a[3]; int end; } s = {.a[1] = 2, 3, 42}; return s.a[0] == 0 && s.a[1] == 2 && s.a[2] == 3 && s.end == 42; }'
+check aggregate-init-local-member-continuation 1 'int main(void) { struct S { struct { int x; int y; } inner; int end; } s = {.inner.x = 1, 2, 42}; return s.inner.x == 1 && s.inner.y == 2 && s.end == 42; }'
+check aggregate-init-local-designated-elision 1 'int main(void) { struct S { int a[2]; int end; } s = {.a = 1, 2, 42}; return s.a[0] == 1 && s.a[1] == 2 && s.end == 42; }'
+check aggregate-init-local-elision-designator-boundary 1 'int main(void) { struct S { int a[2]; int end; } s = {1, .end = 42}; return s.a[0] == 1 && s.a[1] == 0 && s.end == 42; }'
+check aggregate-init-local-union-first 42 'int main(void) { union U { char c; long n; } u = {42}; return u.c; }'
+check aggregate-init-local-union-designated 1 'int main(void) { union U { char c; long n; } u = {.n = 4294967297L}; return u.n == 4294967297L; }'
+check aggregate-init-local-union-nested 1 'int main(void) { union U { struct { int x; int y; } s; long n; } u = {1, 42}; return u.s.x == 1 && u.s.y == 42; }'
+check aggregate-init-local-union-member-switch 1 'int main(void) { union U { long n; struct { int x; int y; } s; } u = {.n = -1, .s.y = 42}; return u.s.x == 0 && u.s.y == 42; }'
+check aggregate-init-local-union-switch-to-scalar 1 'int main(void) { union U { struct { int x; int y; } s; long n; } u = {.s.y = 7, .n = 42}; return sizeof(u) == 8 && u.n == 42; }'
+check aggregate-init-local-union-tail-padding 1 'int main(void) { struct S { union { char a[9]; long n; } u; int end; } s = {.u.a[8] = 1, .end = 42}; return s.u.a[0] == 0 && s.u.a[8] == 1 && s.end == 42; }'
+check aggregate-init-local-anonymous-member 1 'int main(void) { struct S { struct { int x; int y; }; int end; } s = {.y = 2, 42}; return s.x == 0 && s.y == 2 && s.end == 42; }'
+check aggregate-init-local-anonymous-positional 1 'int main(void) { struct S { struct { int x; int y; }; int end; } s = {1, 2, 42}; return sizeof(s) == 12 && s.x == 1 && s.y == 2 && s.end == 42; }'
+check aggregate-init-local-anonymous-union 1 'int main(void) { struct S { union { struct { int x; int y; }; long n; }; int end; } s = {.y = 2, .end = 42}; return s.x == 0 && s.y == 2 && s.end == 42; }'
+check aggregate-init-local-whole-subobject-override 1 'int main(void) { struct S { int a[2]; } s = {.a = {1, 2}, .a = {42}}; return s.a[0] == 42 && s.a[1] == 0; }'
+check aggregate-init-local-partial-subobject-override 1 'int main(void) { struct S { int a[2]; } s = {.a = {1, 2}, .a[0] = 42}; return s.a[0] == 42 && s.a[1] == 2; }'
+check aggregate-init-local-string-member 1 'int main(void) { struct S { char text[4]; int end; } s = {"ab", 42}; return s.text[0] == 97 && s.text[1] == 98 && s.text[2] == 0 && s.text[3] == 0 && s.end == 42; }'
+check aggregate-init-local-string-override 1 'int main(void) { struct S { char text[4]; } s = {.text = "ab", .text[0] = 42}; return s.text[0] == 42 && s.text[1] == 98 && s.text[2] == 0 && s.text[3] == 0; }'
+check aggregate-init-local-string-overridden-to-zero 1 'int main(void) { struct S { char text[4]; } s = {.text = "ab", .text[0] = 0, .text[1] = 0}; return s.text[0] == 0 && s.text[1] == 0 && s.text[2] == 0 && s.text[3] == 0; }'
+check aggregate-init-local-string-replaced-by-list 1 'int main(void) { struct S { char text[4]; } s = {.text = "abc", .text = {42}}; return s.text[0] == 42 && s.text[1] == 0 && s.text[2] == 0 && s.text[3] == 0; }'
+check aggregate-init-local-string-array 1 'int main(void) { char *a[] = {"ab", "cd", 0}; return sizeof(a) == 24 && a[0][0] == 97 && a[1][1] == 100 && a[2] == 0; }'
+check aggregate-init-local-enum-array 1 'int main(void) { enum E { A = 42 }; enum E a[2] = {A}; return a[0] == A && a[1] == 0; }'
+check aggregate-init-local-sparse-array 1 'int main(void) { int a[4096] = {[4095] = 42}; for (int i = 0; i < 4095; i++) if (a[i] != 0) return 0; return a[4095] == 42; }'
+
+# Global aggregate initializers.
+check aggregate-init-global-array-partial 1 'int a[4] = {1, 2}; int main(void) { return a[0] == 1 && a[1] == 2 && a[2] == 0 && a[3] == 0; }'
+check aggregate-init-global-array-zero 1 'int a[4] = {0}; int main(void) { return a[0] == 0 && a[1] == 0 && a[2] == 0 && a[3] == 0; }'
+check aggregate-init-global-array-inferred 1 'int a[] = {1, 2, 42,}; int main(void) { return sizeof(a) == 12 && a[0] == 1 && a[1] == 2 && a[2] == 42; }'
+check aggregate-init-global-array-designated 1 'int a[] = {[2] = 5, 6, [0] = 7}; int main(void) { return sizeof(a) == 16 && a[0] == 7 && a[1] == 0 && a[2] == 5 && a[3] == 6; }'
+check aggregate-init-global-array-override 1 'int a[3] = {[1] = 7, [1] = 42}; int main(void) { return a[0] == 0 && a[1] == 42 && a[2] == 0; }'
+check aggregate-init-global-char-narrowing 1 'unsigned char a[3] = {257, -1}; int main(void) { return a[0] == 1 && a[1] == 255 && a[2] == 0; }'
+check aggregate-init-global-scalar-element-braces 1 'int a[1] = {{42}}; int main(void) { return sizeof(a) == 4 && a[0] == 42; }'
+check aggregate-init-global-short-conversions 1 'struct S { short x; unsigned short y; _Bool b; } s = {-2, -1, 42}; int main(void) { return sizeof(s) == 6 && s.x == -2 && s.y == 65535 && s.b == 1; }'
+check aggregate-init-global-constant-designator 1 'enum { I = 2 }; int a[] = {[I + 1] = 42}; int main(void) { return sizeof(a) == 16 && a[0] == 0 && a[1] == 0 && a[2] == 0 && a[3] == 42; }'
+check aggregate-init-global-integer-widths 1 'struct S { char c; unsigned short s; int i; long l; unsigned long long ll; _Bool b; } a = {-1, -1, -42, -4294967297L, 18446744073709551615ULL, 42}; int main(void) { return a.c == -1 && a.s == 65535 && a.i == -42 && a.l == -4294967297L && a.ll == 18446744073709551615ULL && a.b == 1; }'
+check aggregate-init-global-struct-padding 1 'struct S { char c; long l; short s; } a = {1, 42}; int main(void) { return a.c == 1 && a.l == 42 && a.s == 0; }'
+check aggregate-init-global-const-members 1 'const struct S { const int x; const int y; } a = {42}; int main(void) { return a.x == 42 && a.y == 0; }'
+check aggregate-init-global-nested-array 1 'struct S { int a[3]; int end; } s = {{1, 2}, 42}; int main(void) { return s.a[0] == 1 && s.a[1] == 2 && s.a[2] == 0 && s.end == 42; }'
+check aggregate-init-global-brace-elision 1 'struct S { int a[3]; int end; } s = {1, 2, 3, 42}; int main(void) { return s.a[0] == 1 && s.a[1] == 2 && s.a[2] == 3 && s.end == 42; }'
+check aggregate-init-global-record-array 1 'struct S { int x; int y; }; struct S a[] = {{1, 2}, {42}}; int main(void) { return sizeof(a) == 16 && a[0].x == 1 && a[0].y == 2 && a[1].x == 42 && a[1].y == 0; }'
+check aggregate-init-global-record-array-elision 1 'struct S { int x; int y; }; struct S a[] = {1, 2, 42}; int main(void) { return sizeof(a) == 16 && a[0].x == 1 && a[0].y == 2 && a[1].x == 42 && a[1].y == 0; }'
+check aggregate-init-global-array-continuation 1 'struct S { int a[3]; int end; } s = {.a[1] = 2, 3, 42}; int main(void) { return s.a[0] == 0 && s.a[1] == 2 && s.a[2] == 3 && s.end == 42; }'
+check aggregate-init-global-member-continuation 1 'struct S { struct { int x; int y; } inner; int end; } s = {.inner.x = 1, 2, 42}; int main(void) { return s.inner.x == 1 && s.inner.y == 2 && s.end == 42; }'
+check aggregate-init-global-designated-elision 1 'struct S { int a[2]; int end; } s = {.a = 1, 2, 42}; int main(void) { return s.a[0] == 1 && s.a[1] == 2 && s.end == 42; }'
+check aggregate-init-global-elision-designator-boundary 1 'struct S { int a[2]; int end; } s = {1, .end = 42}; int main(void) { return s.a[0] == 1 && s.a[1] == 0 && s.end == 42; }'
+check aggregate-init-global-union-first 42 'union U { char c; long n; } u = {42}; int main(void) { return u.c; }'
+check aggregate-init-global-union-designated 1 'union U { char c; long n; } u = {.n = 4294967297L}; int main(void) { return u.n == 4294967297L; }'
+check aggregate-init-global-union-nested 1 'union U { struct { int x; int y; } s; long n; } u = {1, 42}; int main(void) { return u.s.x == 1 && u.s.y == 42; }'
+check aggregate-init-global-union-member-switch 1 'union U { long n; struct { int x; int y; } s; } u = {.n = -1, .s.y = 42}; int main(void) { return u.s.x == 0 && u.s.y == 42; }'
+check aggregate-init-global-union-switch-to-scalar 1 'union U { struct { int x; int y; } s; long n; } u = {.s.y = 7, .n = 42}; int main(void) { return sizeof(u) == 8 && u.n == 42; }'
+check aggregate-init-global-union-tail-padding 1 'struct S { union { char a[9]; long n; } u; int end; } s = {.u.a[8] = 1, .end = 42}; int main(void) { return s.u.a[0] == 0 && s.u.a[8] == 1 && s.end == 42; }'
+check aggregate-init-global-anonymous-member 1 'struct S { struct { int x; int y; }; int end; } s = {.y = 2, 42}; int main(void) { return s.x == 0 && s.y == 2 && s.end == 42; }'
+check aggregate-init-global-anonymous-positional 1 'struct S { struct { int x; int y; }; int end; } s = {1, 2, 42}; int main(void) { return sizeof(s) == 12 && s.x == 1 && s.y == 2 && s.end == 42; }'
+check aggregate-init-global-anonymous-union 1 'struct S { union { struct { int x; int y; }; long n; }; int end; } s = {.y = 2, .end = 42}; int main(void) { return s.x == 0 && s.y == 2 && s.end == 42; }'
+check aggregate-init-global-whole-subobject-override 1 'struct S { int a[2]; } s = {.a = {1, 2}, .a = {42}}; int main(void) { return s.a[0] == 42 && s.a[1] == 0; }'
+check aggregate-init-global-partial-subobject-override 1 'struct S { int a[2]; } s = {.a = {1, 2}, .a[0] = 42}; int main(void) { return s.a[0] == 42 && s.a[1] == 2; }'
+check aggregate-init-global-string-member 1 'struct S { char text[4]; int end; } s = {"ab", 42}; int main(void) { return s.text[0] == 97 && s.text[1] == 98 && s.text[2] == 0 && s.text[3] == 0 && s.end == 42; }'
+check aggregate-init-global-string-override 1 'struct S { char text[4]; } s = {.text = "ab", .text[0] = 42}; int main(void) { return s.text[0] == 42 && s.text[1] == 98 && s.text[2] == 0 && s.text[3] == 0; }'
+check aggregate-init-global-string-overridden-to-zero 1 'struct S { char text[4]; } s = {.text = "ab", .text[0] = 0, .text[1] = 0}; int main(void) { return s.text[0] == 0 && s.text[1] == 0 && s.text[2] == 0 && s.text[3] == 0; }'
+check aggregate-init-global-string-replaced-by-list 1 'struct S { char text[4]; } s = {.text = "abc", .text = {42}}; int main(void) { return s.text[0] == 42 && s.text[1] == 0 && s.text[2] == 0 && s.text[3] == 0; }'
+check aggregate-init-global-string-array 1 'char *a[] = {"ab", "cd", 0}; int main(void) { return sizeof(a) == 24 && a[0][0] == 97 && a[1][1] == 100 && a[2] == 0; }'
+check aggregate-init-global-enum-array 1 'enum E { A = 42 }; enum E a[2] = {A}; int main(void) { return a[0] == A && a[1] == 0; }'
+check aggregate-init-global-sparse-array 1 'int a[4096] = {[4095] = 42}; int main(void) { for (int i = 0; i < 4095; i++) if (a[i] != 0) return 0; return a[4095] == 42; }'
+
+check aggregate-init-global-relocations 1 'int object[4]; struct S { char c; int *p; char *text; int *null; _Bool b; } value = {.c = 42, .p = object + 2, .text = "abc" + 1, .b = &object}; int main(void) { *value.p = 7; return value.c == 42 && object[2] == 7 && value.text[0] == 98 && value.null == 0 && value.b == 1; }'
+check aggregate-init-global-relocation-overridden 1 'int object; struct S { int *p; } value = {.p = &object, .p = 0}; int main(void) { return value.p == 0; }'
+check aggregate-init-global-self-reference 1 'struct S { int n; struct S *next; } value = {42, &value}; int main(void) { return value.next == &value && value.next->n == 42; }'
+check aggregate-init-global-composite-bound 1 'int a[4]; int a[] = {42}; int main(void) { return sizeof(a) == 16 && a[0] == 42 && a[3] == 0; }'
+check aggregate-init-global-extern-definition 1 'extern int a[]; int a[] = {42}; int main(void) { return sizeof(a) == 4 && a[0] == 42; }'
+check aggregate-init-global-static 1 'static struct S { int a[3]; } s = {{42}}; int main(void) { return s.a[0] == 42 && s.a[2] == 0; }'
+check aggregate-init-global-static-array 1 'static int a[] = {42}; int main(void) { return sizeof(a) == 4 && a[0] == 42; }'
+check aggregate-init-global-independent-typedef-bounds 1 'typedef int A[]; A a = {42, 7}; A b = {1}; int main(void) { return sizeof(a) == 8 && sizeof(b) == 4 && a[1] == 7 && b[0] == 1; }'
+check aggregate-init-global-interleaved-sections 1 'struct S { char *s; int x; }; struct S a = {"ab", 1}; int f(void) { int a[3] = {42}; return a[0] + a[2]; } struct S b = {0}; struct S c = {"cd", 2}; int main(void) { return f() == 42 && a.s[1] == 98 && a.x == 1 && b.s == 0 && b.x == 0 && c.s[0] == 99 && c.x == 2; }'
+check aggregate-init-global-external-record 1 'struct S { int a[3]; char *text; }; extern struct S value; int main(void) { return value.a[0] == 0 && value.a[2] == 42 && value.text[1] == 98; }' 'struct S { int a[3]; char *text; } value = {.a[2] = 42, .text = "ab"};'
+check aggregate-init-global-const-forward-type 1 'struct S; typedef const struct S T; struct S { int x; int y; }; T value = {42}; int main(void) { return value.x == 42 && value.y == 0; }'
+check aggregate-init-local-pointer-members 1 'int main(void) { int object[4]; struct S { int *p; char *text; int *null; _Bool b; } value = {object + 2, "abc" + 1, 0, object}; *value.p = 42; return object[2] == 42 && value.text[0] == 98 && value.null == 0 && value.b == 1; }'
+check aggregate-init-local-record-copy 1 'struct S { int x; int y; }; int main(void) { struct S source = {1, 2}; struct S value[3] = {source, {42}}; source.y = 7; return value[0].x == 1 && value[0].y == 2 && value[1].x == 42 && value[1].y == 0 && value[2].x == 0 && value[2].y == 0; }'
+check aggregate-init-local-copy-and-call 1 'struct S { int x; }; struct S make(void) { struct S s = {7}; return s; } int main(void) { struct S source = {42}; struct S value[3] = {source, make()}; source.x = 1; return sizeof(value) == 12 && value[0].x == 42 && value[1].x == 7 && value[2].x == 0; }'
+# GCC discards copied members in these cases; Clang and mucc preserve them.
+# WG14 DR 413: https://open-std.org/JTC1/SC22/WG14/issues/c11c17/issue0413.html
+# Keep these direct regressions out of differential comparison.
+if ((!compare)); then
+    check aggregate-init-local-copy-member-override 1 'struct S { int x; int y; }; int main(void) { struct S source = {1, 2}; struct { struct S s; int end; } value = {.s = source, .s.x = 42}; return source.x == 1 && value.s.x == 42 && value.s.y == 2 && value.end == 0; }'
+    check aggregate-init-local-copy-whole-subobject-override 1 'struct S { int head; struct { int x; int y; } inner; int end; }; int main(void) { struct S source = {7, {1, 2}, 8}; struct { struct S s; } value = {.s = source, .s.inner = {42}}; return value.s.head == 7 && value.s.inner.x == 42 && value.s.inner.y == 0 && value.s.end == 8; }'
+    check aggregate-init-local-copy-string-override 1 'struct S { char text[4]; int end; }; int main(void) { struct S source = {"abc", 7}; struct { struct S s; } value = {.s = source, .s.text = "x"}; return value.s.text[0] == 120 && value.s.text[1] == 0 && value.s.text[2] == 0 && value.s.text[3] == 0 && value.s.end == 7; }'
+else
+    printf '[SKIP] Three DR 413 regressions: reference compilers disagree\n'
+fi
+check aggregate-init-local-loop-reinitialization 1 'int main(void) { for (int i = 0; i < 3; i++) { int a[3] = {42}; if (a[0] != 42 || a[1] || a[2]) return 0; a[2] = 7; } return 1; }'
+check aggregate-init-local-for-declaration 1 'int main(void) { for (int a[] = {1, 2, 0}; a[0] != 42; a[0] = 42) { if (a[1] != 2 || a[2] != 0) return 0; } return 1; }'
+check aggregate-init-local-recursion 1 'int f(int n) { int a[3] = {n, n + 1}; if (n) f(n - 1); return a[0] == n && a[1] == n + 1 && a[2] == 0; } int main(void) { return f(3); }'
+check aggregate-init-local-calls-and-side-effects 1 'int count; int next(void) { count++; return 42; } int main(void) { int a[3] = {next(), next()}; return count == 2 && a[0] == 42 && a[1] == 42 && a[2] == 0; }'
+check aggregate-init-local-eight-parameters 1 'int f(int a,int b,int c,int d,int e,int f,int g,int h) { int value[9] = {a,b,c,d,e,f,g,h}; for (int i=0; i<8; i++) if (value[i] != i+1) return 0; return value[8] == 0; } int main(void) { return f(1,2,3,4,5,6,7,8); }'
+check aggregate-init-local-eight-argument-call 1 'int sum(int a,int b,int c,int d,int e,int f,int g,int h) { return a+b+c+d+e+f+g+h; } int main(void) { int a[3] = {sum(1,2,3,4,5,6,7,8), 42 + sum(1,2,3,4,5,6,7,8)}; return a[0] == 36 && a[1] == 78 && a[2] == 0; }'
+for size in 1 3 7 8 9 15 16 17 40 257; do
+    check "aggregate-init-local-call-record-$size" 1 "struct S { unsigned char bytes[$size]; }; struct S make(int n) { struct S s = {0}; for (int i=0; i<$size; i++) s.bytes[i]=n+i; return s; } int main(void) { struct S a[3] = {make(42), make(7)}; for (int i=0; i<$size; i++) if (a[0].bytes[i]!=(unsigned char)(42+i) || a[1].bytes[i]!=(unsigned char)(7+i) || a[2].bytes[i]!=0) return 0; return 1; }"
+done
+
+# Check the supported size limit without assembling a 2 GiB data section.
+sparse_name=aggregate-init-large-sparse-array
+sparse_input="$WORK_DIR/$sparse_name.c"
+sparse_assembly="$WORK_DIR/$sparse_name.s"
+printf '%s' 'char value[] = {[2147483646] = 42};' > "$sparse_input"
+if "$TEST_CC" "$sparse_input" -o "$sparse_assembly" 2> "$WORK_DIR/$sparse_name.err"; then
+    :
+else
+    cat "$WORK_DIR/$sparse_name.err" >&2
+    fail "$sparse_name: compilation failed"
+fi
+[[ -f "$sparse_assembly" ]] || fail "$sparse_name: compiler produced no assembly"
+[[ $(wc -c < "$sparse_assembly") -lt 4096 ]] || fail "$sparse_name: assembly is not sparse"
+grep -Eq '^[[:space:]]*\.size[[:space:]]+value,[[:space:]]*2147483647$' "$sparse_assembly" ||
+    fail "$sparse_name: incorrect inferred array bound"
+grep -Eq '^[[:space:]]*\.zero[[:space:]]+2147483646$' "$sparse_assembly" ||
+    fail "$sparse_name: incorrect omitted element count"
+grep -Eq '^[[:space:]]*\.byte[[:space:]]+42$' "$sparse_assembly" ||
+    fail "$sparse_name: missing last element initializer"
+compiled=$((compiled + 1))
+printf '[PASS] %s (compact assembly with inferred bound)\n' "$sparse_name"
+
+# Scalar braces already use the existing scalar code generation.
+check initializer-local-scalar-braces 42 'int main(void) { const int x = {42}; return x; }'
+check initializer-global-scalar-braces 42 'int x = {42,}; int main(void) { return x; }'
+check initializer-global-pointer-braces 42 'int x = 42; int *p = {&x}; int main(void) { return *p; }'
+check initializer-local-bool-braces 1 'int main(void) { int x; _Bool b = {&x}; return b; }'
+
+# Aggregate initializer syntax and semantics are checked before code generation.
+check_error initializer-empty 'int a[1] = {};' \
+            "1:13: error: empty initializer lists are not supported in C11"
+check_error initializer-scalar-nested-braces 'int a = {{1}};' \
+            "1:10: error: too many braces around scalar initializer"
+check_error initializer-array-excess 'int a[1] = {1, 2};' \
+            "1:16: error: excess elements in initializer"
+check_error initializer-struct-excess 'struct S { int x; } a = {1, 2};' \
+            "1:29: error: excess elements in initializer"
+check_error initializer-union-excess 'union U { int x; int y; } a = {1, 2};' \
+            "1:35: error: excess elements in initializer"
+check_error initializer-scalar-excess 'int a = {1, 2};' \
+            "1:13: error: excess elements in initializer"
+check_error initializer-nested-excess 'struct S { int a[1]; } s = {{1, 2}};' \
+            "1:33: error: excess elements in initializer"
+check_error initializer-designator-member-name 'struct S { int x; } a = {. = 1};' \
+            "1:28: error: expect member name"
+check_error initializer-designator-missing-equal 'struct S { int x; } a = {.x 1};' \
+            "1:29: error: expect '='"
+check_error initializer-designator-missing-bracket 'int a[2] = {[0 = 1};' \
+            "1:16: error: expect ']'"
+check_error initializer-designator-unknown-member 'struct S { int x; } a = {.y = 1};' \
+            "1:27: error: no member named 'y'"
+check_error initializer-designator-member-on-array 'int a[2] = {.x = 1};' \
+            "1:13: error: member designator requires a struct or union"
+check_error initializer-designator-index-on-struct 'struct S { int x; } a = {[0] = 1};' \
+            "1:26: error: array designator requires an array"
+check_error initializer-designator-scalar 'int a = {.x = 1};' \
+            "1:10: error: designator is not allowed in a scalar initializer"
+check_error initializer-designator-nested-scalar 'struct S { int x; } a = {.x.y = 1};' \
+            "1:28: error: member designator requires a struct or union"
+check_error initializer-designator-negative 'int a[2] = {[-1] = 1};' \
+            "1:14: error: array designator index is out of range"
+check_error initializer-designator-out-of-bounds 'int a[2] = {[2] = 1};' \
+            "1:13: error: array designator index is out of bounds"
+check_error initializer-designator-huge 'char a[] = {[18446744073709551615ULL] = 1};' \
+            "1:14: error: array designator index is out of range"
+check_error initializer-designator-size-overflow 'int a[] = {[536870911] = 1};' \
+            "1:12: error: array initializer exceeds supported size"
+check_error initializer-designator-nonconstant 'int n; int a[2] = {[n] = 1};' \
+            "1:21: error: not an integer constant expression"
+check_error initializer-designator-pointer-index 'int a[2] = {[(int *)0] = 1};' \
+            "1:14: error: array designator index must have integer type"
+check_error initializer-element-type 'int *a[2] = {42};' \
+            "1:14: error: incompatible initializer type"
+check_error initializer-overridden-element-type 'struct S { int *p; } a = {.p = 0, .p = 42};' \
+            "1:40: error: incompatible initializer type"
+check_error initializer-discarded-const 'const int n; int *a[1] = {&n};' \
+            "1:27: error: incompatible initializer type"
+check_error initializer-void-element 'void f(void); int a[1] = {f()};' \
+            "1:27: error: void expression used as a value"
+check_error initializer-incomplete-record 'struct S; extern struct S a = {0};' \
+            "1:31: error: initializer has incomplete type"
+check_error initializer-global-array-nonconstant 'int n; int a[2] = {n};' \
+            "1:20: error: global initializer is not a constant expression"
+check_error initializer-global-member-nonconstant 'int n; struct S { int x; } a = {n};' \
+            "1:33: error: global initializer is not a constant expression"
+check_error initializer-global-call 'int f(void); int a[2] = {f()};' \
+            "1:26: error: global initializer is not a constant expression"
+check_error initializer-global-pointer-nonconstant 'int *p; struct S { int *p; } a = {p};' \
+            "1:35: error: global initializer is not a constant expression"
+check_error initializer-array-redefinition 'int a[2] = {1}; int a[2] = {2};' \
+            "1:21: error: redefinition of variable 'a'"
+check_error initializer-record-redefinition 'struct S { int x; } a = {1}; struct S a = {2};' \
+            "1:39: error: redefinition of variable 'a'"
+check_error initializer-missing-comma 'int a[2] = {1 2};' \
+            "1:15: error: expect '}'"
+check_error initializer-missing-rbrace 'int a[2] = {1, 2;' \
+            "1:17: error: expect '}'"
+check_error initializer-missing-element 'int a[2] = {1,,2};' \
+            "1:15: error: expect expr"
+check_error initializer-nested-string-too-long 'struct S { char s[2]; } a = {"abc"};' \
+            "1:30: error: string literal is too long for character array"
 
 # Aggregate calls share the System V ABI with the selected host compiler.
 for record in struct union; do
@@ -424,8 +641,6 @@ check_error aggregate-conditional-incompatible 'struct A { int x; }; struct B { 
             '1:86: error: incompatible conditional operand types'
 check_error aggregate-global-copy-initializer 'struct S { int x; } a; struct S b = a;' \
             '1:33: error: global initializer requires a scalar type'
-check_error aggregate-union-initializer-list 'union U { int x; }; int main(void) { union U a = {42}; return 0; }' \
-            '1:48: error: union initializer lists are not supported yet'
 check_error aggregate-incomplete-assignment 'struct S; extern struct S a; int main(void) { a = a; return 0; }' \
             '1:49: error: invalid assignment target'
 check_error aggregate-comparison-eq 'struct S { int x; }; int main(void) { struct S a; return a == a; }' \
@@ -1404,7 +1619,7 @@ check_error string-array-local-pointer-source 'int main(void) { char *p; char a[
 check_error string-array-local-pointer-expression 'int main(void) { char a[] = "abc" + 1; return 0; }' "1:35: error: character array initializer must be a string literal"
 check_error string-array-local-integer-source 'int main(void) { char a[] = 0; return 0; }' "1:29: error: character array initializer must be a string literal"
 check_error string-array-local-conditional-source 'int main(void) { char a[] = 1 ? "a" : "b"; return 0; }' "1:31: error: character array initializer must be a string literal"
-check_error string-array-local-extra-string 'int main(void) { char a[] = {"a", "b"}; return 0; }' "1:35: error: expect '}'"
+check_error string-array-local-extra-string 'int main(void) { char a[] = {"a", "b"}; return 0; }' "1:35: error: excess elements in initializer"
 check_error string-array-local-missing-rbrace 'int main(void) { char a[] = {"a"; return 0; }' "1:33: error: expect '}'"
 check_error string-array-global-too-long 'char a[2] = "abc";' "1:13: error: string literal is too long for character array"
 check_error string-array-global-concat-too-long 'char a[2] = "ab" "cd";' "1:13: error: string literal is too long for character array"
@@ -1416,7 +1631,7 @@ check_error string-array-global-pointer-source 'char *p; char a[] = p;' "1:21: e
 check_error string-array-global-pointer-expression 'char a[] = "abc" + 1;' "1:18: error: character array initializer must be a string literal"
 check_error string-array-global-integer-source 'char a[] = 0;' "1:12: error: character array initializer must be a string literal"
 check_error string-array-global-conditional-source 'char a[] = 1 ? "a" : "b";' "1:14: error: character array initializer must be a string literal"
-check_error string-array-global-extra-string 'char a[] = {"a", "b"};' "1:18: error: expect '}'"
+check_error string-array-global-extra-string 'char a[] = {"a", "b"};' "1:18: error: excess elements in initializer"
 check_error string-array-global-missing-rbrace 'char a[] = {"a";' "1:16: error: expect '}'"
 check_error string-array-global-redefinition 'char a[] = "abc"; char a[] = "x";' "1:24: error: redefinition of variable 'a'"
 check_error string-array-global-zero-redefinition 'char a[8] = ""; char a[8] = "";' "1:22: error: redefinition of variable 'a'"
@@ -1575,8 +1790,6 @@ check_error global-initializer-increment 'int y; int x = y++;' "1:17: error: glo
 check_error global-initializer-evaluated-call 'int f(void); int x = 1 && f();' "1:24: error: global initializer is not a constant expression"
 check_error global-initializer-incompatible-string 'int x = "A";' "1:5: error: incompatible initializer type"
 check_error global-initializer-void-call 'void f(void); int x = f();' "1:23: error: void expression used as a value"
-check_error global-initializer-array-unsupported 'int a[2] = {1,2};' "1:10: error: array initializers are not supported yet"
-check_error global-initializer-struct-unsupported 'struct S { int x; }; struct S s = {1};' "1:33: error: struct initializer lists are not supported yet"
 check_error global-initializer-division-by-zero 'int x = 1 / 0;' "1:14: error: division by zero in constant expression"
 check_error global-initializer-signed-overflow 'int x = 2147483647 + 1;' "1:23: error: integer overflow in constant expression"
 check_error global-initializer-invalid-shift 'int x = 1 << 32;' "1:16: error: invalid shift count in constant expression"
@@ -1647,7 +1860,6 @@ check_error global-enumerator-conflict 'enum { X }; int X;' "1:17: error: variab
 check_error global-enumerator-name-conflict 'int X; enum { X };' "1:15: error: enumerator conflicts with variable 'X'"
 check_error global-incomplete 'struct S x;' "1:10: error: variable has incomplete type"
 check_error global-repeated-incomplete 'struct S x; struct S x;' "1:10: error: variable has incomplete type"
-check_error global-array-initializer-unsupported 'int a[3] = {0};' "1:10: error: array initializers are not supported yet"
 check_error global-missing-name 'int;' "1:4: error: expect declaration name"
 check_error global-missing-name-after-comma 'int a,;' "1:7: error: expect variable name"
 check_error global-mixed-function-unsupported 'int a, f(void);' "1:9: error: function declarations in a declaration list are not supported yet"
@@ -2540,7 +2752,6 @@ check_error array-unsigned-large-bound 'int main(void) { char a[1844674407370955
 check_error array-stack-overflow 'int main(void) { char a[2147483647]; return 0; }' '1:23: error: local variables exceed supported stack size'
 check_error array-total-stack-overflow 'int main(void) { char a[2147483620]; int b[10]; return 0; }' '1:42: error: local variables exceed supported stack size'
 check_error array-multidimensional 'int main(void) { int a[2][3]; return 0; }' '1:26: error: multidimensional arrays are not supported yet'
-check_error array-initializer 'int main(void) { int a[2] = {1, 2}; return 0; }' '1:27: error: array initializers are not supported yet'
 check_error array-function-return 'int f[3](void);' '1:5: error: function cannot return an array'
 check_error array-parameter-conflict 'int f(int a[3]); int f(char *a);' '1:22: error: conflicting declaration of function '\''f'\'''
 
@@ -3387,4 +3598,5 @@ check_error ptr-plus-ptr \
 check_error int-minus-ptr 'int main() { int a; int *p; p = &a; return 1 - p; }' \
 	    '1:46: error: invalid operands to binary -'
 
-printf 'All %d tests passed (%d execution, %d rejection).\n' "$((passed + rejected))" "$passed" "$rejected"
+printf 'All %d tests passed (%d execution, %d rejection, %d compile-only).\n' \
+       "$((passed + rejected + compiled))" "$passed" "$rejected" "$compiled"

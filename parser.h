@@ -23,6 +23,7 @@
 #include "type.h"
 
 typedef struct AstNode AstNode;
+typedef struct Initializer Initializer;
 
 typedef enum {
   STORAGE_NONE,
@@ -40,6 +41,40 @@ typedef struct {
   int64_t offset;
 } AddressConstant;
 
+typedef struct Designator {
+  Token loc;    /* The '.' or '[' token. */
+  Token member; /* Member name for '.', unused for '['. */
+  AstNode *index;
+  struct Designator *next;
+} Designator;
+
+/*
+ * Parsing records an expression or a brace list with optional designators.
+ * Sema uses the same representation to build checked subobjects for layout
+ * and codegen. Lists zero omitted subobjects; intermediate nodes introduced
+ * by designators preserve their enclosing initialization. Child offsets are
+ * relative to their parent; index is an array index or a member's declaration
+ * order. A whole-object expression may be followed by child overrides.
+ */
+struct Initializer {
+  Token loc;
+  Type *type; /* Destination type for checked nodes. */
+  AstNode *expr;
+  Initializer *children;
+  Initializer *next;
+  Designator *designators; /* Source syntax only; absent from checked nodes. */
+  int index;
+  int offset;
+  bool zero_fill; /* Initialize the whole subobject before applying children. */
+  /*
+   * Converted static scalar values, including signed values or unsigned bits.
+   */
+  union {
+    int64_t value;
+    AddressConstant address;
+  } constant;
+};
+
 /* Struct, union and enum tags share a namespace and follow block scope. */
 typedef struct Tag {
   Token name;
@@ -54,20 +89,10 @@ typedef struct Variable {
   Type *type;
   int offset; /* Positive distance below %rbp for stack variables. */
   bool is_global;
-  bool is_static; /* Internal linkage for file-scope objects. */
+  bool is_static;  /* Internal linkage for file-scope objects. */
   bool is_defined; /* Global storage is provided by this translation unit. */
   bool is_parameter;
-  bool has_initializer;
-  /*
-   * The variable's type selects integer bits, an address, or a string for a
-   * character array. Integer values retain the evaluator's signed values or
-   * unsigned bit patterns.
-   */
-  union {
-    int64_t value;
-    AddressConstant address;
-    AstNode *string;
-  } initializer;
+  Initializer *initializer;
   struct Variable *next; /* Parameter list, in declaration order. */
 } Variable;
 
@@ -91,7 +116,7 @@ typedef struct Label {
  */
 typedef struct GotoRef {
   Token name; /* Target label. */
-  Token loc; /* The 'goto' keyword, for diagnostics. */
+  Token loc;  /* The 'goto' keyword, for diagnostics. */
   struct GotoRef *next;
 } GotoRef;
 
@@ -105,8 +130,8 @@ typedef struct Function {
   int nparams;
   Type **param_types;
   int has_prototype; /* 0 for a declaration with an empty argument list. */
-  int is_defined; /* 1 once a definition has been seen. */
-  bool is_static; /* Internal linkage, retained across redeclarations. */
+  int is_defined;    /* 1 once a definition has been seen. */
+  bool is_static;    /* Internal linkage, retained across redeclarations. */
 } Function;
 
 typedef enum {
@@ -138,7 +163,7 @@ typedef struct Symbol {
  */
 typedef struct CallRef {
   Token name; /* Called function. */
-  Token loc; /* The callee identifier, for diagnostics. */
+  Token loc;  /* The callee identifier, for diagnostics. */
   int nargs;
   AstNode *call;
   struct CallRef *next;
@@ -239,14 +264,15 @@ typedef struct AstNode {
   struct AstNode *next; /* Statements or external declarations. */
   union {
     struct {
-      Function *declaration; /* Shared type and linkage across redeclarations. */
+      Function
+          *declaration; /* Shared type and linkage across redeclarations. */
       struct AstNode *body;
       /*
        * Parameters in declaration order. This list is retained for
        * codegen independently of their scope-bound symbol entries.
        */
       struct Variable *params;
-      int stack_size; /* Assigned by stack layout after parsing. */
+      int stack_size;    /* Assigned by stack layout after parsing. */
       int return_offset; /* Saved hidden result pointer for a MEMORY return. */
     } function;
 
@@ -267,7 +293,8 @@ typedef struct AstNode {
 
     struct {
       struct AstNode *init; /* Decl or expression-statement, NULL if omitted. */
-      struct AstNode *cond; /* NULL if omitted (a nonzero constant, 6.8.5.3p2). */
+      struct AstNode
+          *cond; /* NULL if omitted (a nonzero constant, 6.8.5.3p2). */
       struct AstNode *post; /* Expression, NULL if omitted. */
       struct AstNode *body;
     } for_stmt;
@@ -301,7 +328,7 @@ typedef struct AstNode {
     struct {
       int64_t val; /* Meaningless when is_default is set. */
       struct AstNode *stmt;
-      int label; /* Dispatch label number, assigned by codegen. */
+      int label;      /* Dispatch label number, assigned by codegen. */
       int is_default; /* 1 for 'default:', 0 for 'case'. */
     } case_stmt;
 
@@ -323,7 +350,7 @@ typedef struct AstNode {
 
     struct {
       Variable *var;
-      struct AstNode *init;
+      Initializer *init;
     } decl;
 
     struct {
@@ -339,12 +366,14 @@ typedef struct AstNode {
     } int_literal;
 
     struct {
-      unsigned char *val; /* Decoded bytes; type->array_len includes final zero. */
+      unsigned char
+          *val; /* Decoded bytes; type->array_len includes final zero. */
     } string_literal;
 
     struct {
       struct AstNode *operand;
-      int offset; /* Stack slot for an aggregate AST_CAST value, set by layout. */
+      int offset; /* Stack slot for an aggregate AST_CAST value, set by layout.
+                   */
     } unary;
 
     struct {
@@ -372,6 +401,7 @@ extern void error_at(Parser *p, Token loc, const char *fmt, ...)
 extern void parse_error(Parser *p, const char *fmt, ...)
     __attribute__((format(printf, 2, 3), noreturn));
 
-extern AstNode *parse_translation_unit(const char *filename, const char *source);
+extern AstNode *parse_translation_unit(const char *filename,
+                                       const char *source);
 
 #endif
