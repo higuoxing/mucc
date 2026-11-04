@@ -1,5 +1,6 @@
 mucc
 *.o
 *.d
+build/
 .qemu/
 .vmtest.log

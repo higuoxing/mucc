@@ -19,7 +19,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #include "codegen.h"
 #include "layout.h"
@@ -140,18 +139,11 @@ int main(int argc, char **argv) {
     /* '-o -' writes assembly to stdout, like gcc and clang. */
     out_file = stdout;
   } else {
-    struct stat input_st, output_st;
-
     if (!output)
       output = derived = derive_output_path(filename);
 
-    if (stat(filename, &input_st) != 0) {
-      fprintf(stderr, "failed to stat source file '%s'\n", filename);
-      exit(1);
-    }
-
-    if (stat(output, &output_st) == 0 && input_st.st_dev == output_st.st_dev &&
-        input_st.st_ino == output_st.st_ino) {
+    /* Refuse an output path that is the same string as the input path. */
+    if (strcmp(filename, output) == 0) {
       fprintf(stderr, "refusing to overwrite input file '%s'\n", filename);
       exit(1);
     }
