@@ -59,8 +59,8 @@ extern void check_gotos(Parser *p);
 
 extern Function *declare_function(Parser *p, Token name, Type *return_type,
                                   Type **param_types, int nparams,
-                                  bool has_prototype, bool definition,
-                                  bool is_static);
+                                  bool has_prototype, bool is_variadic,
+                                  bool definition, bool is_static);
 extern AstNode *sema_switch_condition(Parser *p, AstNode *expr);
 extern AstNode *sema_check_condition(Parser *p, AstNode *expr);
 extern AstNode *sema_subscript(Parser *p, AstNode *base, AstNode *index,
@@ -72,6 +72,8 @@ extern AstNode *sema_convert_expr(Parser *p, Type *target, AstNode *expr,
 extern AstNode *sema_cast(Parser *p, Type *target, AstNode *expr, Token loc);
 extern void sema_check_call(Parser *p, Function *func, AstNode *call,
                             int nargs);
+extern AstNode *sema_builtin_va(Parser *p, AstKind kind, AstNode *first,
+                                AstNode *second, Type *type, Token loc);
 extern void sema_check_return(Parser *p, AstNode *stmt);
 
 extern AstNode *sema_integer_literal(Parser *p, Token loc);

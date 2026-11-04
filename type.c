@@ -37,6 +37,8 @@ Type builtin_type_long_long = {.kind = TYPE_LONG_LONG, .size = 8, .base = NULL};
 Type builtin_type_unsigned_long_long = {
     .kind = TYPE_LONG_LONG, .size = 8, .is_unsigned = true, .base = NULL};
 Type builtin_type_void = {.kind = TYPE_VOID, .size = 0, .base = NULL};
+Type builtin_type_void_ptr = {
+    .kind = TYPE_PTR, .size = 8, .base = &builtin_type_void};
 
 bool is_integer(const Type *type) {
   return type->kind == TYPE_BOOL || type->kind == TYPE_CHAR ||

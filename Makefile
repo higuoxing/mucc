@@ -3,7 +3,7 @@ OPT := -O2
 CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Werror $(OPT)
 TARGET := mucc
 
-SRCS := main.c lexer.c type.c parser.c sema.c layout.c codegen.c vector.c
+SRCS := main.c lexer.c type.c builtins.c parser.c sema.c layout.c codegen.c vector.c
 OBJS := $(SRCS:.c=.o)
 DEPS := $(OBJS:.o=.d)
 
@@ -25,6 +25,6 @@ test: $(TARGET)
 
 fmt:
 	@echo "Formatting ..."
-	@clang-format -i *.h *.c
+	@clang-format -i *.h *.c include/*.h
 
 .PHONY: all test clean fmt

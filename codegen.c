@@ -20,6 +20,7 @@
 #include <limits.h>
 #include <stdio.h>
 
+#include "builtins.h"
 #include "codegen.h"
 #include "layout.h"
 #include "parser.h"
@@ -64,8 +65,9 @@ static const char *argregs32[] = {"%edi", "%esi", "%edx",
 static const char *argregs16[] = {"%di", "%si", "%dx", "%cx", "%r8w", "%r9w"};
 static const char *argregs8[] = {"%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"};
 
-static void codegen_expr(AstNode *expr);
-static void codegen_local_initializer(Initializer *init, int offset);
+static void codegen_expr(const CodegenContext *ctx, AstNode *expr);
+static void codegen_local_initializer(const CodegenContext *ctx,
+                                      Initializer *init, int offset);
 
 static void codegen_bytes(const unsigned char *bytes, int length) {
   int i;
@@ -112,11 +114,11 @@ static void codegen_local_string_array(Type *type, AstNode *expr, int offset) {
   }
 }
 
-static void codegen_addr(AstNode *expr) {
+static void codegen_addr(const CodegenContext *ctx, AstNode *expr) {
   switch (expr->kind) {
   case AST_COMPOUND_LITERAL: {
     Variable *var = expr->d.variable.var;
-    codegen_local_initializer(var->initializer, var->offset);
+    codegen_local_initializer(ctx, var->initializer, var->offset);
     fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", var->offset);
     break;
   }
@@ -134,7 +136,7 @@ static void codegen_addr(AstNode *expr) {
      * Both '.' and '->' use the record's address plus its member offset.
      * Union members have offset zero; anonymous members form nested accesses.
      */
-    codegen_expr(expr->d.member.base);
+    codegen_expr(ctx, expr->d.member.base);
     fprintf(out, "\taddq $%d, %%rax\n", expr->d.member.member->offset);
     break;
   case AST_STRING_LITERAL: {
@@ -144,7 +146,7 @@ static void codegen_addr(AstNode *expr) {
   }
   case AST_DEREF:
     /* The pointer value is the address. */
-    codegen_expr(expr->d.unary.operand);
+    codegen_expr(ctx, expr->d.unary.operand);
     break;
   default:
     fprintf(stderr, "invalid address expr in codegen\n");
@@ -202,7 +204,8 @@ static void codegen_store(Type *type) {
  * A designator's intermediate nodes only apply their children, preserving
  * any preceding whole-object copy or string initialization.
  */
-static void codegen_local_initializer(Initializer *init, int offset) {
+static void codegen_local_initializer(const CodegenContext *ctx,
+                                      Initializer *init, int offset) {
   Initializer *child;
   if (init->zero_fill) {
     fprintf(out, "\tleaq -%d(%%rbp), %%rdi\n", offset);
@@ -214,14 +217,14 @@ static void codegen_local_initializer(Initializer *init, int offset) {
     if (init->type->kind == TYPE_ARRAY) {
       codegen_local_string_array(init->type, init->expr, offset);
     } else {
-      codegen_expr(init->expr);
+      codegen_expr(ctx, init->expr);
       fprintf(out, "\tmovq %%rax, %%rcx\n");
       fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", offset);
       codegen_store(init->type);
     }
   }
   for (child = init->children; child; child = child->next)
-    codegen_local_initializer(child, offset - child->offset);
+    codegen_local_initializer(ctx, child, offset - child->offset);
 }
 
 /*
@@ -383,7 +386,7 @@ static void codegen_pointer_offset(AstKind kind, Type *type) {
                                    : "\tsubq %%rcx, %%rax\n");
 }
 
-static void codegen_call(AstNode *expr) {
+static void codegen_call(const CodegenContext *ctx, AstNode *expr) {
   AstNode *arg;
   bool memory_return = return_in_memory(expr->type);
   /*
@@ -416,7 +419,7 @@ static void codegen_call(AstNode *expr) {
     if (reg >= 0)
       offset = stack_size + reg * 8;
     /* Stage values before loading registers; nested calls may clobber them. */
-    codegen_expr(arg);
+    codegen_expr(ctx, arg);
     if (is_record(arg->type)) {
       fprintf(out, "\tmovq %%rax, %%rcx\n");
       fprintf(out, "\tleaq %d(%%rsp), %%rax\n", offset);
@@ -429,7 +432,9 @@ static void codegen_call(AstNode *expr) {
     fprintf(out, "\tmovq %d(%%rsp), %s\n", stack_size + i * 8, argregs64[i]);
   if (memory_return)
     fprintf(out, "\tleaq -%d(%%rbp), %%rdi\n", expr->d.call.offset);
-  /* Prototype-less calls must report that no vector registers were used. */
+  /*
+   * Our supported argument types do not use vector registers.
+   */
   fprintf(out, "\txorl %%eax, %%eax\n");
   fprintf(out, "\tcall %.*s\n", expr->d.call.function->name.len,
           expr->d.call.function->name.start);
@@ -453,26 +458,89 @@ static void codegen_call(AstNode *expr) {
   }
 }
 
-static void codegen_expr(AstNode *expr) {
+/*
+ * Register arguments advance gp_offset; a MEMORY argument, or a record that
+ * cannot fit entirely in the remaining registers, advances only the stack
+ * cursor. Our supported types require at most eight-byte stack alignment.
+ */
+static void codegen_va_arg(const CodegenContext *ctx, AstNode *expr) {
+  int count = register_count(expr->type);
+  int size = type_size(expr->type);
+  int seq = label_seq++;
+  codegen_expr(ctx, expr->d.unary.operand);
+  fprintf(out, "\tmovq %%rax, %%rdx\n");
+  if (count) {
+    fprintf(out, "\tmovl (%%rdx), %%ecx\n");
+    fprintf(out, "\tcmpl $%d, %%ecx\n", 48 - count * 8);
+    fprintf(out, "\tja .L.va.stack.%d\n", seq);
+    fprintf(out, "\tmovq 16(%%rdx), %%rax\n");
+    fprintf(out, "\taddq %%rcx, %%rax\n");
+    fprintf(out, "\taddl $%d, (%%rdx)\n", count * 8);
+    fprintf(out, "\tjmp .L.va.value.%d\n", seq);
+    fprintf(out, ".L.va.stack.%d:\n", seq);
+  }
+  fprintf(out, "\tmovq 8(%%rdx), %%rax\n");
+  fprintf(out, "\taddq $%" PRId64 ", 8(%%rdx)\n", ((int64_t)size + 7) / 8 * 8);
+  if (count)
+    fprintf(out, ".L.va.value.%d:\n", seq);
+  if (is_record(expr->type)) {
+    fprintf(out, "\tmovq %%rax, %%rcx\n");
+    fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", expr->d.unary.offset);
+    codegen_store(expr->type);
+  } else {
+    codegen_load(expr->type, "%rax");
+  }
+}
+
+static void codegen_expr(const CodegenContext *ctx, AstNode *expr) {
   switch (expr->kind) {
+  case AST_VA_START: {
+    const AstNode *fn = ctx->function;
+    codegen_expr(ctx, expr->d.binary.lhs);
+    fprintf(out, "\tmovl $%d, (%%rax)\n", fn->d.function.va_gp_offset);
+    fprintf(out, "\tmovl $48, 4(%%rax)\n");
+    fprintf(out, "\tleaq %d(%%rbp), %%rcx\n", fn->d.function.va_stack_offset);
+    fprintf(out, "\tmovq %%rcx, 8(%%rax)\n");
+    fprintf(out, "\tleaq -%d(%%rbp), %%rcx\n", fn->d.function.va_area_offset);
+    fprintf(out, "\tmovq %%rcx, 16(%%rax)\n");
+    break;
+  }
+  case AST_VA_ARG:
+    codegen_va_arg(ctx, expr);
+    break;
+  case AST_VA_END:
+    /*
+     * No resources to release, but the operand must still be evaluated.
+     */
+    codegen_expr(ctx, expr->d.unary.operand);
+    break;
+  case AST_VA_COPY:
+    codegen_expr(ctx, expr->d.binary.rhs);
+    fprintf(out, "\tpushq %%rax\n");
+    push_depth++;
+    codegen_expr(ctx, expr->d.binary.lhs);
+    fprintf(out, "\tpopq %%rcx\n");
+    push_depth--;
+    codegen_store(builtin_type_va_list.base);
+    break;
   case AST_VAR:
   case AST_COMPOUND_LITERAL:
   case AST_DEREF:
   case AST_STRING_LITERAL:
   case AST_MEMBER:
-    codegen_addr(expr);
+    codegen_addr(ctx, expr);
     if (expr->type->kind != TYPE_ARRAY && !is_record(expr->type))
       codegen_load(expr->type, "%rax");
     break;
   case AST_ADDR:
     /* The address is the value. */
-    codegen_addr(expr->d.unary.operand);
+    codegen_addr(ctx, expr->d.unary.operand);
     break;
   case AST_ASSIGN:
-    codegen_expr(expr->d.binary.rhs);
+    codegen_expr(ctx, expr->d.binary.rhs);
     fprintf(out, "\tpushq %%rax\n");
     push_depth++;
-    codegen_addr(expr->d.binary.lhs);
+    codegen_addr(ctx, expr->d.binary.lhs);
     fprintf(out, "\tpopq %%rcx\n");
     push_depth--;
     codegen_store(expr->type);
@@ -490,11 +558,11 @@ static void codegen_expr(AstNode *expr) {
      * computing the target address. Calls in either operand may clobber
      * registers. Once the address is saved, load and update the object once.
      */
-    codegen_expr(expr->d.compound_assign.rhs);
+    codegen_expr(ctx, expr->d.compound_assign.rhs);
     codegen_normalize(expr->d.compound_assign.rhs->type);
     fprintf(out, "\tpushq %%rax\n");
     push_depth++;
-    codegen_addr(expr->d.compound_assign.lhs);
+    codegen_addr(ctx, expr->d.compound_assign.lhs);
     fprintf(out, "\tpopq %%rcx\n");
     push_depth--;
     fprintf(out, "\tpushq %%rax\n");
@@ -517,7 +585,7 @@ static void codegen_expr(AstNode *expr) {
     break;
   }
   case AST_CAST:
-    codegen_expr(expr->d.unary.operand);
+    codegen_expr(ctx, expr->d.unary.operand);
     if (is_record(expr->type)) {
       fprintf(out, "\tmovq %%rax, %%rcx\n");
       fprintf(out, "\tleaq -%d(%%rbp), %%rax\n", expr->d.unary.offset);
@@ -547,10 +615,10 @@ static void codegen_expr(AstNode *expr) {
   case AST_BIT_AND:
   case AST_BIT_XOR:
   case AST_BIT_OR:
-    codegen_expr(expr->d.binary.rhs);
+    codegen_expr(ctx, expr->d.binary.rhs);
     fprintf(out, "\tpushq %%rax\n");
     push_depth++;
-    codegen_expr(expr->d.binary.lhs);
+    codegen_expr(ctx, expr->d.binary.lhs);
     fprintf(out, "\tpopq %%rcx\n");
     push_depth--;
     codegen_integer_binary(expr->kind, expr->type);
@@ -558,11 +626,11 @@ static void codegen_expr(AstNode *expr) {
   case AST_PTR_ADD:
   case AST_PTR_SUB: {
     /* Pointer +- integer, scaled by the pointee's size. */
-    codegen_expr(expr->d.binary.rhs);
+    codegen_expr(ctx, expr->d.binary.rhs);
     codegen_normalize(expr->d.binary.rhs->type);
     fprintf(out, "\tpushq %%rax\n");
     push_depth++;
-    codegen_expr(expr->d.binary.lhs);
+    codegen_expr(ctx, expr->d.binary.lhs);
     fprintf(out, "\tpopq %%rcx\n");
     push_depth--;
     codegen_pointer_offset(expr->kind, expr->type);
@@ -570,10 +638,10 @@ static void codegen_expr(AstNode *expr) {
   }
   case AST_PTR_DIFF: {
     /* Pointer difference: byte distance / pointee size. */
-    codegen_expr(expr->d.binary.rhs);
+    codegen_expr(ctx, expr->d.binary.rhs);
     fprintf(out, "\tpushq %%rax\n");
     push_depth++;
-    codegen_expr(expr->d.binary.lhs);
+    codegen_expr(ctx, expr->d.binary.lhs);
     fprintf(out, "\tpopq %%rcx\n");
     push_depth--;
     fprintf(out, "\tsubq %%rcx, %%rax\n");
@@ -591,10 +659,10 @@ static void codegen_expr(AstNode *expr) {
   case AST_NE: {
     bool wide = expr->d.binary.lhs->type->size == 8 ||
                 expr->d.binary.rhs->type->size == 8;
-    codegen_expr(expr->d.binary.rhs);
+    codegen_expr(ctx, expr->d.binary.rhs);
     fprintf(out, "\tpushq %%rax\n");
     push_depth++;
-    codegen_expr(expr->d.binary.lhs);
+    codegen_expr(ctx, expr->d.binary.lhs);
     fprintf(out, "\tpopq %%rcx\n");
     push_depth--;
 
@@ -634,10 +702,10 @@ static void codegen_expr(AstNode *expr) {
     int seq = label_seq++;
 
     /* Short-circuit: skip the right operand when the left one is zero. */
-    codegen_expr(expr->d.binary.lhs);
+    codegen_expr(ctx, expr->d.binary.lhs);
     codegen_test(expr->d.binary.lhs->type);
     fprintf(out, "\tje .L.false.%d\n", seq);
-    codegen_expr(expr->d.binary.rhs);
+    codegen_expr(ctx, expr->d.binary.rhs);
     codegen_test(expr->d.binary.rhs->type);
     fprintf(out, "\tje .L.false.%d\n", seq);
     fprintf(out, "\tmovl $1, %%eax\n");
@@ -651,10 +719,10 @@ static void codegen_expr(AstNode *expr) {
     int seq = label_seq++;
 
     /* Short-circuit: skip the right operand when the left one is nonzero. */
-    codegen_expr(expr->d.binary.lhs);
+    codegen_expr(ctx, expr->d.binary.lhs);
     codegen_test(expr->d.binary.lhs->type);
     fprintf(out, "\tjne .L.true.%d\n", seq);
-    codegen_expr(expr->d.binary.rhs);
+    codegen_expr(ctx, expr->d.binary.rhs);
     codegen_test(expr->d.binary.rhs->type);
     fprintf(out, "\tjne .L.true.%d\n", seq);
     fprintf(out, "\tmovl $0, %%eax\n");
@@ -666,36 +734,36 @@ static void codegen_expr(AstNode *expr) {
   }
   case AST_COMMA:
     /* The left operand's value is discarded, its side effects kept. */
-    codegen_expr(expr->d.binary.lhs);
-    codegen_expr(expr->d.binary.rhs);
+    codegen_expr(ctx, expr->d.binary.lhs);
+    codegen_expr(ctx, expr->d.binary.rhs);
     break;
   case AST_CONDITIONAL: {
     int seq = label_seq++;
 
     /* Only the selected branch is evaluated. */
-    codegen_expr(expr->d.conditional.cond);
+    codegen_expr(ctx, expr->d.conditional.cond);
     codegen_test(expr->d.conditional.cond->type);
     fprintf(out, "\tje .L.else.%d\n", seq);
-    codegen_expr(expr->d.conditional.then_expr);
+    codegen_expr(ctx, expr->d.conditional.then_expr);
     fprintf(out, "\tjmp .L.end.%d\n", seq);
     fprintf(out, ".L.else.%d:\n", seq);
-    codegen_expr(expr->d.conditional.else_expr);
+    codegen_expr(ctx, expr->d.conditional.else_expr);
     fprintf(out, ".L.end.%d:\n", seq);
     break;
   }
   case AST_CALL:
-    codegen_call(expr);
+    codegen_call(ctx, expr);
     break;
   case AST_NEG:
-    codegen_expr(expr->d.unary.operand);
+    codegen_expr(ctx, expr->d.unary.operand);
     fprintf(out, expr->type->size == 8 ? "\tnegq %%rax\n" : "\tnegl %%eax\n");
     break;
   case AST_BITWISE_NOT:
-    codegen_expr(expr->d.unary.operand);
+    codegen_expr(ctx, expr->d.unary.operand);
     fprintf(out, expr->type->size == 8 ? "\tnotq %%rax\n" : "\tnotl %%eax\n");
     break;
   case AST_LOGICAL_NOT:
-    codegen_expr(expr->d.unary.operand);
+    codegen_expr(ctx, expr->d.unary.operand);
     codegen_test(expr->d.unary.operand->type);
     /* Set %al to 1 if %eax was 0 */
     fprintf(out, "\tsete %%al\n");
@@ -714,7 +782,7 @@ static void codegen_expr(AstNode *expr) {
     bool wide = expr->type->size == 8;
     /* Pointers step by the pointee's size, integers by 1. */
     int step = is_ptr ? type_size(expr->type->base) : 1;
-    codegen_addr(expr->d.unary.operand);
+    codegen_addr(ctx, expr->d.unary.operand);
     codegen_load(expr->type, "%rcx");
     if (post) {
       /* Save the original value as the result. */
@@ -750,7 +818,7 @@ static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
   switch (stmt->kind) {
   case AST_RETURN:
     if (stmt->d.ret.expr) {
-      codegen_expr(stmt->d.ret.expr);
+      codegen_expr(ctx, stmt->d.ret.expr);
       codegen_return(ctx);
     }
     fprintf(out, "\tjmp .Lreturn.%d\n", ctx->ret_label);
@@ -773,7 +841,7 @@ static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
     int seq = label_seq++;
 
     /* Jump to the else branch when the condition is zero. */
-    codegen_expr(stmt->d.if_stmt.cond);
+    codegen_expr(ctx, stmt->d.if_stmt.cond);
     codegen_test(stmt->d.if_stmt.cond->type);
     fprintf(out, "\tje .L.else.%d\n", seq);
     codegen_stmt(ctx, stmt->d.if_stmt.then_stmt);
@@ -796,7 +864,7 @@ static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
      */
     fprintf(out, ".L.begin.%d:\n", seq);
     fprintf(out, ".L.continue.%d:\n", seq);
-    codegen_expr(stmt->d.while_stmt.cond);
+    codegen_expr(ctx, stmt->d.while_stmt.cond);
     codegen_test(stmt->d.while_stmt.cond->type);
     fprintf(out, "\tje .L.end.%d\n", seq);
     codegen_stmt(&loop_ctx, stmt->d.while_stmt.body);
@@ -815,7 +883,7 @@ static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
     fprintf(out, ".L.begin.%d:\n", seq);
     if (stmt->d.for_stmt.cond) {
       /* An omitted condition is a nonzero constant: skip the test. */
-      codegen_expr(stmt->d.for_stmt.cond);
+      codegen_expr(ctx, stmt->d.for_stmt.cond);
       codegen_test(stmt->d.for_stmt.cond->type);
       fprintf(out, "\tje .L.end.%d\n", seq);
     }
@@ -823,7 +891,7 @@ static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
     /* 'continue' must skip to the post expression, not the condition. */
     fprintf(out, ".L.continue.%d:\n", seq);
     if (stmt->d.for_stmt.post)
-      codegen_expr(stmt->d.for_stmt.post);
+      codegen_expr(ctx, stmt->d.for_stmt.post);
     fprintf(out, "\tjmp .L.begin.%d\n", seq);
     fprintf(out, ".L.end.%d:\n", seq);
     break;
@@ -841,7 +909,7 @@ static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
     fprintf(out, ".L.begin.%d:\n", seq);
     codegen_stmt(&loop_ctx, stmt->d.do_stmt.body);
     fprintf(out, ".L.continue.%d:\n", seq);
-    codegen_expr(stmt->d.do_stmt.cond);
+    codegen_expr(ctx, stmt->d.do_stmt.cond);
     codegen_test(stmt->d.do_stmt.cond->type);
     fprintf(out, "\tjne .L.begin.%d\n", seq);
     fprintf(out, ".L.end.%d:\n", seq);
@@ -875,7 +943,7 @@ static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
      * by the parser; a jump table can replace it once case densities make
      * that worthwhile.
      */
-    codegen_expr(stmt->d.switch_stmt.cond);
+    codegen_expr(ctx, stmt->d.switch_stmt.cond);
     for (cl = stmt->d.switch_stmt.cases; cl; cl = cl->next) {
       cl->node->d.case_stmt.label = label_seq++;
       if (cl->node->d.case_stmt.is_default) {
@@ -910,11 +978,12 @@ static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
     break;
   case AST_DECL:
     if (stmt->d.decl.init)
-      codegen_local_initializer(stmt->d.decl.init, stmt->d.decl.var->offset);
+      codegen_local_initializer(ctx, stmt->d.decl.init,
+                                stmt->d.decl.var->offset);
     break;
   case AST_EXPR_STMT:
     if (stmt->d.expr_stmt.expr)
-      codegen_expr(stmt->d.expr_stmt.expr);
+      codegen_expr(ctx, stmt->d.expr_stmt.expr);
     break;
   case AST_BLOCK: {
     AstNode *cur;
@@ -1074,6 +1143,21 @@ static void codegen_function_params(const AstNode *fn) {
    */
   int nregs = memory_return ? 1 : 0;
   int64_t stack_size = 0;
+  if (fn->d.function.declaration->is_variadic) {
+    int i;
+    int seq = label_seq++;
+    int offset = fn->d.function.va_area_offset;
+    for (i = 0; i < 6; ++i)
+      fprintf(out, "\tmovq %s, -%d(%%rbp)\n", argregs64[i], offset - i * 8);
+    /*
+     * AL gives an upper bound on the number of incoming vector arguments.
+     */
+    fprintf(out, "\ttestb %%al, %%al\n");
+    fprintf(out, "\tje .L.va.saved.%d\n", seq);
+    for (i = 0; i < 8; ++i)
+      fprintf(out, "\tmovups %%xmm%d, -%d(%%rbp)\n", i, offset - 48 - i * 16);
+    fprintf(out, ".L.va.saved.%d:\n", seq);
+  }
   if (memory_return)
     fprintf(out, "\tmovq %%rdi, -%d(%%rbp)\n", fn->d.function.return_offset);
   for (param = fn->d.function.params; param; param = param->next) {

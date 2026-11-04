@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "builtins.h"
 #include "lexer.h"
 #include "parser.h"
 #include "sema.h"
@@ -132,6 +133,7 @@ static void reset_function_state(Parser *p) {
   p->goto_refs = NULL;
   p->current_switch = NULL;
   p->current_function = NULL;
+  p->last_parameter = NULL;
   p->scope_depth = 0;
   p->loop_depth = 0;
 }
@@ -144,12 +146,14 @@ static void parser_init(Parser *p, const char *filename, const char *source) {
   p->call_refs = NULL;
   p->current_switch = NULL;
   p->current_function = NULL;
+  p->last_parameter = NULL;
   p->scope_depth = 0;
   p->loop_depth = 0;
   lexer_init(&p->lexer, filename, source);
   p->previous = (Token){0};
   p->current = lexer_next_token(&p->lexer);
   p->lookahead = lexer_next_token(&p->lexer);
+  declare_builtins(p);
 }
 
 static void report_error(Parser *p, Token loc, const char *fmt, va_list ap) {
@@ -348,6 +352,29 @@ static AstNode *parse_call_expr(Parser *p, Function *func) {
 }
 
 /*
+ * va_arg takes a type name, rather than an expression, as its second operand.
+ * The other builtins take one or two assignment expressions like a call.
+ */
+static AstNode *parse_builtin_va(Parser *p, AstKind kind) {
+  Token loc = p->current;
+  AstNode *first;
+  AstNode *second = NULL;
+  Type *type = &builtin_type_void;
+  parser_advance(p);
+  parse_expect(p, TOKEN_LPAREN, "expect '('");
+  first = parse_assignment(p);
+  if (kind != AST_VA_END) {
+    parse_expect(p, TOKEN_COMMA, "expect ','");
+    if (kind == AST_VA_ARG)
+      type = parse_type_name(p);
+    else
+      second = parse_assignment(p);
+  }
+  parse_expect(p, TOKEN_RPAREN, "expect ')'");
+  return sema_builtin_va(p, kind, first, second, type, loc);
+}
+
+/*
  * postfix-expression:
  *   primary-expression
  *   '(' type-name ')' '{' initializer-list ','_opt '}'
@@ -369,6 +396,9 @@ static AstNode *parse_postfix(Parser *p) {
     left = parse_compound_literal(p, type, loc);
   } else if (p->current.kind == TOKEN_IDENTIFIER &&
              p->lookahead.kind == TOKEN_LPAREN) {
+    AstKind builtin = builtin_kind(p->current);
+    if (builtin != AST_CALL)
+      return parse_postfix_suffix(p, parse_builtin_va(p, builtin));
     Symbol *sym = find_symbol(p, p->current);
     if (!sym)
       parse_error(p, "function '%.*s' not declared", p->current.len,
@@ -1660,6 +1690,7 @@ static AstNode *parse_global_declaration(Parser *p, Type *base, Type *type,
 /*
  * Parse a function's parameter declarations and optional body after its return
  * type and name have been consumed.
+ * parameter-type-list: parameter-list | parameter-list ',' '...' (C11 6.7.6.3).
  */
 static AstNode *parse_function_declaration(Parser *p, Type *return_type,
                                            Token func_name, bool is_static) {
@@ -1671,6 +1702,7 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
   int nparams;
   int definition = 0;
   int explicit_params = 0;
+  bool is_variadic = false;
   Token unnamed_param = {0};
 
   vector_init(&param_types, sizeof(Type *));
@@ -1692,6 +1724,13 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
       Token param_loc = p->current;
       Type *param_type;
 
+      if (p->current.kind == TOKEN_ELLIPSIS) {
+        if (param_types.len == 0)
+          parse_error(p, "expect parameter before '...'");
+        is_variadic = true;
+        parser_advance(p);
+        break;
+      }
       param_type = parse_declspecs(p, NULL, NULL);
       param_type = parse_declarator(p, param_type, &param_name);
       if (param_type->kind == TYPE_ARRAY) {
@@ -1752,7 +1791,8 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
 
   nparams = (int)param_types.len;
   func = declare_function(p, func_name, return_type, param_types.data, nparams,
-                          explicit_params || definition, definition, is_static);
+                          explicit_params || definition, is_variadic,
+                          definition, is_static);
   vector_free(&param_types);
 
   if (!definition) {
@@ -1763,6 +1803,9 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
   }
 
   p->current_function = func;
+  p->last_parameter = params;
+  while (p->last_parameter && p->last_parameter->next)
+    p->last_parameter = p->last_parameter->next;
   fn->d.function.declaration = func;
   fn->d.function.params = params;
   fn->d.function.body = parse_compound_stmt(p);

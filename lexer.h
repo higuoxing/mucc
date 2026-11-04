@@ -47,6 +47,7 @@ typedef enum {
   TOKEN_DEFAULT,    /* 'default' */
   TOKEN_DO,         /* 'do' */
   TOKEN_DOT,        /* '.' */
+  TOKEN_ELLIPSIS,   /* '...' */
   TOKEN_ELSE,       /* 'else' */
   TOKEN_ENUM,       /* 'enum' */
   TOKEN_EQ_EQ,      /* '==' */

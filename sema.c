@@ -18,6 +18,7 @@
 
 #include <limits.h>
 
+#include "builtins.h"
 #include "sema.h"
 #include "type.h"
 #include "vector.h"
@@ -631,7 +632,8 @@ static AstNode *convert_to_value(Parser *p, AstNode *expr) {
      * results still refer to their destination and need a copy when consumed.
      */
     if (expr->kind == AST_CAST || expr->kind == AST_COMMA ||
-        expr->kind == AST_CONDITIONAL || expr->kind == AST_CALL)
+        expr->kind == AST_CONDITIONAL || expr->kind == AST_CALL ||
+        expr->kind == AST_VA_ARG)
       return expr;
     type = unqualified_type(expr->type);
   } else if (expr->type->kind == TYPE_ARRAY)
@@ -685,7 +687,7 @@ AstNode *sema_switch_condition(Parser *p, AstNode *expr) {
 
 Function *declare_function(Parser *p, Token name, Type *return_type,
                            Type **param_types, int nparams, bool has_prototype,
-                           bool definition, bool is_static) {
+                           bool is_variadic, bool definition, bool is_static) {
   Symbol *prev_sym = find_symbol_in_scope(p, name, 0);
   Function *func = NULL;
   int i;
@@ -719,13 +721,16 @@ Function *declare_function(Parser *p, Token name, Type *return_type,
     if (func->has_prototype != has_prototype) {
       Type **types = func->has_prototype ? func->param_types : param_types;
       int count = func->has_prototype ? func->nparams : nparams;
+      if (func->is_variadic || is_variadic)
+        error_at(p, name, "conflicting declaration of function '%.*s'",
+                 name.len, name.start);
       for (i = 0; i < count; ++i)
         if (!same_type(types[i], integer_promotion_type(types[i])))
           error_at(p, name, "conflicting declaration of function '%.*s'",
                    name.len, name.start);
     }
     if (func->has_prototype && has_prototype) {
-      if (func->nparams != nparams)
+      if (func->nparams != nparams || func->is_variadic != is_variadic)
         error_at(p, name, "conflicting declaration of function '%.*s'",
                  name.len, name.start);
       for (i = 0; i < nparams; ++i)
@@ -749,6 +754,7 @@ Function *declare_function(Parser *p, Token name, Type *return_type,
         error_at(p, name, "out of memory");
     }
     func->has_prototype = 1;
+    func->is_variadic = is_variadic;
     func->nparams = nparams;
     for (i = 0; i < nparams; ++i)
       func->param_types[i] = param_types[i];
@@ -919,7 +925,8 @@ void sema_check_call(Parser *p, Function *func, AstNode *call, int nargs) {
   int i = 0;
   if (is_record(call->type) && type_size(call->type) < 0)
     error_at(p, call->loc, "function return type is incomplete");
-  if (func->has_prototype && nargs != func->nparams)
+  if (func->has_prototype &&
+      (nargs < func->nparams || (!func->is_variadic && nargs > func->nparams)))
     error_at(p, call->loc, "wrong number of arguments to function '%.*s'",
              func->name.len, func->name.start);
   for (link = &call->d.call.args; *link; link = &(*link)->next, ++i) {
@@ -927,7 +934,7 @@ void sema_check_call(Parser *p, Function *func, AstNode *call, int nargs) {
     AstNode *next = arg->next;
     arg->next = NULL;
     sema_check_nonvoid_expr(p, arg);
-    if (func->has_prototype)
+    if (func->has_prototype && i < func->nparams)
       *link =
           sema_convert_expr(p, func->param_types[i], arg, arg->loc, "argument");
     else
@@ -976,6 +983,52 @@ static AstNode *new_expr(Parser *p, AstKind kind, Type *type, Token loc) {
   node->kind = kind;
   node->type = type;
   node->loc = loc;
+  return node;
+}
+
+static AstNode *check_va_list(Parser *p, AstNode *expr, bool writable) {
+  expr = convert_to_value(p, expr);
+  if (expr->type->kind != TYPE_PTR ||
+      !same_type(unqualified_type(expr->type->base), builtin_type_va_list.base))
+    error_at(p, expr->loc, "expect va_list argument");
+  if (writable && contains_const(expr->type->base))
+    error_at(p, expr->loc, "va_list argument is const-qualified");
+  return expr;
+}
+
+AstNode *sema_builtin_va(Parser *p, AstKind kind, AstNode *first,
+                         AstNode *second, Type *type, Token loc) {
+  AstNode *node;
+  if (kind == AST_VA_START) {
+    if (!p->current_function || !p->current_function->is_variadic)
+      error_at(p, loc, "va_start requires a variadic function");
+    if (second->kind != AST_VAR || second->d.variable.var != p->last_parameter)
+      error_at(p, second->loc, "va_start requires the last fixed parameter");
+  }
+  first = check_va_list(p, first, true);
+  if (kind == AST_VA_COPY)
+    second = check_va_list(p, second, false);
+  if (kind == AST_VA_ARG) {
+    if ((!is_integer(type) && type->kind != TYPE_PTR && !is_record(type)) ||
+        type_size(type) < 0)
+      error_at(p, loc,
+               "va_arg requires a complete object type other than an array");
+    if (is_integer(type) &&
+        !same_type(unqualified_type(type), integer_promotion_type(type)))
+      error_at(p, loc, "va_arg type is changed by default argument promotions");
+    /*
+     * The result is a value. Drop a top-level qualifier so a const aggregate
+     * can initialize an object or be passed as the unqualified type.
+     */
+    type = unqualified_type(type);
+  }
+  node = new_expr(p, kind, type, loc);
+  if (kind == AST_VA_START || kind == AST_VA_COPY) {
+    node->d.binary.lhs = first;
+    node->d.binary.rhs = second;
+  } else {
+    node->d.unary.operand = first;
+  }
   return node;
 }
 

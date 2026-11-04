@@ -107,11 +107,13 @@ static void layout_expr(StackLayout *layout, AstNode *expr) {
     break;
   }
   case AST_CAST:
+  case AST_VA_ARG:
     layout_expr(layout, expr->d.unary.operand);
     if (is_record(expr->type))
       expr->d.unary.offset = layout_slot(layout, expr->type, expr->loc);
     break;
   case AST_ADDR:
+  case AST_VA_END:
   case AST_DEREF:
   case AST_NEG:
   case AST_BITWISE_NOT:
@@ -150,6 +152,8 @@ static void layout_expr(StackLayout *layout, AstNode *expr) {
     layout_expr(layout, expr->d.compound_assign.rhs);
     break;
   case AST_ASSIGN:
+  case AST_VA_START:
+  case AST_VA_COPY:
   case AST_ADD:
   case AST_SUB:
   case AST_PTR_ADD:
@@ -276,6 +280,18 @@ void assign_stack_offsets(const char *filename, AstNode *ast) {
                      "function parameters exceed supported stack size");
     }
 
+    if (fn->d.function.declaration->is_variadic) {
+      /*
+       * Six GP registers and eight XMM registers, in the ABI's fixed order.
+       * Alignment is 16 so every XMM slot is 16-byte aligned: host va_arg
+       * reloads those slots with movaps. Saving them permits forwarding a
+       * list to host code.
+       */
+      Type save_area = {.kind = TYPE_STRUCT, .size = 176, .alignment = 16};
+      fn->d.function.va_area_offset = layout_slot(&layout, &save_area, fn->loc);
+      fn->d.function.va_gp_offset = nregs * 8;
+      fn->d.function.va_stack_offset = 16 + (int)stack_size;
+    }
     layout_stmt(&layout, fn->d.function.body);
     fn->d.function.stack_size = layout.size;
   }

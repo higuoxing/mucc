@@ -130,6 +130,7 @@ typedef struct Function {
   int nparams;
   Type **param_types;
   int has_prototype; /* 0 for a declaration with an empty argument list. */
+  bool is_variadic;  /* Parameters end with '...'; nparams counts fixed ones. */
   int is_defined;    /* 1 once a definition has been seen. */
   bool is_static;    /* Internal linkage, retained across redeclarations. */
 } Function;
@@ -189,6 +190,7 @@ typedef struct {
   Label *labels;
   GotoRef *goto_refs;
   Function *current_function;
+  Variable *last_parameter; /* Last fixed parameter of the current function. */
   CallRef *call_refs;
   /*
    * The innermost switch being parsed, or NULL; 'case' and 'default' are
@@ -255,6 +257,10 @@ typedef enum {
   AST_SUB,
   AST_SWITCH,
   AST_VAR,
+  AST_VA_START,
+  AST_VA_ARG,
+  AST_VA_END,
+  AST_VA_COPY,
   AST_WHILE,
 } AstKind;
 
@@ -273,8 +279,11 @@ typedef struct AstNode {
        * codegen independently of their scope-bound symbol entries.
        */
       struct Variable *params;
-      int stack_size;    /* Assigned by stack layout after parsing. */
-      int return_offset; /* Saved hidden result pointer for a MEMORY return. */
+      int stack_size;     /* Assigned by stack layout after parsing. */
+      int return_offset;  /* Saved hidden result pointer for a MEMORY return. */
+      int va_area_offset; /* Register save area, below %rbp. */
+      int va_gp_offset;   /* First unnamed GP register's byte offset. */
+      int va_stack_offset; /* First unnamed stack argument, above %rbp. */
     } function;
 
     struct {

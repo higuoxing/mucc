@@ -504,6 +504,14 @@ Token lexer_next_token(Lexer *l) {
     lexer_advance(l);
     return tok;
   case '.':
+    if (l->cursor[1] == '.' && l->cursor[2] == '.') {
+      tok.kind = TOKEN_ELLIPSIS;
+      tok.len = 3;
+      lexer_advance(l);
+      lexer_advance(l);
+      lexer_advance(l);
+      return tok;
+    }
     tok.kind = TOKEN_DOT;
     tok.len = 1;
     lexer_advance(l);

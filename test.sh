@@ -174,6 +174,155 @@ function check_error() {
     printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
+# Variadic builtins read and copy register and stack argument cursors.
+check va-list-size 1 'int main(void) { return sizeof(__builtin_va_list) == 24 && sizeof((__builtin_va_list){0}) == 24; }'
+check va-arg-int 42 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int x = __builtin_va_arg(ap, int); __builtin_va_end(ap); return x; } int main(void) { return f(1, 42); }'
+check va-arg-stack-transition 42 'int sum(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int sum=0; for (int i=0; i<n; ++i) sum += __builtin_va_arg(ap, int); __builtin_va_end(ap); return sum; } int main(void) { return sum(8, 1, 2, 3, 4, 5, 6, 7, 14); }'
+check va-arg-all-fixed-registers 42 'int f(int a,int b,int c,int d,int e,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return x; } int main(void) { return f(1,2,3,4,5,6,42); }'
+check va-arg-fixed-stack-parameter 42 'int f(int a,int b,int c,int d,int e,int f,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return x; } int main(void) { return f(1,2,3,4,5,6,7,42); }'
+check va-arg-promotions 1 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int c=__builtin_va_arg(ap,int); int s=__builtin_va_arg(ap,int); int b=__builtin_va_arg(ap,int); __builtin_va_end(ap); return c == -1 && s == 65535 && b == 1; } int main(void) { char c=-1; unsigned short s=65535; _Bool b=42; return f(3,c,s,b); }'
+check va-arg-unsigned 1 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); unsigned x=__builtin_va_arg(ap,unsigned); unsigned long y=__builtin_va_arg(ap,unsigned long); long long z=__builtin_va_arg(ap,long long); __builtin_va_end(ap); return x==4294967295U && y==18446744073709551615UL && z==-4294967297LL; } int main(void) { return f(3,4294967295U,18446744073709551615UL,-4294967297LL); }'
+check va-arg-pointer 42 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int *p=__builtin_va_arg(ap,int *); __builtin_va_end(ap); return *p; } int main(void) { int x=42; return f(1,&x); }'
+check va-arg-string 42 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); char *p=__builtin_va_arg(ap,char *); __builtin_va_end(ap); return p[1]; } int main(void) { return f(1,"a*"); }'
+check va-arg-typedef 1 'typedef long T; int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); T x=__builtin_va_arg(ap,T); __builtin_va_end(ap); return x==4294967297L; } int main(void) { return f(1,4294967297L); }'
+check va-arg-const-type 42 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,const int); __builtin_va_end(ap); return x; } int main(void) { return f(1,42); }'
+check va-arg-const-record 42 'struct S { int x; }; int take(struct S s) { return s.x; } int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,const struct S); int y=__builtin_va_arg(ap,const struct S).x; int z=take(__builtin_va_arg(ap,const struct S)); struct S w; w=__builtin_va_arg(ap,const struct S); __builtin_va_end(ap); return s.x+y+z+w.x; } int main(void) { struct S a={10}; struct S b={11}; struct S c={12}; struct S d={9}; return f(4,a,b,c,d); }'
+check va-copy-independent 42 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_list copy; __builtin_va_start(ap,n); int a=__builtin_va_arg(ap,int); __builtin_va_copy(copy,ap); int b=__builtin_va_arg(ap,int); int c=__builtin_va_arg(copy,int); __builtin_va_end(ap); __builtin_va_end(copy); return a+b+c; } int main(void) { return f(2,2,20); }'
+check va-copy-stack-cursor 42 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_list copy; __builtin_va_start(ap,n); for (int i=0;i<6;++i) __builtin_va_arg(ap,int); __builtin_va_copy(copy,ap); int a=__builtin_va_arg(ap,int); int b=__builtin_va_arg(copy,int); __builtin_va_end(ap); __builtin_va_end(copy); return a+b; } int main(void) { return f(7,1,2,3,4,5,6,21); }'
+check va-start-reinitialize 42 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int a=__builtin_va_arg(ap,int); __builtin_va_end(ap); __builtin_va_start(ap,n); int b=__builtin_va_arg(ap,int); __builtin_va_end(ap); return a+b; } int main(void) { return f(1,21); }'
+check va-list-forward-parameter 42 'int take(__builtin_va_list ap) { return __builtin_va_arg(ap,int); } int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int a=take(ap); int b=take(ap); __builtin_va_end(ap); return a+b; } int main(void) { return f(2,20,22); }'
+check va-list-pointer 42 'int take(__builtin_va_list *ap) { return __builtin_va_arg(*ap,int); } int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=take(&ap); __builtin_va_end(ap); return x; } int main(void) { return f(1,42); }'
+check va-start-after-call 42 'int clobber(int a,int b,int c,int d,int e,int f) { return a+b+c+d+e+f; } int f(int n, ...) { __builtin_va_list ap; clobber(1,2,3,4,5,6); __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return x; } int main(void) { return f(1,42); }'
+check va-arg-in-call 42 'int id(int x) { return x; } int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=id(__builtin_va_arg(ap,int)); __builtin_va_end(ap); return x; } int main(void) { return f(1,42); }'
+check va-arg-unevaluated 1 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int size=sizeof(__builtin_va_arg(ap,int)); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return size==4 && x==42; } int main(void) { return f(1,42); }'
+check va-arg-struct-registers 42 'struct S { long a,b; }; int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } int main(void) { struct S s={10,20}; return f(2,s,12); }'
+check va-arg-large-struct 42 'struct S { long a,b,c; }; int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+s.c+x; } int main(void) { struct S s={10,20,5}; return f(2,s,7); }'
+check va-arg-register-rollback 42 'struct S { long a,b; }; int f(int a,int b,int c,int d,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } int main(void) { struct S s={10,20}; return f(1,2,3,4,5,s,12); }'
+check va-arg-fixed-record-rollback 42 'struct S { long a,b; }; int f(int a,int b,int c,int d,int e,struct S s,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } int main(void) { struct S s={10,20}; return f(1,2,3,4,5,s,6,12); }'
+check va-arg-fixed-record-registers 42 'struct S { long a,b; }; int f(struct S s,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } int main(void) { struct S s={10,20}; return f(s,1,12); }'
+check va-arg-fixed-record-memory 42 'struct S { long a,b,c; }; int f(struct S s,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+s.c+x; } int main(void) { struct S s={10,20,5}; return f(s,1,7); }'
+check va-arg-small-record 42 'struct S { char a[3]; }; int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); __builtin_va_end(ap); return s.a[0]+s.a[1]+s.a[2]; } int main(void) { struct S s={{10,20,12}}; return f(1,s); }'
+check va-arg-union 42 'union U { long x; char c; }; int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); union U u=__builtin_va_arg(ap,union U); __builtin_va_end(ap); return u.x; } int main(void) { union U u={.x=42}; return f(1,u); }'
+check va-arg-member-expression 42 'struct S { int x; }; int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,struct S).x; __builtin_va_end(ap); return x; } int main(void) { struct S s={42}; return f(1,s); }'
+check va-arg-aggregate-materialization 42 'struct S { int x; }; int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S a=__builtin_va_arg(ap,struct S); struct S b=__builtin_va_arg(ap,struct S); __builtin_va_end(ap); return a.x+b.x; } int main(void) { struct S a={20}; struct S b={22}; return f(2,a,b); }'
+check va-arg-memory-return 42 'struct S { long a,b,c; }; struct S f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s={__builtin_va_arg(ap,long),__builtin_va_arg(ap,long),__builtin_va_arg(ap,long)}; __builtin_va_end(ap); return s; } int main(void) { struct S s=f(3,10L,20L,12L); return s.a+s.b+s.c; }'
+check va-builtins-evaluate-once 1 'struct H { __builtin_va_list ap; }; struct H *get(struct H *h,int *n) { ++*n; return h; } int f(int n, ...) { struct H a; struct H b; int count=0; __builtin_va_start(get(&a,&count)->ap,n); __builtin_va_copy(get(&b,&count)->ap,get(&a,&count)->ap); int x=__builtin_va_arg(get(&b,&count)->ap,int); __builtin_va_end(get(&a,&count)->ap); __builtin_va_end(get(&b,&count)->ap); return count==6 && x==42; } int main(void) { return f(1,42); }'
+check va-list-libc-forward 1 'int vsprintf(char *s,const char *fmt,__builtin_va_list ap); int format(char *s,const char *fmt, ...) { __builtin_va_list ap; __builtin_va_start(ap,fmt); int n=vsprintf(s,fmt,ap); __builtin_va_end(ap); return n; } int main(void) { char s[16]; return format(s,"%s:%d","x",42)==4 && s[0]==120 && s[1]==58 && s[2]==52 && s[3]==50; }'
+check_error va-start-nonvariadic 'int f(int n) { __builtin_va_list ap; __builtin_va_start(ap,n); return 0; }' '1:38: error: va_start requires a variadic function'
+check_error va-start-wrong-parameter 'int f(int a,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,a); return 0; }' '1:71: error: va_start requires the last fixed parameter'
+check_error va-start-expression 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n+1); return 0; }' '1:66: error: va_start requires the last fixed parameter'
+check_error va-start-non-list 'int f(int n, ...) { int x; __builtin_va_start(x,n); return 0; }' '1:47: error: expect va_list argument'
+check_error va-arg-non-list 'int f(void) { return __builtin_va_arg(0,int); }' '1:39: error: expect va_list argument'
+check_error va-copy-source-non-list 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_copy(ap,0); return 0; }' '1:64: error: expect va_list argument'
+check_error va-copy-destination-non-list 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_copy(0,ap); return 0; }' '1:61: error: expect va_list argument'
+check_error va-end-non-list 'int f(void) { __builtin_va_end(0); return 0; }' '1:32: error: expect va_list argument'
+check_error va-arg-invalid-void 'int f(int n, ...) { __builtin_va_list ap; return __builtin_va_arg(ap,void); }' '1:50: error: va_arg requires a complete object type other than an array'
+check_error va-arg-invalid-int 'int f(int n, ...) { __builtin_va_list ap; return __builtin_va_arg(ap,int[2]); }' '1:50: error: va_arg requires a complete object type other than an array'
+check_error va-arg-invalid-struct-Missing 'int f(int n, ...) { __builtin_va_list ap; return __builtin_va_arg(ap,struct Missing); }' '1:50: error: va_arg requires a complete object type other than an array'
+check_error va-arg-unpromoted-char 'int f(int n, ...) { __builtin_va_list ap; return __builtin_va_arg(ap,char); }' '1:50: error: va_arg type is changed by default argument promotions'
+check_error va-arg-unpromoted-unsigned-char 'int f(int n, ...) { __builtin_va_list ap; return __builtin_va_arg(ap,unsigned char); }' '1:50: error: va_arg type is changed by default argument promotions'
+check_error va-arg-unpromoted-short 'int f(int n, ...) { __builtin_va_list ap; return __builtin_va_arg(ap,short); }' '1:50: error: va_arg type is changed by default argument promotions'
+check_error va-arg-unpromoted-unsigned-short 'int f(int n, ...) { __builtin_va_list ap; return __builtin_va_arg(ap,unsigned short); }' '1:50: error: va_arg type is changed by default argument promotions'
+check_error va-arg-unpromoted-_Bool 'int f(int n, ...) { __builtin_va_list ap; return __builtin_va_arg(ap,_Bool); }' '1:50: error: va_arg type is changed by default argument promotions'
+check_error va-arg-const-list 'int f(int n, ...) { const __builtin_va_list ap={0}; return __builtin_va_arg(ap,int); }' '1:77: error: va_list argument is const-qualified'
+check_error va-arg-pointer-to-array 'int f(int n, ...) { __builtin_va_list ap; return __builtin_va_arg(&ap,int); }' '1:67: error: expect va_list argument'
+check_error va-arg-not-lvalue 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_arg(ap,int)=1; return 0; }' '1:67: error: invalid assignment target'
+check_error va-arg-address 'int f(int n, ...) { __builtin_va_list ap; int *p=&__builtin_va_arg(ap,int); return 0; }' '1:50: error: invalid address-of target'
+
+# Exercise the public header through an external preprocessor.
+cat > "$WORK_DIR/stdarg-header.c" <<'EOF'
+#define __need___va_list
+#include <stdarg.h>
+#include <stdarg.h>
+#include <stdarg.h>
+int sum(int n, ...) {
+    va_list ap;
+    va_list copy;
+    va_start(ap, n);
+    va_copy(copy, ap);
+    int result = 0;
+    for (int i = 0; i < n; ++i) result += va_arg(copy, int);
+    va_end(copy);
+    va_end(ap);
+    return result;
+}
+int main(void) { return sum(8, 1, 2, 3, 4, 5, 6, 7, 14); }
+EOF
+"$CC" -std=c11 -E -P -nostdinc -I"$SCRIPT_DIR/include" \
+    "$WORK_DIR/stdarg-header.c" -o "$WORK_DIR/stdarg-header.i"
+check va-stdarg-header 42 "$(cat "$WORK_DIR/stdarg-header.i")"
+
+# ABI checks compile the other translation unit with the host compiler.
+if ((compare)); then
+    check va-abi-scalar 1 'int inspect(int n, ...); int main(void) { char c=-1; unsigned short s=65535; int x=42; return inspect(9,c,s,&x,18446744073709551615UL,1,2,3,4,5); }' \
+        'int inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int a=__builtin_va_arg(ap,int); int b=__builtin_va_arg(ap,int); int *p=__builtin_va_arg(ap,int *); unsigned long l=__builtin_va_arg(ap,unsigned long); int sum=0; for (int i=0;i<5;++i) sum+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return a==-1 && b==65535 && *p==42 && l==18446744073709551615UL && sum==15; } ' "$CC"
+    check va-abi-scalar-reverse 1 'int inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int a=__builtin_va_arg(ap,int); int b=__builtin_va_arg(ap,int); int *p=__builtin_va_arg(ap,int *); unsigned long l=__builtin_va_arg(ap,unsigned long); int sum=0; for (int i=0;i<5;++i) sum+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return a==-1 && b==65535 && *p==42 && l==18446744073709551615UL && sum==15; } ' \
+        'int inspect(int n, ...); int main(void) { char c=-1; unsigned short s=65535; int x=42; return inspect(9,c,s,&x,18446744073709551615UL,1,2,3,4,5); }' "$CC"
+    check va-abi-record-rollback 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,12); }' \
+        'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' "$CC"
+    check va-abi-record-rollback-reverse 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' \
+        'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,12); }' "$CC"
+    check va-abi-memory-return 42 'struct S { long a,b,c; }; struct S inspect(int n, ...); int main(void) { struct S s={10,20,5}; struct S r=inspect(2,s,7); return r.a+r.b+r.c; }' \
+        'struct S { long a,b,c; }; struct S inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); s.c+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s; } ' "$CC"
+    check va-abi-memory-return-reverse 42 'struct S { long a,b,c; }; struct S inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); s.c+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s; } ' \
+        'struct S { long a,b,c; }; struct S inspect(int n, ...); int main(void) { struct S s={10,20,5}; struct S r=inspect(2,s,7); return r.a+r.b+r.c; }' "$CC"
+    check va-abi-fixed-stack 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,6,12); }' \
+        'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' "$CC"
+    check va-abi-fixed-stack-reverse 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' \
+        'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,6,12); }' "$CC"
+    check va-abi-list-from-host 42 'int read(__builtin_va_list ap) { return __builtin_va_arg(ap,int); } ' \
+        'int read(__builtin_va_list ap); int collect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int sum=0; for (int i=0;i<n;++i) sum+=read(ap); __builtin_va_end(ap); return sum; } int main(void) { return collect(8,1,2,3,4,5,6,7,14); }' "$CC"
+    check va-abi-list-to-host 42 'int read(__builtin_va_list ap); int collect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int sum=0; for (int i=0;i<n;++i) sum+=read(ap); __builtin_va_end(ap); return sum; } int main(void) { return collect(8,1,2,3,4,5,6,7,14); }' \
+        'int read(__builtin_va_list ap) { return __builtin_va_arg(ap,int); } ' "$CC"
+    check va-abi-forward-xmm 1 'int vsprintf(char *s,const char *fmt,__builtin_va_list ap); int format(char *s,const char *fmt, ...) { __builtin_va_list ap; __builtin_va_start(ap,fmt); int n=vsprintf(s,fmt,ap); __builtin_va_end(ap); return n; }' \
+        'int format(char *s,const char *fmt, ...); int main(void) { char s[64]; int n=format(s,"%.1f %d %.1f",3.5,42,7.5); return n==10 && s[0]==51 && s[4]==52 && s[7]==55; }' "$CC"
+    # One fixed parameter leaves an 8-byte hole before the save area. The area must still be 16-byte aligned so the host can reload an XMM slot with movaps.
+    check va-abi-forward-xmm-aligned 42 'int read128(__builtin_va_list ap); int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int r=read128(ap); __builtin_va_end(ap); return r; }' \
+        $'#include <xmmintrin.h>\n#include <stdarg.h>\nint f(int n, ...);\nint read128(va_list ap) { __m128 v = va_arg(ap, __m128); return (int)_mm_cvtss_f32(v) == 4 ? 42 : 0; }\nint main(void) { __m128 v = _mm_set_ps(1.f, 2.f, 3.f, 4.f); return f(1, v); }' "$CC"
+fi
+
+# Variadic functions retain fixed parameter types and promote trailing arguments.
+check variadic-fixed-only 42 'int f(int x, ...) { return x; } int main(void) { return f(42); }'
+check variadic-extra-arguments 42 'int f(int x, ...) { return x; } int main(void) { return f(42, 1, 2, 3); }'
+check variadic-many-fixed-parameters 42 'int f(int a, int b, int c, int d, int e, int f, int g, ...) { return a+b+c+d+e+f+g; } int main(void) { return f(1, 2, 3, 4, 5, 6, 21, 8, 9); }'
+check variadic-fixed-conversion 1 'int f(unsigned char x, ...) { return x == 255; } int main(void) { return f(511, 1); }'
+check variadic-prototype-definition 42 'int f(int, ...); int f(int x, ...) { return x; } int main(void) { return f(42, 1); }'
+check variadic-definition-prototype 42 'int f(int x, ...) { return x; } int f(int, ...); int main(void) { return f(42, 1); }'
+check variadic-const-parameter-compatible 42 'int f(const int, ...); int f(int x, ...) { return x; } int main(void) { return f(42); }'
+check variadic-typedef-parameter 42 'typedef int T; int f(T, ...); int f(T x, ...) { return x; } int main(void) { return f(42, 1); }'
+check variadic-static-function 42 'static int f(int, ...); static int f(int x, ...) { return x; } int main(void) { return f(42, 1); }'
+check variadic-array-parameter 42 'int f(int a[1], ...) { return a[0]; } int main(void) { int a[1] = {42}; return f(a, 1); }'
+check variadic-aggregate-fixed-and-extra 42 'struct S { int x; }; int f(struct S s, ...) { return s.x; } int main(void) { struct S s = {42}; return f(s, s); }'
+check variadic-recursion 42 'int f(int x, ...) { if (x == 0) return 42; return f(x - 1, 2, 3); } int main(void) { return f(3); }'
+check variadic-mixed-promotions 1 'int sprintf(char *s, const char *fmt, ...); int main(void) { char s[64]; char c = -1; unsigned char u = 255; short h = -2; unsigned short v = 65535; _Bool b = 42; enum E { A = 7 }; return sprintf(s, "%d %d %d %d %d %d", c, u, h, v, b, A) == 19 && s[0] == 45; }'
+check variadic-array-decay 1 'int sprintf(char *s, const char *fmt, ...); int main(void) { char s[8]; char text[3] = "hi"; return sprintf(s, "%s", text) == 2 && s[0] == 104 && s[1] == 105 && s[2] == 0; }'
+check variadic-long-arguments 1 'int sprintf(char *s, const char *fmt, ...); int main(void) { char s[64]; return sprintf(s, "%ld %llu", -4294967297L, 18446744073709551615ULL) == 32; }'
+check_error variadic-no-fixed-parameter 'int f(...);' '1:7: error: expect parameter before '"'"'...'"'"''
+check_error variadic-definition-no-fixed-parameter 'int f(...) { return 0; }' '1:7: error: expect parameter before '"'"'...'"'"''
+check_error variadic-void-parameter 'int f(void, ...);' '1:11: error: parameter has void type'
+check_error variadic-not-last 'int f(int x, ..., int y);' '1:17: error: expect '"'"')'"'"''
+check_error variadic-trailing-comma 'int f(int x, ...,);' '1:17: error: expect '"'"')'"'"''
+check_error variadic-repeated-ellipsis 'int f(int x, ..., ...);' '1:17: error: expect '"'"')'"'"''
+check_error variadic-missing-comma 'int f(int x ...);' '1:13: error: expect '"'"')'"'"''
+check_error variadic-unnamed-definition 'int f(int, ...) { return 0; }' '1:7: error: expect parameter name in function definition'
+check_error variadic-too-few-arguments 'int f(int, int, ...); int main(void) { return f(1); }' '1:47: error: wrong number of arguments to function '"'"'f'"'"''
+check_error variadic-no-arguments 'int f(int, ...); int main(void) { return f(); }' '1:42: error: wrong number of arguments to function '"'"'f'"'"''
+check_error variadic-fixed-type-mismatch 'int f(int *, ...); int main(void) { return f(1, 2); }' '1:46: error: incompatible argument type'
+check_error variadic-extra-void 'void g(void); int f(int, ...); int main(void) { return f(1, g()); }' '1:61: error: void expression used as a value'
+check_error variadic-conflicts-with-fixed 'int f(int, ...); int f(int);' '1:22: error: conflicting declaration of function '"'"'f'"'"''
+check_error variadic-conflicts-with-fixed-reverse 'int f(int); int f(int, ...);' '1:17: error: conflicting declaration of function '"'"'f'"'"''
+check_error variadic-conflicts-with-no-prototype 'int f(int, ...); int f();' '1:22: error: conflicting declaration of function '"'"'f'"'"''
+check_error variadic-conflicts-with-no-prototype-reverse 'int f(); int f(int, ...);' '1:14: error: conflicting declaration of function '"'"'f'"'"''
+check_error variadic-conflicting-fixed-count 'int f(int, ...); int f(int, int, ...);' '1:22: error: conflicting declaration of function '"'"'f'"'"''
+check_error variadic-conflicting-fixed-type 'int f(int, ...); int f(long, ...);' '1:22: error: conflicting declaration of function '"'"'f'"'"''
+check_error variadic-conflicts-with-empty-definition 'int f(int, ...); int f() { return 0; }' '1:22: error: conflicting declaration of function '"'"'f'"'"''
+
+# Host va_arg checks the types and values passed through the ellipsis.
+if ((compare)); then
+    check variadic-host-promotions 1 'int inspect(int tag, ...); int main(void) { char c = -1; unsigned short s = 65535; int a[1] = {42}; return inspect(7, c, s, a, 4294967297L, 4, 5, 6, 7); }' \
+        $'#include <stdarg.h>\nint inspect(int tag, ...) { va_list ap; va_start(ap, tag); int c=va_arg(ap,int); int s=va_arg(ap,int); int *p=va_arg(ap,int *); long l=va_arg(ap,long); int sum=0; for (int i=0;i<4;++i) sum+=va_arg(ap,int); va_end(ap); return tag==7 && c==-1 && s==65535 && *p==42 && l==4294967297L && sum==22; }' "$CC"
+fi
+
 # Block-scope compound literals are lvalues with enclosing-block lifetime.
 check compound-literal-int 42 'int main(void) { return (int){42}; }'
 check compound-literal-trailing-comma 42 'int main(void) { return (int){42,}; }'

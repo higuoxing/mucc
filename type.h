@@ -72,6 +72,7 @@ extern Type builtin_type_unsigned_long;
 extern Type builtin_type_long_long;
 extern Type builtin_type_unsigned_long_long;
 extern Type builtin_type_void;
+extern Type builtin_type_void_ptr;
 
 extern bool is_integer(const Type *type);
 extern bool is_record(const Type *type);
