@@ -3690,7 +3690,15 @@ check_error missing-identifier-after-int 'int main() { int; return 0; }' '1:17: 
 check_error declare-keyword 'int main() { int return; return 0; }' '1:18: error: expect variable name'
 check_error use-post-scope-shadow 'int main() { { int x = 1; } x = 42; return 0; }' '1:29: error: undeclared identifier'
 check_error redecl-after-nested 'int main() { int a; { int a; } int a; }' '1:36: error: duplicate local variable'
-check_error unsupported-comma-decl 'int main() { int a, b; return 0; }' "1:19: error: expect ';'"
+check local-comma-decl 42 'int main(void) { int a, b; a = 20; b = 22; return a + b; }'
+check local-comma-init 42 'int main(void) { int a = 20, b = a + 22; return b; }'
+check local-comma-pointer 42 'int main(void) { int a = 40, *p = &a; return *p + 2; }'
+check local-comma-array 42 'int main(void) { int a = 40, b[2] = {1, 1}; return a + b[0] + b[1]; }'
+check local-comma-struct 42 'struct S { int x; }; int main(void) { struct S left, right; left.x = 20; right.x = 22; return left.x + right.x; }'
+check local-comma-for 42 'int main(void) { int n = 0; for (int i = 1, j = 41; i < 2; i = i + 1) n = i + j; return n; }'
+check_error local-comma-duplicate 'int main(void) { int a, a; return 0; }' '1:25: error: duplicate local variable'
+check_error local-comma-missing-name 'int main(void) { int a,; return 0; }' '1:24: error: expect variable name'
+check_error local-comma-function 'int main(void) { int a, f(void); return 0; }' '1:26: error: function declarations in a declaration list are not supported yet'
 check discarded-comparison-expression 42 'int main() { int a = 42; a == 3; return a; }'
 check_error invalid-int-char-specifiers 'int main() { int char; return 0; }' '1:18: error: invalid combination of type specifiers'
 for kw in \

@@ -225,12 +225,16 @@ static void layout_stmt(StackLayout *layout, AstNode *stmt) {
     layout_expr(layout, stmt->d.while_stmt.cond);
     layout_stmt(layout, stmt->d.while_stmt.body);
     break;
-  case AST_FOR:
-    layout_stmt(layout, stmt->d.for_stmt.init);
+  case AST_FOR: {
+    AstNode *init;
+    /* 'for (int a, b;;)' is a chain of declarations in the init clause. */
+    for (init = stmt->d.for_stmt.init; init; init = init->next)
+      layout_stmt(layout, init);
     layout_expr(layout, stmt->d.for_stmt.cond);
     layout_expr(layout, stmt->d.for_stmt.post);
     layout_stmt(layout, stmt->d.for_stmt.body);
     break;
+  }
   case AST_DO:
     layout_stmt(layout, stmt->d.do_stmt.body);
     layout_expr(layout, stmt->d.do_stmt.cond);

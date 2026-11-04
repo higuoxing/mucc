@@ -873,13 +873,16 @@ static void codegen_stmt(const CodegenContext *ctx, AstNode *stmt) {
     break;
   }
   case AST_FOR: {
+    AstNode *init;
     int seq = label_seq++;
     CodegenContext loop_ctx = *ctx;
     loop_ctx.break_label = seq;
     loop_ctx.continue_label = seq;
 
-    if (stmt->d.for_stmt.init)
-      codegen_stmt(ctx, stmt->d.for_stmt.init);
+    /* 'for (int a = 1, b = 2;;)' initializes each declarator in order. */
+    for (init = stmt->d.for_stmt.init; init; init = init->next)
+      codegen_stmt(ctx, init);
+
     fprintf(out, ".L.begin.%d:\n", seq);
     if (stmt->d.for_stmt.cond) {
       /* An omitted condition is a nonzero constant: skip the test. */

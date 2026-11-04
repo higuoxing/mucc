@@ -1128,61 +1128,78 @@ static Initializer *parse_initializer(Parser *p) {
 
 /*
  * declaration:
- *   declaration-specifiers declarator ['=' initializer] ';'
- * Restricted to a single declarator.
+ *   declaration-specifiers init-declarator (',' init-declarator)* ';'
+ * init-declarator:
+ *   declarator
+ *   declarator '=' initializer
+ * (C11 6.7. Each declarator is applied to the shared specifier type, so
+ *  'int *a, b' declares a pointer and an int. The returned nodes are linked
+ *  through AstNode.next.)
  */
 static AstNode *parse_decl(Parser *p, bool allow_typedef) {
-  AstNode *decl;
+  AstNode *head = NULL;
+  AstNode **tail = &head;
   Token loc = p->current;
-  Token name;
-  Type *type;
+  Type *base;
   StorageClass storage_class;
 
-  type = parse_declspecs(p, &storage_class, NULL);
+  base = parse_declspecs(p, &storage_class, NULL);
   if (storage_class == STORAGE_TYPEDEF) {
     if (!allow_typedef)
       error_at(p, loc, "typedef is not allowed in a for initializer");
-    return parse_typedef_declarators(p, type);
+    return parse_typedef_declarators(p, base);
   }
   if (storage_class == STORAGE_STATIC && !allow_typedef)
     error_at(p, loc, "static is not allowed in a for initializer");
   if (storage_class == STORAGE_EXTERN && !allow_typedef)
     error_at(p, loc, "extern is not allowed in a for initializer");
-  if ((is_record(type) || type->kind == TYPE_ENUM) &&
+  if ((is_record(base) || base->kind == TYPE_ENUM) &&
       p->current.kind == TOKEN_SEMICOLON) {
-    decl = new_ast_node(p, AST_DECL);
+    AstNode *decl = new_ast_node(p, AST_DECL);
     parser_advance(p);
     return decl;
   }
-  type = parse_declarator(p, type, &name);
-  if (type->kind == TYPE_VOID)
-    error_at(p, name.kind == TOKEN_IDENTIFIER ? name : p->current,
-             "variable has void type");
 
-  if (name.kind != TOKEN_IDENTIFIER)
-    error_at(p, name, "expect variable name");
+  for (;;) {
+    Token name;
+    Type *type = parse_declarator(p, base, &name);
+    AstNode *decl;
 
-  if (storage_class == STORAGE_STATIC)
-    error_at(p, name, "static local variables are not supported yet");
-  if (storage_class == STORAGE_EXTERN)
-    error_at(p, name, "block-scope extern declarations are not supported yet");
+    if (type->kind == TYPE_VOID)
+      error_at(p, name.kind == TOKEN_IDENTIFIER ? name : p->current,
+               "variable has void type");
+    if (name.kind != TOKEN_IDENTIFIER)
+      error_at(p, name, "expect variable name");
+    if (storage_class == STORAGE_STATIC)
+      error_at(p, name, "static local variables are not supported yet");
+    if (storage_class == STORAGE_EXTERN)
+      error_at(p, name,
+               "block-scope extern declarations are not supported yet");
+    if (p->current.kind == TOKEN_LPAREN)
+      parse_error(p, "function declarations in a declaration list are not "
+                     "supported yet");
 
-  decl = new_ast_node(p, AST_DECL);
-  decl->loc = name;
-  sema_check_variable_name(p, name, false);
-  decl->d.decl.var = new_variable(p, name, type);
+    decl = new_ast_node(p, AST_DECL);
+    decl->loc = name;
+    sema_check_variable_name(p, name, false);
+    decl->d.decl.var = new_variable(p, name, type);
 
-  if (p->current.kind == TOKEN_ASSIGN) {
+    if (p->current.kind == TOKEN_ASSIGN) {
+      parser_advance(p);
+      decl->d.decl.init = sema_initialize_variable(p, decl->d.decl.var, name,
+                                                   parse_initializer(p));
+    }
+    if (type_size(decl->d.decl.var->type) < 0)
+      error_at(p, name, "variable has incomplete type");
+
+    *tail = decl;
+    tail = &decl->next;
+    if (p->current.kind != TOKEN_COMMA)
+      break;
     parser_advance(p);
-    decl->d.decl.init = sema_initialize_variable(p, decl->d.decl.var, name,
-                                                 parse_initializer(p));
   }
-  if (type_size(decl->d.decl.var->type) < 0)
-    error_at(p, name, "variable has incomplete type");
-
   parse_semicolon(p);
-
-  return decl;
+  return head;
 }
 
 /*
@@ -1633,7 +1650,9 @@ static AstNode *parse_compound_stmt(Parser *p) {
       parse_error(p, "expect '}'");
 
     *tail = parse_stmt(p, /*allow_decl=*/true);
-    tail = &(*tail)->next;
+    /* A declaration with several names is a chain of AST_DECL nodes. */
+    while (*tail)
+      tail = &(*tail)->next;
   }
 
   parse_expect(p, TOKEN_RBRACE, "expect '}'");
