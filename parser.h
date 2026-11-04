@@ -19,6 +19,7 @@
 #ifndef _PARSER_H_
 #define _PARSER_H_
 
+#include "error.h"
 #include "lexer.h"
 #include "type.h"
 
@@ -405,11 +406,21 @@ typedef struct AstNode {
   } d;
 } AstNode;
 
-/* Shared diagnostics; error_at does not alter parser token state. */
-extern void error_at(Parser *p, Token loc, const char *fmt, ...)
-    __attribute__((format(printf, 3, 4), noreturn));
-extern void parse_error(Parser *p, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3), noreturn));
+/*
+ * error_at reports at an explicit token and does not alter parser state.
+ * parse_error reports at the current token. Both exit through error_at_loc.
+ * The extra exit keeps that obvious to the host compiler.
+ */
+#define error_at(p, loc, ...)                                                  \
+  do {                                                                         \
+    error_at_loc((p)->lexer.filename, (loc), __VA_ARGS__);                     \
+    exit(1);                                                                   \
+  } while (0)
+#define parse_error(p, ...)                                                    \
+  do {                                                                         \
+    error_at_loc((p)->lexer.filename, (p)->current, __VA_ARGS__);              \
+    exit(1);                                                                   \
+  } while (0)
 
 extern AstNode *parse_translation_unit(const char *filename,
                                        const char *source);

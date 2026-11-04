@@ -18,9 +18,9 @@
 
 #include <ctype.h>
 #include <limits.h>
-#include <stdio.h>
 #include <string.h>
 
+#include "error.h"
 #include "lexer.h"
 
 typedef struct {
@@ -129,8 +129,11 @@ void lexer_advance(Lexer *l) {
   }
 }
 
-static void lexer_error(Lexer *l, Token loc, const char *message)
-    __attribute__((noreturn));
+#define lexer_error(l, loc, message)                                           \
+  do {                                                                         \
+    error_at_loc((l)->filename, (loc), "%s", (message));                       \
+    exit(1);                                                                   \
+  } while (0)
 
 /*
  * Skip whitespace and comments (C11 6.4.9: each comment is replaced by one
@@ -174,12 +177,6 @@ void skip_whitespace(Lexer *l) {
 
     return;
   }
-}
-
-static void lexer_error(Lexer *l, Token loc, const char *message) {
-  fprintf(stderr, "%s:%d:%d: error: %s\n", l->filename, loc.line, loc.col,
-          message);
-  exit(1);
 }
 
 /*

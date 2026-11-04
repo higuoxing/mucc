@@ -17,7 +17,6 @@
  */
 
 #include <limits.h>
-#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -154,28 +153,6 @@ static void parser_init(Parser *p, const char *filename, const char *source) {
   p->current = lexer_next_token(&p->lexer);
   p->lookahead = lexer_next_token(&p->lexer);
   declare_builtins(p);
-}
-
-static void report_error(Parser *p, Token loc, const char *fmt, va_list ap) {
-  fprintf(stderr, "%s:%d:%d: error: ", p->lexer.filename, loc.line, loc.col);
-  vfprintf(stderr, fmt, ap);
-  fputc('\n', stderr);
-}
-
-void error_at(Parser *p, Token loc, const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  report_error(p, loc, fmt, ap);
-  va_end(ap);
-  exit(1);
-}
-
-void parse_error(Parser *p, const char *fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  report_error(p, p->current, fmt, ap);
-  va_end(ap);
-  exit(1);
 }
 
 static void parse_expect(Parser *p, TokenKind t, const char *msg) {

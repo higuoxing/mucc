@@ -62,14 +62,11 @@ typedef struct {
 
 static void layout_initializer(StackLayout *layout, Initializer *init);
 
-static void layout_error(StackLayout *layout, Token loc, const char *message)
-    __attribute__((noreturn));
-
-static void layout_error(StackLayout *layout, Token loc, const char *message) {
-  fprintf(stderr, "%s:%d:%d: error: %s\n", layout->filename, loc.line, loc.col,
-          message);
-  exit(1);
-}
+#define layout_error(layout, loc, message)                                     \
+  do {                                                                         \
+    error_at_loc((layout)->filename, (loc), "%s", (message));                  \
+    exit(1);                                                                   \
+  } while (0)
 
 static int layout_slot(StackLayout *layout, Type *type, Token loc) {
   int size = type_size(type);
