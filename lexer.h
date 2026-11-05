@@ -165,6 +165,11 @@ typedef struct {
   const char *cursor; /* Next byte to read. */
   /* The preprocessor treats '#' in this position as a directive. */
   bool at_bol;
+  /*
+   * Reading a directive: whitespace does not cross a newline, and running out
+   * of line reports TOKEN_EOF so the caller can end the directive.
+   */
+  bool in_directive;
 } Lexer;
 
 extern bool same_identifier(Token a, Token b);

@@ -181,7 +181,7 @@ typedef struct CaseList {
 } CaseList;
 
 typedef struct {
-  Preprocessor cpp;
+  Preprocessor pp;
   Token previous; /* Last consumed token, for missing-token diagnostics. */
   Token current;
   Token lookahead;

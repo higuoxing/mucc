@@ -110,7 +110,7 @@ static AstNode *new_expr(Parser *p, AstKind kind, Type *type) {
 static void parser_advance(Parser *p) {
   p->previous = p->current;
   p->current = p->lookahead;
-  p->lookahead = cpp_next_token(&p->cpp);
+  p->lookahead = pp_next_token(&p->pp);
 }
 
 static void enter_scope(Parser *p) { ++p->scope_depth; }
@@ -149,10 +149,10 @@ static void parser_init(Parser *p, const SourceFile *file,
   p->last_parameter = NULL;
   p->scope_depth = 0;
   p->loop_depth = 0;
-  cpp_init(&p->cpp, file, include_paths);
+  pp_init(&p->pp, file, include_paths);
   p->previous = (Token){0};
-  p->current = cpp_next_token(&p->cpp);
-  p->lookahead = cpp_next_token(&p->cpp);
+  p->current = pp_next_token(&p->pp);
+  p->lookahead = pp_next_token(&p->pp);
   declare_builtins(p);
 }
 

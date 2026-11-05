@@ -178,6 +178,7 @@ void lexer_init(Lexer *l, const SourceFile *file) {
   l->line = 1;
   l->col = 1;
   l->at_bol = true;
+  l->in_directive = false;
 }
 
 SourcePosition lexer_position(const Lexer *l) {
@@ -481,12 +482,25 @@ void lexer_skip_horizontal(Lexer *l) {
 Token lexer_next_token(Lexer *l) {
   Token tok;
 
-  skip_whitespace(l);
+  if (l->in_directive)
+    lexer_skip_horizontal(l);
+  else
+    skip_whitespace(l);
   tok = (Token){0};
   tok.start = l->cursor;
   tok.file = l->file;
   tok.line = l->line;
   tok.col = l->col;
+  if (l->in_directive) {
+    /*
+     * A directive ends at the newline, so horizontal whitespace only. Reaching
+     * the end of the line is reported as EOF for this one call.
+     */
+    if (*l->cursor == '\0' || *l->cursor == '\n' || *l->cursor == '\r') {
+      tok.kind = TOKEN_EOF;
+      return tok;
+    }
+  }
   if (*l->cursor == '\0') {
     tok.kind = TOKEN_EOF;
     return tok;

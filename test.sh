@@ -3934,10 +3934,58 @@ int main(void) { return 0; }' '1:10: error: empty include file name'
 check_error include-unterminated '#include "abc' '1:10: error: unterminated header name'
 check_error include-extra '#include "nope.h" extra
 int main(void) { return 0; }' '1:19: error: extra tokens at end of #include directive'
-check_error include-directive-unsupported '#define X 1
-int main(void) { return 0; }' "1:2: error: preprocessor directive 'define' is not supported yet"
+check_error include-directive-unsupported '#if 1
+int main(void) { return 0; }' "1:2: error: preprocessor directive 'if' is not supported yet"
 check_error include-directive-junk '# 123
 int main(void) { return 0; }' '1:3: error: expect preprocessor directive'
+
+# Object-like #define. The body is replayed wherever the name appears, and a
+# macro can name another macro, including one defined later.
+check define-object 42 '#define N 42
+int main(void) { return N; }'
+check define-in-function 42 '#define N 42
+int f(void) { return N; }
+int main(void) { return f(); }'
+check define-in-global-initializer 42 '#define N 42
+int x = N;
+int main(void) { return x; }'
+check define-in-expression 42 '#define N 6
+int main(void) { return N * 7; }'
+check define-nested 42 '#define A B
+#define B 42
+int main(void) { return A; }'
+check define-empty-body 42 '#define E
+int main(void) { return 42 E; }'
+check define-self-reference 42 '#define A A
+int main(void) { return 42; }'
+check define-mutual-reference 42 '#define A B
+#define B A
+int main(void) { return 42; }'
+check define-undefined-name 7 '#define N 42
+#undef N
+int main(void) { int N; N = 7; return N; }'
+check define-string-body 42 '#define S "x"
+int main(void) { return S[0] == 120 ? 42 : 0; }'
+
+check_error define-no-name '#define
+int main(void) { return 0; }' '1:8: error: expect macro name'
+check_error define-name-not-identifier '#define 1 2
+int main(void) { return 0; }' '1:9: error: expect macro name'
+check_error define-function-like '#define N(x) x
+int main(void) { return 0; }' \
+	    '1:10: error: function-like macros are not supported yet'
+check_error define-redefinition '#define N 1
+#define N 2
+int main(void) { return 0; }' "2:9: error: 'N' redefined"
+check_error define-undefined-identifier 'int main(void) { return N; }' \
+	    '1:25: error: undeclared identifier'
+# A body is expanded at the use site, but its tokens still carry the position
+# in the definition, so this reports where 'B' appears in the #define line.
+check_error define-forward-reference '#define A B
+int main(void) { return A; }
+#define B 42' '1:11: error: undeclared identifier'
+check_error undef-no-name '#undef
+int main(void) { return 0; }' '1:7: error: expect macro name'
 
 include_semi_name=include-diagnostic-file
 include_semi_input="$WORK_DIR/$include_semi_name.c"

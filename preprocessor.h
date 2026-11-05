@@ -29,6 +29,22 @@ typedef struct IncludeFrame {
   struct IncludeFrame *outer;
 } IncludeFrame;
 
+/* One active object-like macro: a replacement list of already-lexed tokens. */
+typedef struct Macro {
+  const char *name;
+  int len;
+  Vector tokens; /* The replacement list, in source order. */
+  /* Set while this macro is being expanded, which stops direct recursion. */
+  bool expanding;
+  struct Macro *next;
+} Macro;
+
+/* A cursor into one macro's replacement list, innermost last. */
+typedef struct {
+  Macro *macro; /* Not const: popping the frame clears macro->expanding. */
+  int index;    /* Next token of macro->tokens to replay. */
+} MacroFrame;
+
 /*
  * The parser asks for tokens here, never from the lexer. Directives are
  * consumed in this layer, so the parser sees only preprocessing tokens.
@@ -38,10 +54,12 @@ typedef struct {
   IncludeFrame *include_frames; /* Innermost first; NULL at the top level. */
   const Vector *include_paths;  /* char * directory names, in search order. */
   int include_depth;
+  Macro *macros;     /* Defined macros, most recent first. */
+  Vector expansions; /* MacroFrame, innermost last. */
 } Preprocessor;
 
-extern void cpp_init(Preprocessor *cpp, const SourceFile *file,
-                     const Vector *include_paths);
-extern Token cpp_next_token(Preprocessor *cpp);
+extern void pp_init(Preprocessor *pp, const SourceFile *file,
+                    const Vector *include_paths);
+extern Token pp_next_token(Preprocessor *pp);
 
 #endif
