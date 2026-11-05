@@ -20,7 +20,7 @@
 #define _PARSER_H_
 
 #include "error.h"
-#include "lexer.h"
+#include "preprocessor.h"
 #include "type.h"
 
 typedef struct AstNode AstNode;
@@ -181,7 +181,7 @@ typedef struct CaseList {
 } CaseList;
 
 typedef struct {
-  Lexer lexer;
+  Preprocessor cpp;
   Token previous; /* Last consumed token, for missing-token diagnostics. */
   Token current;
   Token lookahead;
@@ -406,23 +406,7 @@ typedef struct AstNode {
   } d;
 } AstNode;
 
-/*
- * error_at reports at an explicit token and does not alter parser state.
- * parse_error reports at the current token. Both exit through error_at_loc.
- * The extra exit keeps that obvious to the host compiler.
- */
-#define error_at(p, loc, ...)                                                  \
-  do {                                                                         \
-    error_at_loc((p)->lexer.filename, (loc), __VA_ARGS__);                     \
-    exit(1);                                                                   \
-  } while (0)
-#define parse_error(p, ...)                                                    \
-  do {                                                                         \
-    error_at_loc((p)->lexer.filename, (p)->current, __VA_ARGS__);              \
-    exit(1);                                                                   \
-  } while (0)
-
-extern AstNode *parse_translation_unit(const char *filename,
-                                       const char *source);
+extern AstNode *parse_translation_unit(const SourceFile *file,
+                                       const Vector *include_paths);
 
 #endif

@@ -64,7 +64,9 @@ static void layout_initializer(StackLayout *layout, Initializer *init);
 
 #define layout_error(layout, loc, message)                                     \
   do {                                                                         \
-    error_at_loc((layout)->filename, (loc), "%s", (message));                  \
+    const char *at_name = file_name((loc).file);                               \
+    error_at_loc(at_name ? at_name : (layout)->filename, (loc).line,           \
+                 (loc).col, "%s", (message));                                  \
     exit(1);                                                                   \
   } while (0)
 

@@ -18,10 +18,12 @@
 
 #include <ctype.h>
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "error.h"
 #include "lexer.h"
+#include "vector.h"
 
 typedef struct {
   const char *name;
@@ -98,16 +100,92 @@ bool same_identifier(Token a, Token b) {
   return a.len == b.len && strncmp(a.start, b.start, a.len) == 0;
 }
 
-void lexer_init(Lexer *l, const char *filename, const char *source) {
-  l->filename = filename;
-  l->source = source;
-  l->cursor = source;
-  l->line_start = source;
-  l->line = 1;
+/*
+ * Every opened buffer is recorded here so a diagnostic can turn the file id
+ * on a token back into a path. Files are never freed: tokens point into them
+ * until exit. A file's id is its one-based index in this table.
+ */
+static Vector source_files = {.data = NULL,
+                              .len = 0,
+                              .capacity = 0,
+                              .element_size = sizeof(SourceFile *)};
+
+SourceFile *new_source_file(const char *filename) {
+  FILE *stream;
+  SourceFile *file;
+  long len;
+  size_t bytes_read;
+  char *contents;
+
+  stream = fopen(filename, "rb");
+  if (!stream)
+    return NULL;
+  /*
+   * Only an unopenable file is recoverable, so an include search can try the
+   * next candidate. A file opened at this point must read completely.
+   */
+  if (fseek(stream, 0, SEEK_END) != 0) {
+    fclose(stream);
+    error_at_loc(filename, 0, 0, "failed to read file");
+    exit(1);
+  }
+  len = ftell(stream);
+  if (len < 0 || fseek(stream, 0, SEEK_SET) != 0) {
+    fclose(stream);
+    error_at_loc(filename, 0, 0, "failed to read file");
+    exit(1);
+  }
+  contents = malloc((size_t)len + 1);
+  if (!contents) {
+    fclose(stream);
+    error_at_loc(filename, 0, 0, "out of memory");
+    exit(1);
+  }
+  bytes_read = fread(contents, 1, (size_t)len, stream);
+  fclose(stream);
+  if (bytes_read != (size_t)len) {
+    error_at_loc(filename, 0, 0, "failed to read file");
+    exit(1);
+  }
+  contents[bytes_read] = '\0';
+
+  file = malloc(sizeof(*file));
+  if (!file) {
+    error_at_loc(filename, 0, 0, "out of memory");
+    exit(1);
+  }
+  file->name = filename;
+  file->contents = contents;
+  file->length = (int)bytes_read;
+  file->id = (int)source_files.len + 1;
+
+  if (!vector_push(&source_files, &file)) {
+    error_at_loc(filename, 0, 0, "out of memory");
+    exit(1);
+  }
+  return file;
 }
 
-int lexer_column(const Lexer *l) {
-  return (int)(l->cursor - l->line_start) + 1;
+const char *file_name(int file) {
+  if (file <= 0 || (size_t)file > source_files.len)
+    return NULL;
+  return ((SourceFile **)source_files.data)[file - 1]->name;
+}
+
+void lexer_init(Lexer *l, const SourceFile *file) {
+  l->file = file->id;
+  l->cursor = file->contents;
+  l->line = 1;
+  l->col = 1;
+  l->at_bol = true;
+}
+
+SourcePosition lexer_position(const Lexer *l) {
+  SourcePosition pos;
+  pos.file = l->file;
+  pos.line = l->line;
+  pos.col = l->col;
+  return pos;
 }
 
 void lexer_advance(Lexer *l) {
@@ -125,15 +203,12 @@ void lexer_advance(Lexer *l) {
     }
 
     l->line++;
-    l->line_start = l->cursor;
+    l->col = 1;
+    l->at_bol = true;
+  } else {
+    l->col++;
   }
 }
-
-#define lexer_error(l, loc, message)                                           \
-  do {                                                                         \
-    error_at_loc((l)->filename, (loc), "%s", (message));                       \
-    exit(1);                                                                   \
-  } while (0)
 
 /*
  * Skip whitespace and comments (C11 6.4.9: each comment is replaced by one
@@ -155,16 +230,13 @@ void skip_whitespace(Lexer *l) {
     }
 
     if (*l->cursor == '/' && l->cursor[1] == '*') {
-      Token loc = {.start = l->cursor,
-                   .len = 2,
-                   .line = l->line,
-                   .col = lexer_column(l)};
+      SourcePosition loc = lexer_position(l);
       /* Block comment: skip to the closing delimiter. */
       lexer_advance(l);
       lexer_advance(l);
       for (;;) {
         if (*l->cursor == '\0')
-          lexer_error(l, loc, "unterminated comment");
+          error_at(loc, "unterminated comment");
         if (*l->cursor == '*' && l->cursor[1] == '/') {
           lexer_advance(l);
           lexer_advance(l);
@@ -189,13 +261,13 @@ static unsigned read_int_suffix(Lexer *l, Token loc) {
          *l->cursor == 'L') {
     if (*l->cursor == 'u' || *l->cursor == 'U') {
       if (suffix & INT_SUFFIX_UNSIGNED)
-        lexer_error(l, loc, "invalid integer suffix");
+        error_at(loc, "invalid integer suffix");
       suffix |= INT_SUFFIX_UNSIGNED;
       lexer_advance(l);
     } else {
       char letter = *l->cursor;
       if (suffix & (INT_SUFFIX_LONG | INT_SUFFIX_LONG_LONG))
-        lexer_error(l, loc, "invalid integer suffix");
+        error_at(loc, "invalid integer suffix");
       lexer_advance(l);
       if (*l->cursor == letter) {
         suffix |= INT_SUFFIX_LONG_LONG;
@@ -206,7 +278,7 @@ static unsigned read_int_suffix(Lexer *l, Token loc) {
     }
   }
   if (isalnum((unsigned char)*l->cursor) || *l->cursor == '_')
-    lexer_error(l, loc, "invalid integer suffix");
+    error_at(loc, "invalid integer suffix");
   return suffix;
 }
 
@@ -234,17 +306,17 @@ static int read_escape(Lexer *l, Token loc) {
       lexer_advance(l);
     }
     if (value > 255)
-      lexer_error(l, loc, "character escape out of range");
+      error_at(loc, "character escape out of range");
     return value;
   }
   if (c == 'x') {
     int digit;
     lexer_advance(l);
     if (hex_digit((unsigned char)*l->cursor) < 0)
-      lexer_error(l, loc, "expect hexadecimal digit in character escape");
+      error_at(loc, "expect hexadecimal digit in character escape");
     while ((digit = hex_digit((unsigned char)*l->cursor)) >= 0) {
       if (value > (255 - digit) / 16)
-        lexer_error(l, loc, "character escape out of range");
+        error_at(loc, "character escape out of range");
       value = value * 16 + digit;
       lexer_advance(l);
     }
@@ -252,9 +324,8 @@ static int read_escape(Lexer *l, Token loc) {
   }
 
   if (c == '\0' || c == '\n' || c == '\r')
-    lexer_error(l, loc,
-                loc.start[0] == '"' ? "unterminated string literal"
-                                    : "unterminated character literal");
+    error_at(loc, loc.start[0] == '"' ? "unterminated string literal"
+                                      : "unterminated character literal");
   lexer_advance(l);
   switch (c) {
   case '\'':
@@ -280,10 +351,9 @@ static int read_escape(Lexer *l, Token loc) {
   case 'v':
     return '\v';
   default:
-    lexer_error(l, loc,
-                loc.start[0] == '"'
-                    ? "invalid escape sequence in string literal"
-                    : "invalid escape sequence in character literal");
+    error_at(loc, loc.start[0] == '"'
+                      ? "invalid escape sequence in string literal"
+                      : "invalid escape sequence in character literal");
   }
 }
 
@@ -295,9 +365,9 @@ static Token read_char_literal(Lexer *l, Token tok) {
   int value;
   lexer_advance(l);
   if (*l->cursor == '\'')
-    lexer_error(l, tok, "empty character literal");
+    error_at(tok, "empty character literal");
   if (*l->cursor == '\0' || *l->cursor == '\n' || *l->cursor == '\r')
-    lexer_error(l, tok, "unterminated character literal");
+    error_at(tok, "unterminated character literal");
 
   if (*l->cursor == '\\') {
     lexer_advance(l);
@@ -307,23 +377,23 @@ static Token read_char_literal(Lexer *l, Token tok) {
     lexer_advance(l);
   }
   if (*l->cursor == '\0' || *l->cursor == '\n' || *l->cursor == '\r')
-    lexer_error(l, tok, "unterminated character literal");
+    error_at(tok, "unterminated character literal");
   if (*l->cursor != '\'') {
     const char *end = l->cursor;
     while (*end && *end != '\n' && *end != '\r') {
       if (*end == '\'')
-        lexer_error(l, tok, "multi-character literals not supported");
+        error_at(tok, "multi-character literals not supported");
       if (*end == '\\' && end[1] && end[1] != '\n' && end[1] != '\r')
         ++end;
       ++end;
     }
-    lexer_error(l, tok, "unterminated character literal");
+    error_at(tok, "unterminated character literal");
   }
   lexer_advance(l);
 
   tok.kind = TOKEN_INT_LITERAL;
   tok.len = (int)(l->cursor - tok.start);
-  tok.int_literal_val = value < 128 ? value : value - 256;
+  tok.d.int_literal.val = value < 128 ? value : value - 256;
   return tok;
 }
 
@@ -337,19 +407,19 @@ static Token read_string_literal(Lexer *l, Token tok) {
   int length = 0;
   while (*end != '"') {
     if (*end == '\0' || *end == '\n' || *end == '\r')
-      lexer_error(l, tok, "unterminated string literal");
+      error_at(tok, "unterminated string literal");
     if (*end == '\\') {
       ++end;
       if (*end == '\0' || *end == '\n' || *end == '\r')
-        lexer_error(l, tok, "unterminated string literal");
+        error_at(tok, "unterminated string literal");
     }
     ++end;
   }
   if (end - tok.start >= INT_MAX)
-    lexer_error(l, tok, "string literal is too long");
-  tok.string_literal_val = malloc((size_t)(end - l->cursor));
-  if (!tok.string_literal_val)
-    lexer_error(l, tok, "out of memory");
+    error_at(tok, "string literal is too long");
+  tok.d.string_literal.val = malloc((size_t)(end - l->cursor));
+  if (!tok.d.string_literal.val)
+    error_at(tok, "out of memory");
 
   lexer_advance(l);
   while (l->cursor != end) {
@@ -361,33 +431,82 @@ static Token read_string_literal(Lexer *l, Token tok) {
       value = (unsigned char)*l->cursor;
       lexer_advance(l);
     }
-    tok.string_literal_val[length++] = (unsigned char)value;
+    tok.d.string_literal.val[length++] = (unsigned char)value;
   }
-  tok.string_literal_val[length++] = 0;
+  tok.d.string_literal.val[length++] = 0;
   lexer_advance(l);
 
   tok.kind = TOKEN_STRING_LITERAL;
   tok.len = (int)(l->cursor - tok.start);
-  tok.string_literal_len = length;
+  tok.d.string_literal.len = length;
   return tok;
 }
 
+/*
+ * Skip spaces and comments without crossing a newline. The preprocessor uses
+ * this between the parts of a directive, where a newline ends the directive.
+ */
+void lexer_skip_horizontal(Lexer *l) {
+  for (;;) {
+    char c = *l->cursor;
+    if (c == ' ' || c == '\t' || c == '\v' || c == '\f') {
+      lexer_advance(l);
+      continue;
+    }
+    if (c == '/' && l->cursor[1] == '/') {
+      while (*l->cursor != '\0' && *l->cursor != '\n' && *l->cursor != '\r')
+        lexer_advance(l);
+      continue;
+    }
+    if (c == '/' && l->cursor[1] == '*') {
+      SourcePosition loc = lexer_position(l);
+      lexer_advance(l);
+      lexer_advance(l);
+      for (;;) {
+        if (*l->cursor == '\0')
+          error_at(loc, "unterminated comment");
+        if (*l->cursor == '*' && l->cursor[1] == '/') {
+          lexer_advance(l);
+          lexer_advance(l);
+          break;
+        }
+        lexer_advance(l);
+      }
+      continue;
+    }
+    return;
+  }
+}
+
 Token lexer_next_token(Lexer *l) {
-  Token tok = {0};
+  Token tok;
 
   skip_whitespace(l);
-
-  tok.kind = TOKEN_UNKNOW;
+  tok = (Token){0};
   tok.start = l->cursor;
+  tok.file = l->file;
   tok.line = l->line;
-  tok.col = lexer_column(l);
-  tok.len = 1;
-
+  tok.col = l->col;
   if (*l->cursor == '\0') {
     tok.kind = TOKEN_EOF;
-    tok.len = 0;
     return tok;
   }
+  if (l->at_bol && *l->cursor == '#') {
+    /*
+     * '#' is not a C token, and this one starts a preprocessing directive.
+     * Hand it to the preprocessor, which reads the directive and then asks
+     * for the next token.
+     */
+    l->at_bol = false;
+    tok.kind = TOKEN_HASH;
+    tok.len = 1;
+    lexer_advance(l);
+    return tok;
+  }
+
+  l->at_bol = false;
+  tok.kind = TOKEN_UNKNOW;
+  tok.len = 1;
 
   switch (*l->cursor) {
   case '"':
@@ -649,18 +768,18 @@ Token lexer_next_token(Lexer *l) {
       digit = *l->cursor - '0';
 
       if (base == 8 && digit >= 8)
-        lexer_error(l, tok, "invalid digit in octal integer literal");
+        error_at(tok, "invalid digit in octal integer literal");
       if (int_literal_val > (UINT64_MAX - digit) / base)
-        lexer_error(l, tok,
-                    "integer literal out of range for 64-bit unsigned integer");
+        error_at(tok,
+                 "integer literal out of range for 64-bit unsigned integer");
       int_literal_val = int_literal_val * base + digit;
       lexer_advance(l);
     }
 
-    tok.int_literal_suffix = read_int_suffix(l, tok);
+    tok.d.int_literal.suffix = read_int_suffix(l, tok);
     tok.kind = TOKEN_INT_LITERAL;
     tok.len = (int)(l->cursor - tok.start);
-    tok.int_literal_val = int_literal_val;
+    tok.d.int_literal.val = int_literal_val;
     return tok;
   }
 

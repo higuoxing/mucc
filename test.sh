@@ -6,6 +6,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 
 CC="${CC:-gcc}"
 TEST_CC="${TEST_CC:-$SCRIPT_DIR/mucc}"
+TEST_CC_FLAGS=()
 TEST_KEEP_TMP="${TEST_KEEP_TMP:-0}"
 
 compare=0
@@ -63,7 +64,7 @@ function check() {
     local reference_code
 
     printf '%s' "$source" > "$input"
-    if "$TEST_CC" "$input" -o "$base.s" 2> "$base.compile.err"; then
+    if "$TEST_CC" "${TEST_CC_FLAGS[@]}" "$input" -o "$base.s" 2> "$base.compile.err"; then
 	:
     else
 	actual_code=$?
@@ -107,7 +108,7 @@ function check() {
     fi
 
     if ((compare)); then
-        if "$CC" -std=c11 -O0 "${reference_inputs[@]}" -o "$base.reference.out" > "$base.reference.compile.log" 2>&1; then
+        if "$CC" -std=c11 -O0 "${TEST_CC_FLAGS[@]}" "${reference_inputs[@]}" -o "$base.reference.out" > "$base.reference.compile.log" 2>&1; then
             :
         else
             reference_code=$?
@@ -146,7 +147,7 @@ function check_error() {
     local actual_code
 
     printf '%s' "$source" > "$input"
-    if "$TEST_CC" "$input" -o "$base.s" 2> "$base.err"; then
+    if "$TEST_CC" "${TEST_CC_FLAGS[@]}" "$input" -o "$base.s" 2> "$base.err"; then
 	actual_code=0
     else
 	actual_code=$?
@@ -3874,6 +3875,104 @@ check_error ptr-plus-ptr \
 	    '1:62: error: invalid operands to binary +'
 check_error int-minus-ptr 'int main() { int a; int *p; p = &a; return 1 - p; }' \
 	    '1:46: error: invalid operands to binary -'
+
+# #include. Quoted names search the including file's directory, then -I.
+# Angle names search only -I. The reference compiler sees the same -I flags.
+mkdir -p "$WORK_DIR/inc1" "$WORK_DIR/inc2" "$WORK_DIR/sub"
+echo 'int inc(void) { return 40; }' > "$WORK_DIR/inc.h"
+echo 'typedef int T;' > "$WORK_DIR/type.h"
+echo 'int answer(void) { return 42; }' > "$WORK_DIR/nested-b.h"
+echo '#include "nested-b.h"' > "$WORK_DIR/nested-a.h"
+echo 'int nested(void) { return 42; }' > "$WORK_DIR/sub/b.h"
+echo '#include "b.h"' > "$WORK_DIR/sub/a.h"
+echo 'int origin(void) { return 40; }' > "$WORK_DIR/origin.h"
+echo 'int origin(void) { return 2; }' > "$WORK_DIR/inc2/origin.h"
+echo 'int which(void) { return 11; }' > "$WORK_DIR/inc1/which.h"
+echo 'int which(void) { return 31; }' > "$WORK_DIR/inc2/which.h"
+echo > "$WORK_DIR/semi.h"
+echo 'int x' >> "$WORK_DIR/semi.h"
+echo '#include "recurse.h"' > "$WORK_DIR/recurse.h"
+
+check include-quote 42 '#include "inc.h"
+int main(void) { return inc() + 2; }'
+check include-indented 42 '  #include "inc.h"
+int main(void) { return inc() + 2; }'
+check include-comment 42 '/* note */ #include "inc.h"
+int main(void) { return inc() + 2; }'
+check include-spaced 42 '# include /* note */ "inc.h"
+int main(void) { return inc() + 2; }'
+check include-block-comment 42 '#include /* note
+*/ "inc.h"
+int main(void) { return inc() + 2; }'
+check include-null-directive 42 '#
+int main(void) { return 42; }'
+check include-nested 42 '#include "nested-a.h"
+int main(void) { return answer(); }'
+check include-neighbor 42 '#include "sub/a.h"
+int main(void) { return nested(); }'
+check include-typedef 42 '#include "type.h"
+int main(void) { T x; x = 42; return x; }'
+
+TEST_CC_FLAGS=(-I "$WORK_DIR/inc2")
+check include-angle 2 '#include <origin.h>
+int main(void) { return origin(); }'
+check include-quote-before-i 42 '#include "origin.h"
+int main(void) { return origin() + 2; }'
+TEST_CC_FLAGS=(-I"$WORK_DIR/inc1" -I "$WORK_DIR/inc2")
+check include-i-order 11 '#include <which.h>
+int main(void) { return which(); }'
+TEST_CC_FLAGS=()
+
+check_error include-missing '#include "missing-header.h"
+int main(void) { return 0; }' "1:10: error: cannot find include file 'missing-header.h'"
+check_error include-expects-name '#include
+int main(void) { return 0; }' '1:9: error: #include expects a header name'
+check_error include-macro-name '#include FOO
+int main(void) { return 0; }' '1:10: error: #include expects a header name'
+check_error include-empty '#include ""
+int main(void) { return 0; }' '1:10: error: empty include file name'
+check_error include-unterminated '#include "abc' '1:10: error: unterminated header name'
+check_error include-extra '#include "nope.h" extra
+int main(void) { return 0; }' '1:19: error: extra tokens at end of #include directive'
+check_error include-directive-unsupported '#define X 1
+int main(void) { return 0; }' "1:2: error: preprocessor directive 'define' is not supported yet"
+check_error include-directive-junk '# 123
+int main(void) { return 0; }' '1:3: error: expect preprocessor directive'
+
+include_semi_name=include-diagnostic-file
+include_semi_input="$WORK_DIR/$include_semi_name.c"
+echo '#include "semi.h"' > "$include_semi_input"
+echo 'int main(void) { return 0; }' >> "$include_semi_input"
+if "$TEST_CC" "$include_semi_input" -o "$WORK_DIR/$include_semi_name.s" 2> "$WORK_DIR/$include_semi_name.err"; then
+    fail "$include_semi_name: expected a diagnostic"
+fi
+echo "$WORK_DIR/semi.h:2:6: error: expect ';'" > "$WORK_DIR/$include_semi_name.expected"
+if ! cmp -s "$WORK_DIR/$include_semi_name.expected" "$WORK_DIR/$include_semi_name.err"; then
+    printf 'Expected diagnostic:\n' >&2
+    cat "$WORK_DIR/$include_semi_name.expected" >&2
+    printf 'Actual diagnostic:\n' >&2
+    cat "$WORK_DIR/$include_semi_name.err" >&2
+    fail "$include_semi_name: unexpected diagnostic"
+fi
+rejected=$((rejected + 1))
+printf '[PASS] %s (rejected with expected diagnostic)\n' "$include_semi_name"
+
+include_recurse_name=include-nesting
+include_recurse_input="$WORK_DIR/$include_recurse_name.c"
+echo '#include "recurse.h"' > "$include_recurse_input"
+if "$TEST_CC" "$include_recurse_input" -o "$WORK_DIR/$include_recurse_name.s" 2> "$WORK_DIR/$include_recurse_name.err"; then
+    fail "$include_recurse_name: expected a diagnostic"
+fi
+echo "$WORK_DIR/recurse.h:1:10: error: include nesting is too deep" > "$WORK_DIR/$include_recurse_name.expected"
+if ! cmp -s "$WORK_DIR/$include_recurse_name.expected" "$WORK_DIR/$include_recurse_name.err"; then
+    printf 'Expected diagnostic:\n' >&2
+    cat "$WORK_DIR/$include_recurse_name.expected" >&2
+    printf 'Actual diagnostic:\n' >&2
+    cat "$WORK_DIR/$include_recurse_name.err" >&2
+    fail "$include_recurse_name: unexpected diagnostic"
+fi
+rejected=$((rejected + 1))
+printf '[PASS] %s (rejected with expected diagnostic)\n' "$include_recurse_name"
 
 printf 'All %d tests passed (%d execution, %d rejection, %d compile-only).\n' \
        "$((passed + rejected + compiled))" "$passed" "$rejected" "$compiled"

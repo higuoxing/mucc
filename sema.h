@@ -52,7 +52,7 @@ extern void sema_check_global_variables(Parser *p);
 extern void declare_typedef(Parser *p, Token name, Type *type);
 extern Enum *declare_enumerator(Parser *p, Token name, AstNode *initializer,
                                 int64_t next_value);
-extern AstNode *sema_enumerator_expr(Parser *p, Enum *enumerator, Token loc);
+extern AstNode *sema_enumerator_expr(Enum *enumerator, Token loc);
 extern int64_t eval_const_expr(Parser *p, AstNode *expr);
 extern void check_calls(Parser *p);
 extern void check_gotos(Parser *p);
@@ -61,25 +61,25 @@ extern Function *declare_function(Parser *p, Token name, Type *return_type,
                                   Type **param_types, int nparams,
                                   bool has_prototype, bool is_variadic,
                                   bool definition, bool is_static);
-extern AstNode *sema_switch_condition(Parser *p, AstNode *expr);
-extern AstNode *sema_check_condition(Parser *p, AstNode *expr);
+extern AstNode *sema_switch_condition(AstNode *expr);
+extern AstNode *sema_check_condition(AstNode *expr);
 extern AstNode *sema_subscript(Parser *p, AstNode *base, AstNode *index,
                                Token loc);
-extern AstNode *sema_member(Parser *p, AstNode *base, Token op, Token name);
-extern void sema_check_nonvoid_expr(Parser *p, AstNode *expr);
+extern AstNode *sema_member(AstNode *base, Token op, Token name);
+extern void sema_check_nonvoid_expr(AstNode *expr);
 extern AstNode *sema_convert_expr(Parser *p, Type *target, AstNode *expr,
                                   Token loc, const char *context);
-extern AstNode *sema_cast(Parser *p, Type *target, AstNode *expr, Token loc);
+extern AstNode *sema_cast(Type *target, AstNode *expr, Token loc);
 extern void sema_check_call(Parser *p, Function *func, AstNode *call,
                             int nargs);
 extern AstNode *sema_builtin_va(Parser *p, AstKind kind, AstNode *first,
                                 AstNode *second, Type *type, Token loc);
 extern void sema_check_return(Parser *p, AstNode *stmt);
 
-extern AstNode *sema_integer_literal(Parser *p, Token loc);
-extern AstNode *sema_string_literal(Parser *p, Token loc);
-extern AstNode *sema_sizeof(Parser *p, Type *type, Token loc);
-extern AstNode *sema_unary(Parser *p, AstKind op, AstNode *operand, Token loc);
+extern AstNode *sema_integer_literal(Token loc);
+extern AstNode *sema_string_literal(Token loc);
+extern AstNode *sema_sizeof(Type *type, Token loc);
+extern AstNode *sema_unary(AstKind op, AstNode *operand, Token loc);
 extern AstNode *sema_binary(Parser *p, AstKind kind, AstNode *lhs, AstNode *rhs,
                             Token loc);
 extern AstNode *sema_assignment(Parser *p, Token op, AstNode *lhs,

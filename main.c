@@ -24,57 +24,8 @@
 #include "layout.h"
 #include "parser.h"
 
-char *read_source(const char *path) {
-  FILE *file;
-  long len;
-  char *buf;
-  size_t bytes_read;
-
-  file = fopen(path, "rb");
-  if (!file) {
-    fprintf(stderr, "failed to open file '%s'\n", path);
-    exit(1);
-  }
-
-  if (fseek(file, 0, SEEK_END) != 0) {
-    fclose(file);
-    fprintf(stderr, "failed to seek file '%s'\n", path);
-    exit(1);
-  }
-  len = ftell(file);
-  if (len < 0) {
-    fclose(file);
-    fprintf(stderr, "failed to measure file size '%s'\n", path);
-    exit(1);
-  }
-  if (fseek(file, 0, SEEK_SET) != 0) {
-    fclose(file);
-    fprintf(stderr, "failed to seek file '%s'\n", path);
-    exit(1);
-  }
-
-  buf = malloc(len + 1);
-  if (!buf) {
-    fclose(file);
-    fprintf(stderr, "failed to allocate memory for reading file '%s'\n", path);
-    exit(1);
-  }
-
-  bytes_read = fread(buf, 1, (size_t)len, file);
-  if (bytes_read != (size_t)len) {
-    fprintf(stderr, "failed to read complete file '%s'\n", path);
-    free(buf);
-    fclose(file);
-    exit(1);
-  }
-  buf[bytes_read] = '\0';
-
-  fclose(file);
-  return buf;
-}
-
 static void usage(const char *prog) {
-  fprintf(stderr, "Usage: %s <filename> [-o <output>]\n", prog);
+  fprintf(stderr, "Usage: %s [-I dir]... <filename> [-o <output>]\n", prog);
   exit(1);
 }
 
@@ -108,17 +59,27 @@ static char *derive_output_path(const char *input) {
 int main(int argc, char **argv) {
   const char *filename = NULL;
   const char *output = NULL;
+  Vector include_paths;
   char *derived = NULL;
   FILE *out_file;
-  char *source;
-  AstNode *ast;
+  SourceFile *file;
+  AstNode *tree;
   int i;
 
+  vector_init(&include_paths, sizeof(const char *));
+
   for (i = 1; i < argc; ++i) {
+    const char *path = NULL;
     if (strcmp(argv[i], "-o") == 0) {
       if (i + 1 >= argc)
         usage(argv[0]);
       output = argv[++i];
+    } else if (strcmp(argv[i], "-I") == 0) {
+      if (i + 1 >= argc)
+        usage(argv[0]);
+      path = argv[++i];
+    } else if (strncmp(argv[i], "-I", 2) == 0 && argv[i][2] != '\0') {
+      path = argv[i] + 2;
     } else if (argv[i][0] == '-' && argv[i][1] != '\0') {
       usage(argv[0]);
     } else if (!filename) {
@@ -126,14 +87,23 @@ int main(int argc, char **argv) {
     } else {
       usage(argv[0]);
     }
+    if (path && !vector_push(&include_paths, &path)) {
+      fprintf(stderr, "failed to allocate include paths\n");
+      exit(1);
+    }
   }
 
   if (!filename)
     usage(argv[0]);
 
-  source = read_source(filename);
-  ast = parse_translation_unit(filename, source);
-  assign_stack_offsets(filename, ast);
+  file = new_source_file(filename);
+  if (!file) {
+    fprintf(stderr, "failed to open file '%s'\n", filename);
+    exit(1);
+  }
+  tree = parse_translation_unit(file, &include_paths);
+  vector_free(&include_paths);
+  assign_stack_offsets(filename, tree);
 
   if (output && strcmp(output, "-") == 0) {
     /* '-o -' writes assembly to stdout, like gcc and clang. */
@@ -155,14 +125,13 @@ int main(int argc, char **argv) {
     }
   }
 
-  codegen(ast, out_file);
+  codegen(tree, out_file);
 
   if (out_file != stdout && fclose(out_file) != 0) {
     fprintf(stderr, "failed to write output file '%s'\n", output);
     exit(1);
   }
 
-  free(source);
   free(derived);
 
   return 0;

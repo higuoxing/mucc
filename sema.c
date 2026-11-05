@@ -53,7 +53,7 @@ Symbol *add_symbol(Parser *p, Token name, SymbolKind kind, void *declaration,
   Symbol **link = &p->symbols;
   Symbol *sym = calloc(1, sizeof(Symbol));
   if (!sym)
-    error_at(p, name, "out of memory");
+    error_at(name, "out of memory");
   sym->name = name;
   sym->kind = kind;
   sym->scope_depth = scope_depth;
@@ -98,16 +98,15 @@ void sema_check_variable_name(Parser *p, Token name, bool is_parameter) {
     return;
   if (prev_sym->kind == SYMBOL_VARIABLE) {
     if (!is_parameter && prev_sym->d.variable->is_parameter)
-      error_at(p, name, "redefinition of parameter '%.*s'", name.len,
-               name.start);
-    error_at(p, name, "duplicate local variable");
+      error_at(name, "redefinition of parameter '%.*s'", name.len, name.start);
+    error_at(name, "duplicate local variable");
   }
-  error_at(p, name, "%s conflicts with %s '%.*s'",
+  error_at(name, "%s conflicts with %s '%.*s'",
            is_parameter ? "parameter" : "variable",
            symbol_kind_name(prev_sym->kind), name.len, name.start);
 }
 
-static AstNode *new_expr(Parser *p, AstKind kind, Type *type, Token loc);
+static AstNode *new_expr(AstKind kind, Type *type, Token loc);
 
 /*
  * allow_addr permits symbolic addresses in static initializers. Integer
@@ -127,7 +126,7 @@ static bool eval_constant_condition(Parser *p, AstNode *expr, bool allow_addr,
 Variable *new_variable(Parser *p, Token name, Type *type) {
   Variable *var = calloc(1, sizeof(Variable));
   if (!var)
-    error_at(p, name, "out of memory");
+    error_at(name, "out of memory");
   var->name = name;
   var->type = type;
   add_symbol(p, name, SYMBOL_VARIABLE, var, p->scope_depth);
@@ -151,10 +150,10 @@ AstNode *declare_global_variable(Parser *p, Token name, Type *type,
   bool is_static = storage_class == STORAGE_STATIC;
   bool is_definition = storage_class != STORAGE_EXTERN || has_initializer;
   if (type->kind == TYPE_VOID)
-    error_at(p, name, "variable has void type");
+    error_at(name, "variable has void type");
   if (prev_sym) {
     if (prev_sym->kind != SYMBOL_VARIABLE)
-      error_at(p, name, "variable conflicts with %s '%.*s'",
+      error_at(name, "variable conflicts with %s '%.*s'",
                symbol_kind_name(prev_sym->kind), name.len, name.start);
     var = prev_sym->d.variable;
     /*
@@ -163,7 +162,7 @@ AstNode *declare_global_variable(Parser *p, Token name, Type *type,
     if (storage_class == STORAGE_EXTERN)
       is_static = var->is_static;
     if (var->is_static != is_static)
-      error_at(p, name, "%s declaration of '%.*s' follows %s declaration",
+      error_at(name, "%s declaration of '%.*s' follows %s declaration",
                is_static ? "static" : "non-static", name.len, name.start,
                var->is_static ? "static" : "non-static");
     if (var->type->kind == TYPE_ARRAY && type->kind == TYPE_ARRAY &&
@@ -172,7 +171,7 @@ AstNode *declare_global_variable(Parser *p, Token name, Type *type,
       if (var->type->array_len < 0 && type->array_len >= 0)
         var->type = type;
     } else if (!same_type(var->type, type)) {
-      error_at(p, name, "conflicting declaration of variable '%.*s'", name.len,
+      error_at(name, "conflicting declaration of variable '%.*s'", name.len,
                name.start);
     }
   } else {
@@ -183,7 +182,7 @@ AstNode *declare_global_variable(Parser *p, Token name, Type *type,
   if (is_definition && !var->is_defined) {
     var->is_defined = true;
     var->name = name;
-    decl = new_expr(p, AST_DECL, &builtin_type_void, name);
+    decl = new_expr(AST_DECL, &builtin_type_void, name);
     decl->d.decl.var = var;
   }
   /*
@@ -192,20 +191,20 @@ AstNode *declare_global_variable(Parser *p, Token name, Type *type,
    */
   if (is_static && storage_class != STORAGE_EXTERN && !has_initializer &&
       type_size(var->type) < 0)
-    error_at(p, name, "static variable has incomplete type");
+    error_at(name, "static variable has incomplete type");
   return decl;
 }
 
-static Initializer *new_initializer(Parser *p, Type *type, Token loc) {
+static Initializer *new_initializer(Type *type, Token loc) {
   Initializer *init = calloc(1, sizeof(Initializer));
   if (!init)
-    error_at(p, loc, "out of memory");
+    error_at(loc, "out of memory");
   init->type = type;
   init->loc = loc;
   return init;
 }
 
-static Member *initializer_member(Parser *p, Type *type, int index, Token loc) {
+static Member *initializer_member(Type *type, int index, Token loc) {
   Member *member = unqualified_type(type)->members;
   int remaining = index;
   while (member && remaining > 0) {
@@ -213,7 +212,7 @@ static Member *initializer_member(Parser *p, Type *type, int index, Token loc) {
     --remaining;
   }
   if (index < 0 || !member)
-    error_at(p, loc, "invalid initializer member index %d", index);
+    error_at(loc, "invalid initializer member index %d", index);
   return member;
 }
 
@@ -222,7 +221,7 @@ static Member *initializer_member(Parser *p, Type *type, int index, Token loc) {
  * allocating an entry for every zero in a large, sparsely initialized array.
  * Selecting a different union member replaces the previously selected member.
  */
-static Initializer *initializer_child(Parser *p, Initializer *parent, int index,
+static Initializer *initializer_child(Initializer *parent, int index,
                                       Token loc) {
   Initializer **link = &parent->children;
   Initializer *child;
@@ -231,13 +230,13 @@ static Initializer *initializer_child(Parser *p, Initializer *parent, int index,
   if (type->kind == TYPE_ARRAY) {
     int size = type_size(type->base);
     if (index < 0 || index >= INT_MAX / size)
-      error_at(p, loc, "array initializer exceeds supported size");
+      error_at(loc, "array initializer exceeds supported size");
     if (type->array_len >= 0 && index >= type->array_len)
-      error_at(p, loc, "array designator index is out of bounds");
+      error_at(loc, "array designator index is out of bounds");
     offset = index * size;
     type = type->base;
   } else {
-    Member *member = initializer_member(p, type, index, loc);
+    Member *member = initializer_member(type, index, loc);
     if (type->kind == TYPE_UNION && *link && (*link)->index != index)
       *link = NULL;
     offset = member->offset;
@@ -247,7 +246,7 @@ static Initializer *initializer_child(Parser *p, Initializer *parent, int index,
     link = &(*link)->next;
   if (*link && (*link)->index == index)
     return *link;
-  child = new_initializer(p, type, loc);
+  child = new_initializer(type, loc);
   child->index = index;
   child->offset = offset;
   child->next = *link;
@@ -265,15 +264,14 @@ typedef struct {
   int index;
 } InitializerPosition;
 
-static void push_initializer_position(Parser *p, Vector *path,
-                                      Initializer *parent, int index,
-                                      Token loc) {
+static void push_initializer_position(Vector *path, Initializer *parent,
+                                      int index, Token loc) {
   InitializerPosition position = {.parent = parent, .index = index};
   if (!vector_push(path, &position))
-    error_at(p, loc, "out of memory");
+    error_at(loc, "out of memory");
 }
 
-static void advance_initializer_position(Parser *p, Vector *path) {
+static void advance_initializer_position(Vector *path) {
   while (path->len) {
     InitializerPosition *position =
         &((InitializerPosition *)path->data)[path->len - 1];
@@ -285,7 +283,7 @@ static void advance_initializer_position(Parser *p, Vector *path) {
           return;
       } else {
         Member *member =
-            initializer_member(p, type, position->index, position->parent->loc);
+            initializer_member(type, position->index, position->parent->loc);
         if (member->next) {
           ++position->index;
           return;
@@ -305,28 +303,27 @@ static void designate_initializer(Parser *p, Initializer *root, Vector *path,
     if (designator->index) {
       int64_t value;
       if (parent->type->kind != TYPE_ARRAY)
-        error_at(p, designator->loc, "array designator requires an array");
+        error_at(designator->loc, "array designator requires an array");
       if (!is_integer(designator->index->type))
-        error_at(p, designator->index->loc,
+        error_at(designator->index->loc,
                  "array designator index must have integer type");
       if (!eval_constant_expr(p, designator->index, /*allow_addr=*/false,
                               &value))
-        error_at(p, designator->index->loc,
-                 "not an integer constant expression");
+        error_at(designator->index->loc, "not an integer constant expression");
       if (value < 0 || (uint64_t)value >= INT_MAX)
-        error_at(p, designator->index->loc,
+        error_at(designator->index->loc,
                  "array designator index is out of range");
       index = (int)value;
     } else {
       Member *member;
       if (!is_record(parent->type))
-        error_at(p, designator->loc,
+        error_at(designator->loc,
                  "member designator requires a struct or union");
       /* Anonymous members add intermediate steps to the subobject path. */
       for (;;) {
         Member *found = find_member(parent->type, designator->member);
         if (!found)
-          error_at(p, designator->member, "no member named '%.*s'",
+          error_at(designator->member, "no member named '%.*s'",
                    designator->member.len, designator->member.start);
         index = 0;
         for (member = unqualified_type(parent->type)->members; member != found;
@@ -334,12 +331,12 @@ static void designate_initializer(Parser *p, Initializer *root, Vector *path,
           ++index;
         if (found->name.kind == TOKEN_IDENTIFIER)
           break;
-        push_initializer_position(p, path, parent, index, designator->loc);
-        parent = initializer_child(p, parent, index, designator->loc);
+        push_initializer_position(path, parent, index, designator->loc);
+        parent = initializer_child(parent, index, designator->loc);
       }
     }
-    push_initializer_position(p, path, parent, index, designator->loc);
-    parent = initializer_child(p, parent, index, designator->loc);
+    push_initializer_position(path, parent, index, designator->loc);
+    parent = initializer_child(parent, index, designator->loc);
   }
 }
 
@@ -347,22 +344,20 @@ static void designate_initializer(Parser *p, Initializer *root, Vector *path,
  * A string initializes character array elements, including its terminator
  * when space permits. Complete the object's type without changing a typedef.
  */
-static void initialize_string_array(Parser *p, Initializer *init,
-                                    AstNode *expr) {
+static void initialize_string_array(Initializer *init, AstNode *expr) {
   Type *type = init->type;
   int length;
   if (type->base->kind != TYPE_CHAR)
-    error_at(p, expr->loc, "string initializer requires a character array");
+    error_at(expr->loc, "string initializer requires a character array");
   if (expr->kind != AST_STRING_LITERAL)
-    error_at(p, expr->loc,
-             "character array initializer must be a string literal");
+    error_at(expr->loc, "character array initializer must be a string literal");
   length = expr->type->array_len;
   if (type->array_len < 0) {
     init->type = array_of(type->base, length);
     if (!init->type)
-      error_at(p, expr->loc, "out of memory");
+      error_at(expr->loc, "out of memory");
   } else if (type->array_len < length - 1) {
-    error_at(p, expr->loc, "string literal is too long for character array");
+    error_at(expr->loc, "string literal is too long for character array");
   }
   init->expr = expr;
 }
@@ -374,21 +369,21 @@ static void initialize_expression(Parser *p, Initializer *init, AstNode *expr,
   init->children = NULL;
   init->zero_fill = false;
   if (init->type->kind == TYPE_ARRAY) {
-    initialize_string_array(p, init, expr);
+    initialize_string_array(init, expr);
     return;
   }
   if (is_global && is_record(init->type))
-    error_at(p, init->loc, "global initializer requires a scalar type");
+    error_at(init->loc, "global initializer requires a scalar type");
   expr = sema_convert_expr(p, init->type, expr, init->loc, "initializer");
   init->expr = expr;
   if (!is_global)
     return;
   if (init->type->kind == TYPE_PTR) {
     if (!eval_address_constant(p, expr, &init->constant.address))
-      error_at(p, expr->loc, "global initializer is not a constant expression");
+      error_at(expr->loc, "global initializer is not a constant expression");
   } else if (!eval_constant_expr(p, expr, /*allow_addr=*/true,
                                  &init->constant.value)) {
-    error_at(p, expr->loc, "global initializer is not a constant expression");
+    error_at(expr->loc, "global initializer is not a constant expression");
   }
 }
 
@@ -402,7 +397,7 @@ static void initialize_list(Parser *p, Initializer *init,
   Vector path;
   bool first = true;
   vector_init(&path, sizeof(InitializerPosition));
-  push_initializer_position(p, &path, init, 0, init->loc);
+  push_initializer_position(&path, init, 0, init->loc);
   while (*input) {
     InitializerPosition *position;
     Initializer *child;
@@ -415,11 +410,10 @@ static void initialize_list(Parser *p, Initializer *init,
     if (!path.len)
       break;
     position = &((InitializerPosition *)path.data)[path.len - 1];
-    child =
-        initializer_child(p, position->parent, position->index, (*input)->loc);
+    child = initializer_child(position->parent, position->index, (*input)->loc);
     child->loc = (*input)->loc;
     initialize_object(p, child, input, true, is_global);
-    advance_initializer_position(p, &path);
+    advance_initializer_position(&path);
     first = false;
   }
   vector_free(&path);
@@ -444,7 +438,7 @@ static void initialize_object(Parser *p, Initializer *init,
   Type *type = init->type;
   if (type_size(type) < 0 &&
       !(type->kind == TYPE_ARRAY && type_size(type->base) > 0))
-    error_at(p, parsed->loc, "initializer has incomplete type");
+    error_at(parsed->loc, "initializer has incomplete type");
   if (!parsed->expr) {
     const Initializer *entry = parsed->children;
     init->expr = NULL;
@@ -453,20 +447,20 @@ static void initialize_object(Parser *p, Initializer *init,
     if (type->kind == TYPE_ARRAY && type->base->kind == TYPE_CHAR &&
         entry->expr && entry->expr->kind == AST_STRING_LITERAL &&
         !entry->designators) {
-      initialize_string_array(p, init, entry->expr);
+      initialize_string_array(init, entry->expr);
       entry = entry->next;
     } else if (type->kind == TYPE_ARRAY || is_record(type)) {
       initialize_list(p, init, &entry, true, is_global);
     } else {
       if (entry->designators)
-        error_at(p, entry->designators->loc,
+        error_at(entry->designators->loc,
                  "designator is not allowed in a scalar initializer");
       if (!entry->expr)
-        error_at(p, entry->loc, "too many braces around scalar initializer");
+        error_at(entry->loc, "too many braces around scalar initializer");
       initialize_object(p, init, &entry, false, is_global);
     }
     if (entry)
-      error_at(p, entry->loc, "excess elements in initializer");
+      error_at(entry->loc, "excess elements in initializer");
     *input = parsed->next;
     return;
   }
@@ -485,8 +479,8 @@ Initializer *sema_initialize_variable(Parser *p, Variable *var, Token name,
                                       const Initializer *parsed) {
   Initializer *init;
   if (var->initializer)
-    error_at(p, name, "redefinition of variable '%.*s'", name.len, name.start);
-  init = new_initializer(p, var->type, name);
+    error_at(name, "redefinition of variable '%.*s'", name.len, name.start);
+  init = new_initializer(var->type, name);
   initialize_object(p, init, &parsed, false, var->is_global);
   if (init->type->kind == TYPE_ARRAY && init->type->array_len < 0) {
     Initializer *last = init->children;
@@ -494,7 +488,7 @@ Initializer *sema_initialize_variable(Parser *p, Variable *var, Token name,
       last = last->next;
     init->type = array_of(init->type->base, last->index + 1);
     if (!init->type)
-      error_at(p, init->loc, "out of memory");
+      error_at(init->loc, "out of memory");
   }
   var->type = init->type;
   var->initializer = init;
@@ -511,19 +505,19 @@ AstNode *sema_compound_literal(Parser *p, Type *type,
   Variable *var;
   AstNode *node;
   if (!p->current_function)
-    error_at(p, loc, "file-scope compound literals are not supported yet");
+    error_at(loc, "file-scope compound literals are not supported yet");
   if (type->kind == TYPE_VOID)
-    error_at(p, loc, "compound literal has void type");
+    error_at(loc, "compound literal has void type");
   if (type_size(type) < 0 &&
       !(type->kind == TYPE_ARRAY && type_size(type->base) > 0))
-    error_at(p, loc, "compound literal has incomplete type");
+    error_at(loc, "compound literal has incomplete type");
   var = calloc(1, sizeof(Variable));
   if (!var)
-    error_at(p, loc, "out of memory");
+    error_at(loc, "out of memory");
   var->name = loc;
   var->type = type;
   sema_initialize_variable(p, var, loc, initializer);
-  node = new_expr(p, AST_COMPOUND_LITERAL, var->type, loc);
+  node = new_expr(AST_COMPOUND_LITERAL, var->type, loc);
   node->d.variable.var = var;
   return node;
 }
@@ -544,10 +538,10 @@ void sema_check_global_variables(Parser *p) {
     if (var->type->kind == TYPE_ARRAY && var->type->array_len < 0) {
       var->type = array_of(var->type->base, 1);
       if (!var->type)
-        error_at(p, var->name, "out of memory");
+        error_at(var->name, "out of memory");
     }
     if (type_size(var->type) < 0)
-      error_at(p, var->name, "variable has incomplete type");
+      error_at(var->name, "variable has incomplete type");
   }
 }
 
@@ -568,10 +562,10 @@ void declare_typedef(Parser *p, Token name, Type *type) {
   Symbol *prev_sym = find_symbol_in_scope(p, name, p->scope_depth);
   if (prev_sym) {
     if (prev_sym->kind != SYMBOL_TYPEDEF)
-      error_at(p, name, "typedef conflicts with %s '%.*s'",
+      error_at(name, "typedef conflicts with %s '%.*s'",
                symbol_kind_name(prev_sym->kind), name.len, name.start);
     if (!same_typedef_type(prev_sym->d.typedef_type, type))
-      error_at(p, name, "conflicting typedef for '%.*s'", name.len, name.start);
+      error_at(name, "conflicting typedef for '%.*s'", name.len, name.start);
     return;
   }
   add_symbol(p, name, SYMBOL_TYPEDEF, type, p->scope_depth);
@@ -583,34 +577,34 @@ Enum *declare_enumerator(Parser *p, Token name, AstNode *initializer,
   Symbol *prev_sym = find_symbol_in_scope(p, name, p->scope_depth);
   int64_t value = next_value;
   if (prev_sym && prev_sym->kind == SYMBOL_TYPEDEF)
-    error_at(p, name, "enumerator conflicts with typedef '%.*s'", name.len,
+    error_at(name, "enumerator conflicts with typedef '%.*s'", name.len,
              name.start);
   if (initializer) {
     if (!is_integer(initializer->type))
-      error_at(p, initializer->loc, "enumerator value must have integer type");
+      error_at(initializer->loc, "enumerator value must have integer type");
     value = eval_const_expr(p, initializer);
   }
   if (value < INT32_MIN || value > INT32_MAX ||
       (initializer && initializer->type->is_unsigned &&
        (uint64_t)value > INT32_MAX))
-    error_at(p, name, "enumerator value is outside the range of int");
+    error_at(name, "enumerator value is outside the range of int");
   if (prev_sym) {
     if (prev_sym->kind == SYMBOL_ENUMERATOR)
-      error_at(p, name, "duplicate enumerator '%.*s'", name.len, name.start);
-    error_at(p, name, "enumerator conflicts with %s '%.*s'",
+      error_at(name, "duplicate enumerator '%.*s'", name.len, name.start);
+    error_at(name, "enumerator conflicts with %s '%.*s'",
              symbol_kind_name(prev_sym->kind), name.len, name.start);
   }
   enumerator = calloc(1, sizeof(Enum));
   if (!enumerator)
-    error_at(p, name, "out of memory");
+    error_at(name, "out of memory");
   enumerator->name = name;
   enumerator->value = (int)value;
   add_symbol(p, name, SYMBOL_ENUMERATOR, enumerator, p->scope_depth);
   return enumerator;
 }
 
-AstNode *sema_enumerator_expr(Parser *p, Enum *enumerator, Token loc) {
-  AstNode *node = new_expr(p, AST_INT_LITERAL, &builtin_type_int, loc);
+AstNode *sema_enumerator_expr(Enum *enumerator, Token loc) {
+  AstNode *node = new_expr(AST_INT_LITERAL, &builtin_type_int, loc);
   node->d.int_literal.val = (uint64_t)enumerator->value;
   return node;
 }
@@ -621,12 +615,12 @@ AstNode *sema_enumerator_expr(Parser *p, Enum *enumerator, Token loc) {
  * qualifier while preserving the qualifiers of any pointed-to type.
  * Record conversions materialize a copy; codegen represents it by its address.
  */
-static AstNode *convert_to_value(Parser *p, AstNode *expr) {
+static AstNode *convert_to_value(AstNode *expr) {
   AstNode *node;
   Type *type;
   if (is_record(expr->type)) {
     if (type_size(expr->type) < 0)
-      error_at(p, expr->loc, "aggregate value has incomplete type");
+      error_at(expr->loc, "aggregate value has incomplete type");
     /*
      * These expressions already refer to a materialized value. Assignment
      * results still refer to their destination and need a copy when consumed.
@@ -643,8 +637,8 @@ static AstNode *convert_to_value(Parser *p, AstNode *expr) {
   else
     return expr;
   if (!type)
-    error_at(p, expr->loc, "out of memory");
-  node = new_expr(p, AST_CAST, type, expr->loc);
+    error_at(expr->loc, "out of memory");
+  node = new_expr(AST_CAST, type, expr->loc);
   node->d.unary.operand = expr;
   return node;
 }
@@ -653,20 +647,20 @@ static AstNode *convert_to_value(Parser *p, AstNode *expr) {
  * Controlling expressions must have scalar type. Array operands first
  * convert to pointers; preserve integer widths for codegen's zero test.
  */
-AstNode *sema_check_condition(Parser *p, AstNode *expr) {
-  expr = convert_to_value(p, expr);
-  sema_check_nonvoid_expr(p, expr);
+AstNode *sema_check_condition(AstNode *expr) {
+  expr = convert_to_value(expr);
+  sema_check_nonvoid_expr(expr);
   if (!is_integer(expr->type) && expr->type->kind != TYPE_PTR)
-    error_at(p, expr->loc, "condition must have scalar type");
+    error_at(expr->loc, "condition must have scalar type");
   return expr;
 }
 
-static AstNode *integer_promotion(Parser *p, AstNode *expr) {
+static AstNode *integer_promotion(AstNode *expr) {
   AstNode *node;
   Type *type = integer_promotion_type(expr->type);
   if (type == expr->type)
     return expr;
-  node = new_expr(p, AST_CAST, type, expr->loc);
+  node = new_expr(AST_CAST, type, expr->loc);
   node->d.unary.operand = expr;
   return node;
 }
@@ -674,15 +668,15 @@ static AstNode *integer_promotion(Parser *p, AstNode *expr) {
 /*
  * Arithmetic operands and default arguments also undergo integer promotion.
  */
-static AstNode *promote_operand(Parser *p, AstNode *expr) {
-  return integer_promotion(p, convert_to_value(p, expr));
+static AstNode *promote_operand(AstNode *expr) {
+  return integer_promotion(convert_to_value(expr));
 }
 
-AstNode *sema_switch_condition(Parser *p, AstNode *expr) {
-  sema_check_nonvoid_expr(p, expr);
+AstNode *sema_switch_condition(AstNode *expr) {
+  sema_check_nonvoid_expr(expr);
   if (!is_integer(expr->type))
-    error_at(p, expr->loc, "switch condition must have integer type");
-  return integer_promotion(p, expr);
+    error_at(expr->loc, "switch condition must have integer type");
+  return integer_promotion(expr);
 }
 
 Function *declare_function(Parser *p, Token name, Type *return_type,
@@ -698,7 +692,7 @@ Function *declare_function(Parser *p, Token name, Type *return_type,
     param_types[i] = unqualified_type(param_types[i]);
   if (prev_sym) {
     if (prev_sym->kind != SYMBOL_FUNCTION)
-      error_at(p, name, "function conflicts with %s '%.*s'",
+      error_at(name, "function conflicts with %s '%.*s'",
                symbol_kind_name(prev_sym->kind), name.len, name.start);
     func = prev_sym->d.function;
   }
@@ -709,39 +703,38 @@ Function *declare_function(Parser *p, Token name, Type *return_type,
      * external linkage.
      */
     if (is_static && !func->is_static)
-      error_at(p, name,
+      error_at(name,
                "static declaration of '%.*s' follows non-static declaration",
                name.len, name.start);
     if (definition && func->is_defined)
-      error_at(p, name, "redefinition of function '%.*s'", name.len,
-               name.start);
+      error_at(name, "redefinition of function '%.*s'", name.len, name.start);
     if (!same_type(func->return_type, return_type))
-      error_at(p, name, "conflicting declaration of function '%.*s'", name.len,
+      error_at(name, "conflicting declaration of function '%.*s'", name.len,
                name.start);
     if (func->has_prototype != has_prototype) {
       Type **types = func->has_prototype ? func->param_types : param_types;
       int count = func->has_prototype ? func->nparams : nparams;
       if (func->is_variadic || is_variadic)
-        error_at(p, name, "conflicting declaration of function '%.*s'",
-                 name.len, name.start);
+        error_at(name, "conflicting declaration of function '%.*s'", name.len,
+                 name.start);
       for (i = 0; i < count; ++i)
         if (!same_type(types[i], integer_promotion_type(types[i])))
-          error_at(p, name, "conflicting declaration of function '%.*s'",
-                   name.len, name.start);
+          error_at(name, "conflicting declaration of function '%.*s'", name.len,
+                   name.start);
     }
     if (func->has_prototype && has_prototype) {
       if (func->nparams != nparams || func->is_variadic != is_variadic)
-        error_at(p, name, "conflicting declaration of function '%.*s'",
-                 name.len, name.start);
+        error_at(name, "conflicting declaration of function '%.*s'", name.len,
+                 name.start);
       for (i = 0; i < nparams; ++i)
         if (!same_type(func->param_types[i], param_types[i]))
-          error_at(p, name, "conflicting declaration of function '%.*s'",
-                   name.len, name.start);
+          error_at(name, "conflicting declaration of function '%.*s'", name.len,
+                   name.start);
     }
   } else {
     func = calloc(1, sizeof(Function));
     if (!func)
-      error_at(p, name, "out of memory");
+      error_at(name, "out of memory");
     func->name = name;
     func->return_type = return_type;
     func->is_static = is_static;
@@ -751,7 +744,7 @@ Function *declare_function(Parser *p, Token name, Type *return_type,
     if (nparams) {
       func->param_types = calloc(nparams, sizeof(Type *));
       if (!func->param_types)
-        error_at(p, name, "out of memory");
+        error_at(name, "out of memory");
     }
     func->has_prototype = 1;
     func->is_variadic = is_variadic;
@@ -764,9 +757,9 @@ Function *declare_function(Parser *p, Token name, Type *return_type,
   return func;
 }
 
-void sema_check_nonvoid_expr(Parser *p, AstNode *expr) {
+void sema_check_nonvoid_expr(AstNode *expr) {
   if (expr->type->kind == TYPE_VOID)
-    error_at(p, expr->loc, "void expression used as a value");
+    error_at(expr->loc, "void expression used as a value");
 }
 
 static bool null_pointer_constant(Parser *p, AstNode *expr) {
@@ -778,11 +771,11 @@ static bool null_pointer_constant(Parser *p, AstNode *expr) {
          value == 0;
 }
 
-static void add_address_offset(Parser *p, AddressConstant *address,
-                               int64_t offset, Token loc) {
+static void add_address_offset(AddressConstant *address, int64_t offset,
+                               Token loc) {
   if ((offset > 0 && address->offset > INT64_MAX - offset) ||
       (offset < 0 && address->offset < INT64_MIN - offset))
-    error_at(p, loc, "address offset exceeds supported range");
+    error_at(loc, "address offset exceeds supported range");
   address->offset += offset;
 }
 
@@ -807,7 +800,7 @@ static bool eval_lvalue_address(Parser *p, AstNode *expr,
     if (!eval_lvalue_address(p, expr->d.member.base, address) ||
         (!address->base && address->offset == 0))
       return false;
-    add_address_offset(p, address, expr->d.member.member->offset, expr->loc);
+    add_address_offset(address, expr->d.member.member->offset, expr->loc);
     return true;
   case AST_DEREF:
     return eval_address_constant(p, expr->d.unary.operand, address);
@@ -864,15 +857,15 @@ static bool eval_address_constant(Parser *p, AstNode *expr,
         !eval_constant_expr(p, index, /*allow_addr=*/false, &offset))
       return false;
     if (index->type->is_unsigned && (uint64_t)offset > INT64_MAX)
-      error_at(p, expr->loc, "address offset exceeds supported range");
+      error_at(expr->loc, "address offset exceeds supported range");
     if (expr->kind == AST_PTR_SUB) {
       if (offset == INT64_MIN)
-        error_at(p, expr->loc, "address offset exceeds supported range");
+        error_at(expr->loc, "address offset exceeds supported range");
       offset = -offset;
     }
     if (offset > INT64_MAX / size || offset < INT64_MIN / size)
-      error_at(p, expr->loc, "address offset exceeds supported range");
-    add_address_offset(p, address, offset * size, expr->loc);
+      error_at(expr->loc, "address offset exceeds supported range");
+    add_address_offset(address, offset * size, expr->loc);
     return true;
   }
   default:
@@ -884,8 +877,8 @@ AstNode *sema_convert_expr(Parser *p, Type *target, AstNode *expr, Token loc,
                            const char *context) {
   AstNode *node;
   target = unqualified_type(target);
-  expr = convert_to_value(p, expr);
-  sema_check_nonvoid_expr(p, expr);
+  expr = convert_to_value(expr);
+  sema_check_nonvoid_expr(expr);
   if (same_type(target, expr->type))
     return expr;
   if (!(is_integer(target) && is_integer(expr->type)) &&
@@ -893,8 +886,8 @@ AstNode *sema_convert_expr(Parser *p, Type *target, AstNode *expr, Token loc,
       !(compatible_pointers(target, expr->type) &&
         (!expr->type->base->is_const || target->base->is_const)) &&
       !(target->kind == TYPE_PTR && null_pointer_constant(p, expr)))
-    error_at(p, loc, "incompatible %s type", context);
-  node = new_expr(p, AST_CAST, target, expr->loc);
+    error_at(loc, "incompatible %s type", context);
+  node = new_expr(AST_CAST, target, expr->loc);
   node->d.unary.operand = expr;
   return node;
 }
@@ -904,18 +897,18 @@ AstNode *sema_convert_expr(Parser *p, Type *target, AstNode *expr, Token loc,
  * Keep a node even for an unchanged type, since a cast never yields an lvalue.
  * Casting to void preserves the operand's side effects while discarding it.
  */
-AstNode *sema_cast(Parser *p, Type *target, AstNode *expr, Token loc) {
+AstNode *sema_cast(Type *target, AstNode *expr, Token loc) {
   AstNode *node;
   if (target->kind != TYPE_VOID) {
     if (!is_integer(target) && target->kind != TYPE_PTR)
-      error_at(p, loc, "cast target must be a scalar type or void");
+      error_at(loc, "cast target must be a scalar type or void");
     if (!is_integer(expr->type) && expr->type->kind != TYPE_PTR &&
         expr->type->kind != TYPE_ARRAY)
-      error_at(p, expr->loc, "cast operand must have scalar type");
+      error_at(expr->loc, "cast operand must have scalar type");
   }
   if (!is_record(expr->type))
-    expr = convert_to_value(p, expr);
-  node = new_expr(p, AST_CAST, target, loc);
+    expr = convert_to_value(expr);
+  node = new_expr(AST_CAST, target, loc);
   node->d.unary.operand = expr;
   return node;
 }
@@ -924,21 +917,21 @@ void sema_check_call(Parser *p, Function *func, AstNode *call, int nargs) {
   AstNode **link;
   int i = 0;
   if (is_record(call->type) && type_size(call->type) < 0)
-    error_at(p, call->loc, "function return type is incomplete");
+    error_at(call->loc, "function return type is incomplete");
   if (func->has_prototype &&
       (nargs < func->nparams || (!func->is_variadic && nargs > func->nparams)))
-    error_at(p, call->loc, "wrong number of arguments to function '%.*s'",
+    error_at(call->loc, "wrong number of arguments to function '%.*s'",
              func->name.len, func->name.start);
   for (link = &call->d.call.args; *link; link = &(*link)->next, ++i) {
     AstNode *arg = *link;
     AstNode *next = arg->next;
     arg->next = NULL;
-    sema_check_nonvoid_expr(p, arg);
+    sema_check_nonvoid_expr(arg);
     if (func->has_prototype && i < func->nparams)
       *link =
           sema_convert_expr(p, func->param_types[i], arg, arg->loc, "argument");
     else
-      *link = promote_operand(p, arg);
+      *link = promote_operand(arg);
     (*link)->next = next;
   }
 }
@@ -948,7 +941,7 @@ void sema_check_return(Parser *p, AstNode *stmt) {
   AstNode *expr = stmt->d.ret.expr;
   if (return_type->kind == TYPE_VOID) {
     if (expr)
-      error_at(p, stmt->loc, "return with a value in void function");
+      error_at(stmt->loc, "return with a value in void function");
     return;
   }
   stmt->d.ret.expr =
@@ -976,23 +969,23 @@ static bool is_increment_op(AstKind ty) {
   return ty == AST_PRE_INCREMENT || ty == AST_POST_INCREMENT;
 }
 
-static AstNode *new_expr(Parser *p, AstKind kind, Type *type, Token loc) {
+static AstNode *new_expr(AstKind kind, Type *type, Token loc) {
   AstNode *node = calloc(1, sizeof(AstNode));
   if (!node)
-    error_at(p, loc, "out of memory");
+    error_at(loc, "out of memory");
   node->kind = kind;
   node->type = type;
   node->loc = loc;
   return node;
 }
 
-static AstNode *check_va_list(Parser *p, AstNode *expr, bool writable) {
-  expr = convert_to_value(p, expr);
+static AstNode *check_va_list(AstNode *expr, bool writable) {
+  expr = convert_to_value(expr);
   if (expr->type->kind != TYPE_PTR ||
       !same_type(unqualified_type(expr->type->base), builtin_type_va_list.base))
-    error_at(p, expr->loc, "expect va_list argument");
+    error_at(expr->loc, "expect va_list argument");
   if (writable && contains_const(expr->type->base))
-    error_at(p, expr->loc, "va_list argument is const-qualified");
+    error_at(expr->loc, "va_list argument is const-qualified");
   return expr;
 }
 
@@ -1001,28 +994,28 @@ AstNode *sema_builtin_va(Parser *p, AstKind kind, AstNode *first,
   AstNode *node;
   if (kind == AST_VA_START) {
     if (!p->current_function || !p->current_function->is_variadic)
-      error_at(p, loc, "va_start requires a variadic function");
+      error_at(loc, "va_start requires a variadic function");
     if (second->kind != AST_VAR || second->d.variable.var != p->last_parameter)
-      error_at(p, second->loc, "va_start requires the last fixed parameter");
+      error_at(second->loc, "va_start requires the last fixed parameter");
   }
-  first = check_va_list(p, first, true);
+  first = check_va_list(first, true);
   if (kind == AST_VA_COPY)
-    second = check_va_list(p, second, false);
+    second = check_va_list(second, false);
   if (kind == AST_VA_ARG) {
     if ((!is_integer(type) && type->kind != TYPE_PTR && !is_record(type)) ||
         type_size(type) < 0)
-      error_at(p, loc,
+      error_at(loc,
                "va_arg requires a complete object type other than an array");
     if (is_integer(type) &&
         !same_type(unqualified_type(type), integer_promotion_type(type)))
-      error_at(p, loc, "va_arg type is changed by default argument promotions");
+      error_at(loc, "va_arg type is changed by default argument promotions");
     /*
      * The result is a value. Drop a top-level qualifier so a const aggregate
      * can initialize an object or be passed as the unqualified type.
      */
     type = unqualified_type(type);
   }
-  node = new_expr(p, kind, type, loc);
+  node = new_expr(kind, type, loc);
   if (kind == AST_VA_START || kind == AST_VA_COPY) {
     node->d.binary.lhs = first;
     node->d.binary.rhs = second;
@@ -1037,11 +1030,11 @@ AstNode *sema_builtin_va(Parser *p, AstKind kind, AstNode *first,
  * Decimal constants without U use signed types; octal may use unsigned.
  * Character constants always have type int.
  */
-AstNode *sema_integer_literal(Parser *p, Token loc) {
-  uint64_t value = loc.int_literal_val;
-  bool is_unsigned = (loc.int_literal_suffix & INT_SUFFIX_UNSIGNED) != 0;
-  bool is_long = (loc.int_literal_suffix & INT_SUFFIX_LONG) != 0;
-  bool is_long_long = (loc.int_literal_suffix & INT_SUFFIX_LONG_LONG) != 0;
+AstNode *sema_integer_literal(Token loc) {
+  uint64_t value = loc.d.int_literal.val;
+  bool is_unsigned = (loc.d.int_literal.suffix & INT_SUFFIX_UNSIGNED) != 0;
+  bool is_long = (loc.d.int_literal.suffix & INT_SUFFIX_LONG) != 0;
+  bool is_long_long = (loc.d.int_literal.suffix & INT_SUFFIX_LONG_LONG) != 0;
   bool decimal = loc.start[0] != '0';
   Type *type;
   AstNode *node;
@@ -1054,8 +1047,7 @@ AstNode *sema_integer_literal(Parser *p, Token loc) {
     else if (value <= INT64_MAX)
       type = &builtin_type_long_long;
     else
-      error_at(p, loc,
-               "integer literal out of range for supported signed types");
+      error_at(loc, "integer literal out of range for supported signed types");
   } else if (is_unsigned)
     type = !is_long && value <= UINT32_MAX ? &builtin_type_unsigned
                                            : &builtin_type_unsigned_long;
@@ -1068,20 +1060,20 @@ AstNode *sema_integer_literal(Parser *p, Token loc) {
   else if (!decimal)
     type = &builtin_type_unsigned_long;
   else
-    error_at(p, loc, "integer literal out of range for supported signed types");
+    error_at(loc, "integer literal out of range for supported signed types");
 
-  node = new_expr(p, AST_INT_LITERAL, type, loc);
+  node = new_expr(AST_INT_LITERAL, type, loc);
   node->d.int_literal.val = value;
   return node;
 }
 
-AstNode *sema_string_literal(Parser *p, Token loc) {
-  Type *type = array_of(&builtin_type_char, loc.string_literal_len);
+AstNode *sema_string_literal(Token loc) {
+  Type *type = array_of(&builtin_type_char, loc.d.string_literal.len);
   AstNode *node;
   if (!type)
-    error_at(p, loc, "out of memory");
-  node = new_expr(p, AST_STRING_LITERAL, type, loc);
-  node->d.string_literal.val = loc.string_literal_val;
+    error_at(loc, "out of memory");
+  node = new_expr(AST_STRING_LITERAL, type, loc);
+  node->d.string_literal.val = loc.d.string_literal.val;
   return node;
 }
 
@@ -1091,75 +1083,74 @@ AstNode *sema_string_literal(Parser *p, Token loc) {
  * long on our LP64 target. Discard the operand tree so codegen cannot evaluate
  * it.
  */
-AstNode *sema_sizeof(Parser *p, Type *type, Token loc) {
+AstNode *sema_sizeof(Type *type, Token loc) {
   AstNode *node;
   if (type->kind == TYPE_VOID)
-    error_at(p, loc, "sizeof cannot be applied to void");
+    error_at(loc, "sizeof cannot be applied to void");
   if (type_size(type) < 0)
-    error_at(p, loc, "sizeof cannot be applied to an incomplete type");
-  node = new_expr(p, AST_INT_LITERAL, &builtin_type_unsigned_long, loc);
+    error_at(loc, "sizeof cannot be applied to an incomplete type");
+  node = new_expr(AST_INT_LITERAL, &builtin_type_unsigned_long, loc);
   node->d.int_literal.val = (uint64_t)type_size(type);
   return node;
 }
 
-AstNode *sema_unary(Parser *p, AstKind op, AstNode *operand, Token loc) {
+AstNode *sema_unary(AstKind op, AstNode *operand, Token loc) {
   AstNode *node;
   Type *type;
-  sema_check_nonvoid_expr(p, operand);
+  sema_check_nonvoid_expr(operand);
 
   switch (op) {
   case AST_NEG:
   case AST_BITWISE_NOT:
-    operand = promote_operand(p, operand);
+    operand = promote_operand(operand);
     if (!is_integer(operand->type))
-      error_at(p, loc, "invalid operand to unary %s",
-               op == AST_NEG ? "-" : "~");
+      error_at(loc, "invalid operand to unary %s", op == AST_NEG ? "-" : "~");
     type = operand->type;
     break;
   case AST_LOGICAL_NOT:
-    operand = sema_check_condition(p, operand);
+    operand = sema_check_condition(operand);
     type = &builtin_type_int;
     break;
   case AST_DEREF:
-    operand = convert_to_value(p, operand);
+    operand = convert_to_value(operand);
     if (operand->type->kind != TYPE_PTR ||
         operand->type->base->kind == TYPE_VOID)
-      error_at(p, loc, "invalid deref target");
+      error_at(loc, "invalid deref target");
     type = operand->type->base;
     break;
   case AST_ADDR:
     if (!is_lvalue(operand))
-      error_at(p, loc, "invalid address-of target");
+      error_at(loc, "invalid address-of target");
     type = pointer_to(operand->type);
     if (!type)
-      error_at(p, loc, "out of memory");
+      error_at(loc, "out of memory");
     break;
   case AST_PRE_INCREMENT:
   case AST_PRE_DECREMENT:
   case AST_POST_INCREMENT:
   case AST_POST_DECREMENT:
     if (!is_modifiable_lvalue(operand) || is_record(operand->type))
-      error_at(p, loc, "invalid %s target",
+      error_at(loc, "invalid %s target",
                is_increment_op(op) ? "increment" : "decrement");
     if (operand->type->kind == TYPE_PTR &&
         operand->type->base->kind == TYPE_VOID)
-      error_at(p, loc, "pointer arithmetic on void pointer");
+      error_at(loc, "pointer arithmetic on void pointer");
     if (operand->type->kind == TYPE_PTR && type_size(operand->type->base) < 0)
-      error_at(p, loc, "pointer arithmetic on incomplete type");
+      error_at(loc, "pointer arithmetic on incomplete type");
     type = operand->type;
     break;
   default:
-    error_at(p, loc, "invalid unary operator");
+    error_at(loc, "invalid unary operator");
   }
 
-  node = new_expr(p, op, type, loc);
+  node = new_expr(op, type, loc);
   node->d.unary.operand = operand;
   return node;
 }
 
-static AstNode *new_binary_expr(Parser *p, AstKind kind, AstNode *left,
-                                AstNode *right, Type *type, Token loc) {
-  AstNode *node = new_expr(p, kind, type, loc);
+static AstNode *new_binary_expr(AstKind kind, AstNode *left, AstNode *right,
+                                Type *type, Token loc) {
+  AstNode *node = new_expr(kind, type, loc);
   node->d.binary.lhs = left;
   node->d.binary.rhs = right;
   return node;
@@ -1172,10 +1163,10 @@ static AstNode *new_binary_expr(Parser *p, AstKind kind, AstNode *left,
 static Type *convert_integer_operands(Parser *p, AstNode **left,
                                       AstNode **right, Token loc) {
   Type *type;
-  *left = promote_operand(p, *left);
-  *right = promote_operand(p, *right);
+  *left = promote_operand(*left);
+  *right = promote_operand(*right);
   if (!is_integer((*left)->type) || !is_integer((*right)->type))
-    error_at(p, loc, "invalid operands to integer operator");
+    error_at(loc, "invalid operands to integer operator");
   type = common_integer_type((*left)->type, (*right)->type);
   *left = sema_convert_expr(p, type, *left, loc, "operand");
   *right = sema_convert_expr(p, type, *right, loc, "operand");
@@ -1191,17 +1182,17 @@ static AstNode *sema_additive(Parser *p, AstKind kind, AstNode *left,
   Type *type;
   if (is_integer(left->type) && is_integer(right->type)) {
     type = convert_integer_operands(p, &left, &right, loc);
-    return new_binary_expr(p, kind, left, right, type, loc);
+    return new_binary_expr(kind, left, right, type, loc);
   }
 
-  left = promote_operand(p, left);
-  right = promote_operand(p, right);
+  left = promote_operand(left);
+  right = promote_operand(right);
   if ((left->type->kind == TYPE_PTR && left->type->base->kind == TYPE_VOID) ||
       (right->type->kind == TYPE_PTR && right->type->base->kind == TYPE_VOID))
-    error_at(p, loc, "pointer arithmetic on void pointer");
+    error_at(loc, "pointer arithmetic on void pointer");
   if ((left->type->kind == TYPE_PTR && type_size(left->type->base) < 0) ||
       (right->type->kind == TYPE_PTR && type_size(right->type->base) < 0))
-    error_at(p, loc, "pointer arithmetic on incomplete type");
+    error_at(loc, "pointer arithmetic on incomplete type");
   if (kind == AST_ADD && left->type->kind != TYPE_PTR &&
       right->type->kind == TYPE_PTR) {
     AstNode *tmp = left;
@@ -1211,43 +1202,42 @@ static AstNode *sema_additive(Parser *p, AstKind kind, AstNode *left,
 
   if (left->type->kind == TYPE_PTR && right->type->kind == TYPE_PTR) {
     if (kind != AST_SUB)
-      error_at(p, loc, "invalid operands to binary +");
+      error_at(loc, "invalid operands to binary +");
     if (!same_type(unqualified_type(left->type->base),
                    unqualified_type(right->type->base)))
-      error_at(p, loc, "pointer subtraction requires compatible types");
+      error_at(loc, "pointer subtraction requires compatible types");
     /* Pointer difference has type ptrdiff_t, signed long on our target. */
     kind = AST_PTR_DIFF;
     type = &builtin_type_long;
   } else if (left->type->kind == TYPE_PTR) {
     if (!is_integer(right->type))
-      error_at(p, loc, "pointer offset must have integer type");
+      error_at(loc, "pointer offset must have integer type");
     kind = kind == AST_ADD ? AST_PTR_ADD : AST_PTR_SUB;
     type = left->type;
   } else {
-    error_at(p, loc, "invalid operands to binary %s",
-             kind == AST_ADD ? "+" : "-");
+    error_at(loc, "invalid operands to binary %s", kind == AST_ADD ? "+" : "-");
   }
-  return new_binary_expr(p, kind, left, right, type, loc);
+  return new_binary_expr(kind, left, right, type, loc);
 }
 
 AstNode *sema_binary(Parser *p, AstKind kind, AstNode *left, AstNode *right,
                      Token loc) {
   Type *type;
   if (kind != AST_COMMA) {
-    sema_check_nonvoid_expr(p, left);
-    sema_check_nonvoid_expr(p, right);
+    sema_check_nonvoid_expr(left);
+    sema_check_nonvoid_expr(right);
   }
 
   switch (kind) {
   case AST_COMMA:
-    left = convert_to_value(p, left);
-    right = convert_to_value(p, right);
+    left = convert_to_value(left);
+    right = convert_to_value(right);
     type = right->type;
     break;
   case AST_LOGICAL_AND:
   case AST_LOGICAL_OR:
-    left = sema_check_condition(p, left);
-    right = sema_check_condition(p, right);
+    left = sema_check_condition(left);
+    right = sema_check_condition(right);
     type = &builtin_type_int;
     break;
   case AST_MUL:
@@ -1260,10 +1250,10 @@ AstNode *sema_binary(Parser *p, AstKind kind, AstNode *left, AstNode *right,
     break;
   case AST_LSHIFT:
   case AST_RSHIFT:
-    left = promote_operand(p, left);
-    right = promote_operand(p, right);
+    left = promote_operand(left);
+    right = promote_operand(right);
     if (!is_integer(left->type) || !is_integer(right->type))
-      error_at(p, loc, "invalid operands to integer operator");
+      error_at(loc, "invalid operands to integer operator");
     type = left->type;
     break;
   case AST_ADD:
@@ -1276,61 +1266,60 @@ AstNode *sema_binary(Parser *p, AstKind kind, AstNode *left, AstNode *right,
   case AST_EQ:
   case AST_NE:
     if (is_record(left->type) || is_record(right->type))
-      error_at(p, loc, "invalid operands to comparison");
+      error_at(loc, "invalid operands to comparison");
     if (is_integer(left->type) && is_integer(right->type)) {
       convert_integer_operands(p, &left, &right, loc);
     } else {
-      left = promote_operand(p, left);
-      right = promote_operand(p, right);
+      left = promote_operand(left);
+      right = promote_operand(right);
     }
     type = &builtin_type_int;
     break;
   default:
-    error_at(p, loc, "invalid binary operator");
+    error_at(loc, "invalid binary operator");
   }
-  return new_binary_expr(p, kind, left, right, type, loc);
+  return new_binary_expr(kind, left, right, type, loc);
 }
 
 /* C11 6.5.2.1: E1[E2] is identical to *((E1) + (E2)). */
 AstNode *sema_subscript(Parser *p, AstNode *base, AstNode *index, Token loc) {
-  base = convert_to_value(p, base);
-  index = convert_to_value(p, index);
+  base = convert_to_value(base);
+  index = convert_to_value(index);
   if (!((base->type->kind == TYPE_PTR && is_integer(index->type)) ||
         (is_integer(base->type) && index->type->kind == TYPE_PTR)))
-    error_at(p, loc, "subscript requires a pointer and an integer");
-  return sema_unary(p, AST_DEREF, sema_binary(p, AST_ADD, base, index, loc),
-                    loc);
+    error_at(loc, "subscript requires a pointer and an integer");
+  return sema_unary(AST_DEREF, sema_binary(p, AST_ADD, base, index, loc), loc);
 }
 
 /*
  * C11 6.5.2.3: p->member is (*p).member. Keep record and array member
  * types intact so further member access, address-of, and array decay work.
  */
-AstNode *sema_member(Parser *p, AstNode *base, Token op, Token name) {
+AstNode *sema_member(AstNode *base, Token op, Token name) {
   if (op.kind == TOKEN_ARROW) {
-    base = convert_to_value(p, base);
+    base = convert_to_value(base);
     if (base->type->kind != TYPE_PTR || !is_record(base->type->base))
-      error_at(p, op, "'->' requires a pointer to struct or union");
-    base = sema_unary(p, AST_DEREF, base, op);
+      error_at(op, "'->' requires a pointer to struct or union");
+    base = sema_unary(AST_DEREF, base, op);
   } else if (!is_record(base->type)) {
-    error_at(p, op, "'.' requires a struct or union operand");
+    error_at(op, "'.' requires a struct or union operand");
   } else if (!is_lvalue(base)) {
-    base = convert_to_value(p, base);
+    base = convert_to_value(base);
   }
   if (type_size(base->type) < 0)
-    error_at(p, op, "member access on incomplete %s",
+    error_at(op, "member access on incomplete %s",
              base->type->kind == TYPE_STRUCT ? "struct" : "union");
   for (;;) {
     Member *member = find_member(base->type, name);
     AstNode *node;
     if (!member)
-      error_at(p, name, "no member named '%.*s' in %s", name.len, name.start,
+      error_at(name, "no member named '%.*s' in %s", name.len, name.start,
                base->type->kind == TYPE_STRUCT ? "struct" : "union");
-    node = new_expr(p, AST_MEMBER, member->type, op);
+    node = new_expr(AST_MEMBER, member->type, op);
     if (base->type->is_const) {
       node->type = const_type(node->type);
       if (!node->type)
-        error_at(p, op, "out of memory");
+        error_at(op, "out of memory");
     }
     node->d.member.base = base;
     node->d.member.member = member;
@@ -1350,13 +1339,13 @@ AstNode *sema_assignment(Parser *p, Token operator, AstNode *left,
   Token loc = operator;
   AstNode *node;
   if (!is_modifiable_lvalue(left))
-    error_at(p, loc, "invalid assignment target");
-  sema_check_nonvoid_expr(p, rhs);
+    error_at(loc, "invalid assignment target");
+  sema_check_nonvoid_expr(rhs);
   if (op != TOKEN_ASSIGN) {
     if (left->type->kind == TYPE_PTR && left->type->base->kind == TYPE_VOID)
-      error_at(p, loc, "pointer arithmetic on void pointer");
+      error_at(loc, "pointer arithmetic on void pointer");
     if (left->type->kind == TYPE_PTR && type_size(left->type->base) < 0)
-      error_at(p, loc, "pointer arithmetic on incomplete type");
+      error_at(loc, "pointer arithmetic on incomplete type");
     AstNode *binop;
     AstKind binop_ty;
 
@@ -1393,7 +1382,7 @@ AstNode *sema_assignment(Parser *p, Token operator, AstNode *left,
       binop_ty = AST_BIT_OR;
       break;
     default:
-      error_at(p, loc, "invalid assignment operator");
+      error_at(loc, "invalid assignment operator");
     }
 
     /*
@@ -1403,7 +1392,7 @@ AstNode *sema_assignment(Parser *p, Token operator, AstNode *left,
      */
     binop = sema_binary(p, binop_ty, left, rhs, loc);
     sema_convert_expr(p, left->type, binop, loc, "assignment");
-    node = new_expr(p, AST_COMPOUND_ASSIGN, left->type, loc);
+    node = new_expr(AST_COMPOUND_ASSIGN, left->type, loc);
     node->d.compound_assign.lhs = left;
     node->d.compound_assign.rhs = binop->d.binary.rhs;
     node->d.compound_assign.op = binop->kind;
@@ -1412,7 +1401,7 @@ AstNode *sema_assignment(Parser *p, Token operator, AstNode *left,
   }
 
   rhs = sema_convert_expr(p, left->type, rhs, loc, "assignment");
-  node = new_expr(p, AST_ASSIGN, unqualified_type(left->type), loc);
+  node = new_expr(AST_ASSIGN, unqualified_type(left->type), loc);
   node->d.binary.lhs = left;
   node->d.binary.rhs = rhs;
   return node;
@@ -1422,13 +1411,13 @@ AstNode *sema_conditional(Parser *p, AstNode *cond, AstNode *then_expr,
                           AstNode *else_expr, Token loc) {
   Type *type;
   AstNode *node;
-  cond = sema_check_condition(p, cond);
+  cond = sema_check_condition(cond);
   if (is_integer(then_expr->type) && is_integer(else_expr->type)) {
-    then_expr = promote_operand(p, then_expr);
-    else_expr = promote_operand(p, else_expr);
+    then_expr = promote_operand(then_expr);
+    else_expr = promote_operand(else_expr);
   } else {
-    then_expr = convert_to_value(p, then_expr);
-    else_expr = convert_to_value(p, else_expr);
+    then_expr = convert_to_value(then_expr);
+    else_expr = convert_to_value(else_expr);
   }
   type = then_expr->type;
   if (is_integer(type) && is_integer(else_expr->type)) {
@@ -1446,12 +1435,12 @@ AstNode *sema_conditional(Parser *p, AstNode *cond, AstNode *then_expr,
       if (type->base->is_const || else_expr->type->base->is_const)
         base = const_type(base);
       if (!base)
-        error_at(p, loc, "out of memory");
+        error_at(loc, "out of memory");
       type = pointer_to(base);
       if (!type)
-        error_at(p, loc, "out of memory");
+        error_at(loc, "out of memory");
     } else {
-      error_at(p, loc, "incompatible conditional operand types");
+      error_at(loc, "incompatible conditional operand types");
     }
   }
   if (type->kind != TYPE_VOID) {
@@ -1460,7 +1449,7 @@ AstNode *sema_conditional(Parser *p, AstNode *cond, AstNode *then_expr,
     else_expr =
         sema_convert_expr(p, type, else_expr, loc, "conditional operand");
   }
-  node = new_expr(p, AST_CONDITIONAL, type, loc);
+  node = new_expr(AST_CONDITIONAL, type, loc);
   node->d.conditional.cond = cond;
   node->d.conditional.then_expr = then_expr;
   node->d.conditional.else_expr = else_expr;
@@ -1485,7 +1474,7 @@ static int64_t checked_integer(Parser *p, Type *type, int64_t val) {
   if (type->is_unsigned)
     return (uint32_t)val;
   if (val < INT32_MIN || val > INT32_MAX)
-    parse_error(p, "integer overflow in constant expression");
+    error_at(p->current, "integer overflow in constant expression");
   return val;
 }
 
@@ -1505,7 +1494,7 @@ static int64_t eval_integer_binary(Parser *p, AstNode *expr, int64_t lhs,
                              integer_from_bits((uint64_t)lhs + (uint64_t)rhs));
     if ((rhs > 0 && lhs > INT64_MAX - rhs) ||
         (rhs < 0 && lhs < INT64_MIN - rhs))
-      parse_error(p, "integer overflow in constant expression");
+      error_at(p->current, "integer overflow in constant expression");
     return checked_integer(p, expr->type, lhs + rhs);
   case AST_SUB:
     if (expr->type->is_unsigned)
@@ -1513,7 +1502,7 @@ static int64_t eval_integer_binary(Parser *p, AstNode *expr, int64_t lhs,
                              integer_from_bits((uint64_t)lhs - (uint64_t)rhs));
     if ((rhs > 0 && lhs < INT64_MIN + rhs) ||
         (rhs < 0 && lhs > INT64_MAX + rhs))
-      parse_error(p, "integer overflow in constant expression");
+      error_at(p->current, "integer overflow in constant expression");
     return checked_integer(p, expr->type, lhs - rhs);
   case AST_MUL: {
     if (expr->type->is_unsigned)
@@ -1524,7 +1513,7 @@ static int64_t eval_integer_binary(Parser *p, AstNode *expr, int64_t lhs,
     uint64_t b = rhs < 0 ? 0 - (uint64_t)rhs : (uint64_t)rhs;
     uint64_t limit = (uint64_t)INT64_MAX + negative;
     if (b && a > limit / b)
-      parse_error(p, "integer overflow in constant expression");
+      error_at(p->current, "integer overflow in constant expression");
     uint64_t product = a * b;
     return checked_integer(p, expr->type,
                            integer_from_bits(negative ? 0 - product : product));
@@ -1532,7 +1521,7 @@ static int64_t eval_integer_binary(Parser *p, AstNode *expr, int64_t lhs,
   case AST_DIV:
   case AST_MOD:
     if (rhs == 0)
-      parse_error(p, "division by zero in constant expression");
+      error_at(p->current, "division by zero in constant expression");
     if (expr->type->is_unsigned)
       return checked_integer(
           p, expr->type,
@@ -1540,24 +1529,25 @@ static int64_t eval_integer_binary(Parser *p, AstNode *expr, int64_t lhs,
                                 ? (uint64_t)lhs / (uint64_t)rhs
                                 : (uint64_t)lhs % (uint64_t)rhs));
     if (lhs == (width == 64 ? INT64_MIN : INT32_MIN) && rhs == -1)
-      parse_error(p, "integer overflow in constant expression");
+      error_at(p->current, "integer overflow in constant expression");
     return checked_integer(p, expr->type,
                            expr->kind == AST_DIV ? lhs / rhs : lhs % rhs);
   case AST_LSHIFT:
     if (rhs < 0 || rhs >= width)
-      parse_error(p, "invalid shift count in constant expression");
+      error_at(p->current, "invalid shift count in constant expression");
     if (!expr->type->is_unsigned) {
       if (lhs < 0)
-        parse_error(p, "left shift of negative value in constant expression");
+        error_at(p->current,
+                 "left shift of negative value in constant expression");
       uint64_t limit = width == 64 ? INT64_MAX : INT32_MAX;
       if ((uint64_t)lhs > (limit >> rhs))
-        parse_error(p, "integer overflow in constant expression");
+        error_at(p->current, "integer overflow in constant expression");
     }
     return checked_integer(p, expr->type,
                            integer_from_bits((uint64_t)lhs << rhs));
   case AST_RSHIFT:
     if (rhs < 0 || rhs >= width)
-      parse_error(p, "invalid shift count in constant expression");
+      error_at(p->current, "invalid shift count in constant expression");
     if (expr->type->is_unsigned || lhs >= 0)
       return checked_integer(p, expr->type,
                              integer_from_bits((uint64_t)lhs >> rhs));
@@ -1582,7 +1572,7 @@ static int64_t eval_integer_binary(Parser *p, AstNode *expr, int64_t lhs,
   case AST_BIT_OR:
     return checked_integer(p, expr->type, lhs | rhs);
   default:
-    parse_error(p, "invalid constant expression");
+    error_at(p->current, "invalid constant expression");
   }
 }
 
@@ -1745,7 +1735,7 @@ static bool eval_constant_expr(Parser *p, AstNode *expr, bool allow_addr,
       return false;
     if (expr->kind == AST_NEG) {
       if (!expr->type->is_unsigned && left == INT64_MIN)
-        parse_error(p, "integer overflow in constant expression");
+        error_at(p->current, "integer overflow in constant expression");
       *result =
           checked_integer(p, expr->type, integer_from_bits(0 - (uint64_t)left));
     } else {
@@ -1787,7 +1777,7 @@ static bool eval_constant_expr(Parser *p, AstNode *expr, bool allow_addr,
 int64_t eval_const_expr(Parser *p, AstNode *expr) {
   int64_t value;
   if (!eval_constant_expr(p, expr, /*allow_addr=*/false, &value))
-    parse_error(p, "not an integer constant expression");
+    error_at(p->current, "not an integer constant expression");
   return value;
 }
 
@@ -1816,7 +1806,7 @@ void check_gotos(Parser *p) {
       if (same_identifier(label->name, ref->name))
         break;
     if (!label) {
-      error_at(p, ref->loc, "label '%.*s' not defined", ref->name.len,
+      error_at(ref->loc, "label '%.*s' not defined", ref->name.len,
                ref->name.start);
     }
   }

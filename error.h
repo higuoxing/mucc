@@ -22,6 +22,19 @@
 #include "lexer.h"
 
 /* Print "filename:line:col: error: ..." and exit. */
-extern void error_at_loc(const char *filename, Token loc, const char *fmt, ...);
+extern void error_at_loc(const char *filename, int line, int col,
+                         const char *fmt, ...);
+
+/*
+ * Report at a token, a SourcePosition, or an inline expression giving file,
+ * line, and column. Keeping the field names identical lets one macro serve
+ * all three.
+ */
+#define error_at(where, ...)                                                   \
+  do {                                                                         \
+    error_at_loc(file_name((where).file), (where).line, (where).col,           \
+                 __VA_ARGS__);                                                 \
+    exit(1);                                                                   \
+  } while (0)
 
 #endif

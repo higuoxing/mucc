@@ -22,10 +22,13 @@
 
 #include "error.h"
 
-void error_at_loc(const char *filename, Token loc, const char *fmt, ...) {
+void error_at_loc(const char *filename, int line, int col, const char *fmt,
+                  ...) {
   va_list ap;
   va_start(ap, fmt);
-  fprintf(stderr, "%s:%d:%d: error: ", filename, loc.line, loc.col);
+  /* A synthesized token has file id 0, which has no name. */
+  fprintf(stderr, "%s:%d:%d: error: ", filename ? filename : "<unknown>", line,
+          col);
   vfprintf(stderr, fmt, ap);
   fputc('\n', stderr);
   va_end(ap);

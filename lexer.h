@@ -56,6 +56,7 @@ typedef enum {
   TOKEN_GOTO,       /* 'goto' */
   TOKEN_GREATER,    /* '>' */
   TOKEN_GREATER_EQ, /* '>=' */
+  TOKEN_HASH,       /* '#' at line start: a preprocessing directive. */
   TOKEN_IDENTIFIER,
   TOKEN_IF,  /* 'if' */
   TOKEN_INT, /* 'int' */
@@ -111,29 +112,74 @@ enum {
   INT_SUFFIX_LONG_LONG = 1 << 2,
 };
 
+/*
+ * One opened source buffer. Tokens and locations refer to it by the small
+ * integer id, so a token costs one int rather than a name pointer.
+ */
+typedef struct SourceFile {
+  const char *name;     /* Path as opened, for diagnostics. */
+  const char *contents; /* NUL-terminated file contents. */
+  int length;           /* Bytes, excluding the final NUL. */
+  int id;               /* One-based index in the source file table. */
+} SourceFile;
+
+/*
+ * Where something is, for diagnostics. A token can be reported directly; this
+ * is for a position that has to be remembered before the cursor moves.
+ */
 typedef struct {
-  TokenKind kind;
-  const char *start;
-  int len;
-  int line;
-  int col; /* One-based byte column; tabs count as one byte. */
-  uint64_t int_literal_val;
-  unsigned int_literal_suffix;
-  unsigned char
-      *string_literal_val; /* Owned decoded bytes, including final zero. */
-  int string_literal_len;  /* Decoded byte count, including final zero. */
-} Token;
+  int file; /* Source file id; 0 means no file (a synthesized token). */
+  int line; /* One-based. */
+  int col;  /* One-based byte column; tabs count as one byte. */
+} SourcePosition;
 
 typedef struct {
-  const char *filename;
-  const char *source;
-  const char *cursor;
-  const char *line_start;
+  TokenKind kind;
+  const char *start; /* Points into the file this token was scanned from. */
+  int len;
+  int file; /* Source file id. */
   int line;
+  int col;
+
+  union {
+    struct {
+      uint64_t val;
+      unsigned suffix; /* INT_SUFFIX_* flags. */
+    } int_literal;
+    struct {
+      unsigned char *val; /* Owned decoded bytes, including final zero. */
+      int len;            /* Decoded byte count, including final zero. */
+    } string_literal;
+  } d;
+} Token;
+
+/*
+ * Scanner state for one source buffer. Line and column are maintained as the
+ * cursor advances, so a diagnostic never has to rescan the file. The whole
+ * struct is copied to save a position across an include.
+ */
+typedef struct {
+  int file;           /* Source file id. */
+  int line;           /* One-based. */
+  int col;            /* One-based byte column; tabs count as one byte. */
+  const char *cursor; /* Next byte to read. */
+  /* The preprocessor treats '#' in this position as a directive. */
+  bool at_bol;
 } Lexer;
 
 extern bool same_identifier(Token a, Token b);
-extern void lexer_init(Lexer *l, const char *filename, const char *source);
+/* Read the lexer's current position, for a diagnostic reported later. */
+extern SourcePosition lexer_position(const Lexer *l);
+/*
+ * Read a source file into a descriptor. NULL means it cannot be opened, so an
+ * include search can try the next directory. Never freed: tokens point into it.
+ */
+extern SourceFile *new_source_file(const char *filename);
+/* Path for a source file id, or NULL when the id is not one we opened. */
+extern const char *file_name(int file);
+extern void lexer_init(Lexer *l, const SourceFile *file);
+extern void lexer_advance(Lexer *l);
+extern void lexer_skip_horizontal(Lexer *l);
 extern Token lexer_next_token(Lexer *l);
 
 #endif

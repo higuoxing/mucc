@@ -94,7 +94,7 @@ static AstNode *new_ast_node(Parser *p, AstKind kind) {
   AstNode *node;
   node = calloc(1, sizeof(AstNode));
   if (!node)
-    parse_error(p, "out of memory");
+    error_at(p->current, "out of memory");
   node->kind = kind;
   node->loc = p->current;
   node->type = &builtin_type_void;
@@ -110,7 +110,7 @@ static AstNode *new_expr(Parser *p, AstKind kind, Type *type) {
 static void parser_advance(Parser *p) {
   p->previous = p->current;
   p->current = p->lookahead;
-  p->lookahead = lexer_next_token(&p->lexer);
+  p->lookahead = cpp_next_token(&p->cpp);
 }
 
 static void enter_scope(Parser *p) { ++p->scope_depth; }
@@ -137,7 +137,8 @@ static void reset_function_state(Parser *p) {
   p->loop_depth = 0;
 }
 
-static void parser_init(Parser *p, const char *filename, const char *source) {
+static void parser_init(Parser *p, const SourceFile *file,
+                        const Vector *include_paths) {
   p->tags = NULL;
   p->symbols = NULL;
   p->labels = NULL;
@@ -148,16 +149,16 @@ static void parser_init(Parser *p, const char *filename, const char *source) {
   p->last_parameter = NULL;
   p->scope_depth = 0;
   p->loop_depth = 0;
-  lexer_init(&p->lexer, filename, source);
+  cpp_init(&p->cpp, file, include_paths);
   p->previous = (Token){0};
-  p->current = lexer_next_token(&p->lexer);
-  p->lookahead = lexer_next_token(&p->lexer);
+  p->current = cpp_next_token(&p->cpp);
+  p->lookahead = cpp_next_token(&p->cpp);
   declare_builtins(p);
 }
 
 static void parse_expect(Parser *p, TokenKind t, const char *msg) {
   if (p->current.kind != t) {
-    parse_error(p, "%s", msg);
+    error_at(p->current, "%s", msg);
   }
 
   parser_advance(p);
@@ -168,14 +169,19 @@ static void parse_expect(Parser *p, TokenKind t, const char *msg) {
  * even when the next token is on another line or follows a comment.
  * Semicolons separating for clauses still use parse_expect at the next token.
  */
+static Token semicolon_at(Parser *p) {
+  /* Zero-width, just past the previous token: where the ';' should have been.
+   */
+  Token loc = p->previous;
+  loc.start += loc.len;
+  loc.col += loc.len;
+  loc.len = 0;
+  return loc;
+}
+
 static void parse_semicolon(Parser *p) {
-  if (p->current.kind != TOKEN_SEMICOLON) {
-    Token loc = p->previous;
-    loc.start += loc.len;
-    loc.col += loc.len;
-    loc.len = 0;
-    error_at(p, loc, "expect ';'");
-  }
+  if (p->current.kind != TOKEN_SEMICOLON)
+    error_at(semicolon_at(p), "expect ';'");
   parser_advance(p);
 }
 
@@ -197,7 +203,7 @@ static AstNode *parse_cast(Parser *p) {
     parse_expect(p, TOKEN_RPAREN, "expect ')'");
     if (p->current.kind == TOKEN_LBRACE)
       return parse_postfix_suffix(p, parse_compound_literal(p, type, loc));
-    return sema_cast(p, type, parse_cast(p), loc);
+    return sema_cast(type, parse_cast(p), loc);
   }
   return parse_unary(p);
 }
@@ -227,7 +233,7 @@ static AstNode *parse_unary(Parser *p) {
     } else {
       type = parse_unary(p)->type;
     }
-    return sema_sizeof(p, type, loc);
+    return sema_sizeof(type, loc);
   }
   if (p->current.kind == TOKEN_MINUS || p->current.kind == TOKEN_TILDE ||
       p->current.kind == TOKEN_BANG || p->current.kind == TOKEN_PLUS_PLUS ||
@@ -271,7 +277,7 @@ static AstNode *parse_unary(Parser *p) {
                   ? parse_unary(p)
                   : parse_cast(p);
 
-    return sema_unary(p, op, operand, op_tok);
+    return sema_unary(op, operand, op_tok);
   }
 
   return parse_postfix(p);
@@ -279,7 +285,7 @@ static AstNode *parse_unary(Parser *p) {
 
 static AstNode *parse_compound_literal(Parser *p, Type *type, Token loc) {
   if (p->current.kind != TOKEN_LBRACE)
-    parse_error(p, "expect '{'");
+    error_at(p->current, "expect '{'");
   return sema_compound_literal(p, type, parse_initializer(p), loc);
 }
 
@@ -294,7 +300,7 @@ static AstNode *parse_call_expr(Parser *p, Function *func) {
 
   ref = (CallRef *)calloc(1, sizeof(CallRef));
   if (!ref)
-    parse_error(p, "out of memory");
+    error_at(p->current, "out of memory");
   ref->name = p->current;
   ref->loc = p->current;
   ref->next = p->call_refs;
@@ -378,12 +384,12 @@ static AstNode *parse_postfix(Parser *p) {
       return parse_postfix_suffix(p, parse_builtin_va(p, builtin));
     Symbol *sym = find_symbol(p, p->current);
     if (!sym)
-      parse_error(p, "function '%.*s' not declared", p->current.len,
-                  p->current.start);
+      error_at(p->current, "function '%.*s' not declared", p->current.len,
+               p->current.start);
     if (sym->kind == SYMBOL_TYPEDEF)
-      parse_error(p, "typedef name is not an expression");
+      error_at(p->current, "typedef name is not an expression");
     if (sym->kind != SYMBOL_FUNCTION)
-      parse_error(p, "called object is not a function");
+      error_at(p->current, "called object is not a function");
     left = parse_call_expr(p, sym->d.function);
   } else {
     left = parse_primary(p);
@@ -401,10 +407,10 @@ static AstNode *parse_postfix_suffix(Parser *p, AstNode *left) {
       Token name;
       parser_advance(p);
       if (p->current.kind != TOKEN_IDENTIFIER)
-        parse_error(p, "expect member name");
+        error_at(p->current, "expect member name");
       name = p->current;
       parser_advance(p);
-      left = sema_member(p, left, op, name);
+      left = sema_member(left, op, name);
       continue;
     }
     if (op.kind == TOKEN_LBRACKET) {
@@ -418,7 +424,7 @@ static AstNode *parse_postfix_suffix(Parser *p, AstNode *left) {
     AstKind kind =
         op.kind == TOKEN_PLUS_PLUS ? AST_POST_INCREMENT : AST_POST_DECREMENT;
     parser_advance(p);
-    left = sema_unary(p, kind, left, op);
+    left = sema_unary(kind, left, op);
   }
 
   return left;
@@ -436,19 +442,19 @@ static AstNode *parse_string_literal(Parser *p) {
   vector_init(&bytes, sizeof(unsigned char));
   do {
     Token next = p->current;
-    if (bytes.len > (size_t)(INT_MAX - next.string_literal_len))
-      error_at(p, literal, "string literal is too long");
-    if (!vector_append(&bytes, next.string_literal_val,
-                       (size_t)next.string_literal_len - 1))
-      error_at(p, literal, "out of memory");
-    free(next.string_literal_val);
+    if (bytes.len > (size_t)(INT_MAX - next.d.string_literal.len))
+      error_at(literal, "string literal is too long");
+    if (!vector_append(&bytes, next.d.string_literal.val,
+                       (size_t)next.d.string_literal.len - 1))
+      error_at(literal, "out of memory");
+    free(next.d.string_literal.val);
     parser_advance(p);
   } while (p->current.kind == TOKEN_STRING_LITERAL);
   if (!vector_push(&bytes, &terminator))
-    error_at(p, literal, "out of memory");
-  literal.string_literal_len = (int)bytes.len;
-  literal.string_literal_val = vector_release(&bytes);
-  return sema_string_literal(p, literal);
+    error_at(literal, "out of memory");
+  literal.d.string_literal.len = (int)bytes.len;
+  literal.d.string_literal.val = vector_release(&bytes);
+  return sema_string_literal(literal);
 }
 
 /*
@@ -462,7 +468,7 @@ static AstNode *parse_primary(Parser *p) {
 
   if (p->current.kind == TOKEN_INT_LITERAL) {
     AstNode *expr;
-    expr = sema_integer_literal(p, p->current);
+    expr = sema_integer_literal(p->current);
 
     /* Consume the integer or character constant. */
     parser_advance(p);
@@ -482,16 +488,16 @@ static AstNode *parse_primary(Parser *p) {
     AstNode *expr;
     Symbol *sym = find_symbol(p, p->current);
     if (!sym)
-      parse_error(p, "undeclared identifier");
+      error_at(p->current, "undeclared identifier");
     if (sym->kind == SYMBOL_TYPEDEF)
-      parse_error(p, "typedef name is not an expression");
+      error_at(p->current, "typedef name is not an expression");
     if (sym->kind == SYMBOL_ENUMERATOR) {
-      expr = sema_enumerator_expr(p, sym->d.enumerator, p->current);
+      expr = sema_enumerator_expr(sym->d.enumerator, p->current);
       parser_advance(p);
       return expr;
     }
     if (sym->kind != SYMBOL_VARIABLE)
-      parse_error(p, "undeclared identifier");
+      error_at(p->current, "undeclared identifier");
     expr = new_expr(p, AST_VAR, sym->d.variable->type);
     expr->d.variable.var = sym->d.variable;
     /* Consume identifier. */
@@ -499,7 +505,7 @@ static AstNode *parse_primary(Parser *p) {
     return expr;
   }
 
-  parse_error(p, "expect expr");
+  error_at(p->current, "expect expr");
   return NULL;
 }
 
@@ -517,7 +523,7 @@ static Tag *find_tag(Parser *p, Token name, bool current_scope) {
 static Tag *declare_tag(Parser *p, Token name, Type *type) {
   Tag *tag = calloc(1, sizeof(Tag));
   if (!tag)
-    error_at(p, name, "out of memory");
+    error_at(name, "out of memory");
   tag->name = name;
   tag->type = type;
   tag->scope_depth = p->scope_depth;
@@ -547,24 +553,24 @@ static Type *parse_enum_specifier(Parser *p) {
     parser_advance(p);
     tag = find_tag(p, name, p->current.kind == TOKEN_LBRACE);
   } else if (p->current.kind != TOKEN_LBRACE) {
-    parse_error(p, "expect enum tag or '{'");
+    error_at(p->current, "expect enum tag or '{'");
   }
   if (tag && tag->type->kind != TYPE_ENUM)
-    error_at(p, name, "tag '%.*s' declared as a different kind", name.len,
+    error_at(name, "tag '%.*s' declared as a different kind", name.len,
              name.start);
   if (p->current.kind != TOKEN_LBRACE) {
     if (!tag || tag->type->size < 0)
-      error_at(p, name, "enum '%.*s' is not defined", name.len, name.start);
+      error_at(name, "enum '%.*s' is not defined", name.len, name.start);
     return tag->type;
   }
   if (tag) {
     if (tag->type->size >= 0 || tag->is_defining)
-      error_at(p, name, "redefinition of enum '%.*s'", name.len, name.start);
+      error_at(name, "redefinition of enum '%.*s'", name.len, name.start);
     type = tag->type;
   } else {
     type = enum_type();
     if (!type)
-      error_at(p, loc, "out of memory");
+      error_at(loc, "out of memory");
     if (name.kind == TOKEN_IDENTIFIER)
       tag = declare_tag(p, name, type);
   }
@@ -602,7 +608,7 @@ static Type *parse_enum_specifier(Parser *p) {
 static void check_member_names(Parser *p, Type *type, Member *member) {
   if (member->name.kind == TOKEN_IDENTIFIER) {
     if (find_member(type, member->name))
-      error_at(p, member->name, "duplicate %s member",
+      error_at(member->name, "duplicate %s member",
                type->kind == TYPE_STRUCT ? "struct" : "union");
   } else {
     Member *inner;
@@ -625,21 +631,21 @@ static Member *parse_record_member(Parser *p, Type *type, Type *base, int *size,
   int padding = 0;
 
   if (!anonymous && name.kind != TOKEN_IDENTIFIER)
-    error_at(p, name, "expect member name");
+    error_at(name, "expect member name");
   if (member_type->kind == TYPE_VOID)
-    error_at(p, name, "member has void type");
+    error_at(name, "member has void type");
   if (type_size(member_type) < 0)
-    error_at(p, name, "member has incomplete type");
+    error_at(name, "member has incomplete type");
   alignment = type_alignment(member_type);
   if (type->kind == TYPE_STRUCT) {
     padding = (alignment - *size % alignment) % alignment;
     if (*size > INT_MAX - padding ||
         type_size(member_type) > INT_MAX - *size - padding)
-      error_at(p, name, "struct size exceeds supported limit");
+      error_at(name, "struct size exceeds supported limit");
   }
   member = calloc(1, sizeof(Member));
   if (!member)
-    error_at(p, name, "out of memory");
+    error_at(name, "out of memory");
   member->name = name;
   member->type = member_type;
   check_member_names(p, type, member);
@@ -681,18 +687,18 @@ static Type *parse_record_specifier(Parser *p) {
                    p->current.kind == TOKEN_LBRACE ||
                        p->current.kind == TOKEN_SEMICOLON);
   } else if (p->current.kind != TOKEN_LBRACE) {
-    parse_error(p, "expect %s tag or '{'", kind_name);
+    error_at(p->current, "expect %s tag or '{'", kind_name);
   }
 
   if (tag) {
     if (tag->type->kind != kind)
-      error_at(p, name, "tag '%.*s' declared as a different kind", name.len,
+      error_at(name, "tag '%.*s' declared as a different kind", name.len,
                name.start);
     type = tag->type;
   } else {
     type = record_type(kind);
     if (!type)
-      error_at(p, loc, "out of memory");
+      error_at(loc, "out of memory");
     if (name.kind == TOKEN_IDENTIFIER) {
       tag = declare_tag(p, name, type);
     }
@@ -700,7 +706,7 @@ static Type *parse_record_specifier(Parser *p) {
   if (p->current.kind != TOKEN_LBRACE)
     return type;
   if (type->size >= 0 || (tag && tag->is_defining))
-    error_at(p, name, "redefinition of %s '%.*s'", kind_name, name.len,
+    error_at(name, "redefinition of %s '%.*s'", kind_name, name.len,
              name.start);
   if (tag)
     tag->is_defining = true;
@@ -710,7 +716,7 @@ static Type *parse_record_specifier(Parser *p) {
     Type *base;
     bool anonymous;
     if (p->current.kind == TOKEN_EOF)
-      parse_error(p, "expect '}'");
+      error_at(p->current, "expect '}'");
     base = parse_declspecs(p, NULL, &anonymous);
     anonymous = anonymous && p->current.kind == TOKEN_SEMICOLON;
     for (;;) {
@@ -723,10 +729,10 @@ static Type *parse_record_specifier(Parser *p) {
     parse_semicolon(p);
   }
   if (!type->members)
-    parse_error(p, "empty %ss are not supported", kind_name);
+    error_at(p->current, "empty %ss are not supported", kind_name);
   int padding = (type->alignment - size % type->alignment) % type->alignment;
   if (size > INT_MAX - padding)
-    error_at(p, loc, "%s size exceeds supported limit", kind_name);
+    error_at(loc, "%s size exceeds supported limit", kind_name);
   type->size = size + padding;
   if (tag)
     tag->is_defining = false;
@@ -789,13 +795,13 @@ static Type *parse_declspecs(Parser *p, StorageClass *storage_class,
       else if (kind == TOKEN_STATIC)
         storage = STORAGE_STATIC;
       if (!storage_class)
-        parse_error(p, "%.*s is not allowed here", p->current.len,
-                    p->current.start);
+        error_at(p->current, "%.*s is not allowed here", p->current.len,
+                 p->current.start);
       if (*storage_class == storage)
-        parse_error(p, "duplicate %.*s specifier", p->current.len,
-                    p->current.start);
+        error_at(p->current, "duplicate %.*s specifier", p->current.len,
+                 p->current.start);
       if (*storage_class != STORAGE_NONE)
-        parse_error(p, "multiple storage classes in declaration");
+        error_at(p->current, "multiple storage classes in declaration");
       *storage_class = storage;
       parser_advance(p);
       continue;
@@ -840,22 +846,22 @@ static Type *parse_declspecs(Parser *p, StorageClass *storage_class,
       flag = DECLSPEC_TYPEDEF_NAME;
       break;
     default:
-      parse_error(p, "expect type specifier");
+      error_at(p->current, "expect type specifier");
     }
 
     if (flag == DECLSPEC_LONG && (specs & DECLSPEC_LONG))
       flag = DECLSPEC_LONG_LONG;
     if (specs & flag) {
-      parse_error(p, "duplicate %.*s type specifier", p->current.len,
-                  p->current.start);
+      error_at(p->current, "duplicate %.*s type specifier", p->current.len,
+               p->current.start);
     }
     if ((specs & DECLSPEC_EXCLUSIVE) || ((flag & DECLSPEC_EXCLUSIVE) && specs))
-      parse_error(p, "invalid combination of type specifiers");
+      error_at(p->current, "invalid combination of type specifiers");
     specs |= flag;
     if (((specs & DECLSPEC_CHAR) &&
          (specs & (DECLSPEC_INT | DECLSPEC_LONG | DECLSPEC_SHORT))) ||
         ((specs & DECLSPEC_SHORT) && (specs & DECLSPEC_LONG)))
-      parse_error(p, "invalid combination of type specifiers");
+      error_at(p->current, "invalid combination of type specifiers");
     if (kind == TOKEN_STRUCT || kind == TOKEN_UNION) {
       if (anonymous_record)
         *anonymous_record = p->lookahead.kind == TOKEN_LBRACE;
@@ -920,14 +926,14 @@ static Type *parse_declspecs(Parser *p, StorageClass *storage_class,
     type = &builtin_type_unsigned_long_long;
     break;
   case DECLSPEC_NONE:
-    parse_error(p, "expect type specifier");
+    error_at(p->current, "expect type specifier");
   default:
-    parse_error(p, "invalid combination of type specifiers");
+    error_at(p->current, "invalid combination of type specifiers");
   }
   if (is_const) {
     type = const_type(type);
     if (!type)
-      parse_error(p, "out of memory");
+      error_at(p->current, "out of memory");
   }
   return type;
 }
@@ -953,12 +959,12 @@ static Type *parse_declarator(Parser *p, Type *type, Token *name) {
   while (p->current.kind == TOKEN_STAR) {
     type = pointer_to(type);
     if (!type)
-      parse_error(p, "out of memory");
+      error_at(p->current, "out of memory");
     parser_advance(p);
     while (p->current.kind == TOKEN_CONST) {
       type = const_type(type);
       if (!type)
-        parse_error(p, "out of memory");
+        error_at(p->current, "out of memory");
       parser_advance(p);
     }
   }
@@ -972,25 +978,25 @@ static Type *parse_declarator(Parser *p, Type *type, Token *name) {
     int64_t length = -1;
     parser_advance(p);
     if (type->kind == TYPE_VOID)
-      error_at(p, loc, "array element has void type");
+      error_at(loc, "array element has void type");
     if (type_size(type) < 0)
-      error_at(p, loc, "array element has incomplete type");
+      error_at(loc, "array element has incomplete type");
     if (p->current.kind != TOKEN_RBRACKET) {
       bound = parse_conditional(p);
       if (!is_integer(bound->type))
-        error_at(p, bound->loc, "array bound must have integer type");
+        error_at(bound->loc, "array bound must have integer type");
       length = eval_const_expr(p, bound);
       if (length == 0 || (length < 0 && !bound->type->is_unsigned))
-        error_at(p, bound->loc, "array bound must be positive");
+        error_at(bound->loc, "array bound must be positive");
       if ((uint64_t)length > (uint64_t)(INT_MAX / type_size(type)))
-        error_at(p, bound->loc, "array size exceeds supported limit");
+        error_at(bound->loc, "array size exceeds supported limit");
     }
     parse_expect(p, TOKEN_RBRACKET, "expect ']'");
     type = array_of(type, (int)length);
     if (!type)
-      error_at(p, loc, "out of memory");
+      error_at(loc, "out of memory");
     if (p->current.kind == TOKEN_LBRACKET)
-      parse_error(p, "multidimensional arrays are not supported yet");
+      error_at(p->current, "multidimensional arrays are not supported yet");
   }
   return type;
 }
@@ -1006,7 +1012,7 @@ static Type *parse_type_name(Parser *p) {
   Type *type = parse_declspecs(p, NULL, NULL);
   type = parse_declarator(p, type, &name);
   if (name.kind == TOKEN_IDENTIFIER)
-    error_at(p, name, "type name cannot contain an identifier");
+    error_at(name, "type name cannot contain an identifier");
   return type;
 }
 
@@ -1026,11 +1032,11 @@ static AstNode *parse_typedef_declarators(Parser *p, Type *base) {
     Token name;
     Type *type = parse_declarator(p, base, &name);
     if (name.kind != TOKEN_IDENTIFIER)
-      error_at(p, name, "expect typedef name");
+      error_at(name, "expect typedef name");
     if (p->current.kind == TOKEN_ASSIGN)
-      parse_error(p, "typedef cannot have an initializer");
+      error_at(p->current, "typedef cannot have an initializer");
     if (p->current.kind == TOKEN_LPAREN)
-      parse_error(p, "function typedefs are not supported yet");
+      error_at(p->current, "function typedefs are not supported yet");
     declare_typedef(p, name, type);
     if (p->current.kind != TOKEN_COMMA)
       break;
@@ -1054,12 +1060,12 @@ static Designator *parse_designation(Parser *p) {
   while (p->current.kind == TOKEN_DOT || p->current.kind == TOKEN_LBRACKET) {
     Designator *designator = calloc(1, sizeof(Designator));
     if (!designator)
-      parse_error(p, "out of memory");
+      error_at(p->current, "out of memory");
     designator->loc = p->current;
     parser_advance(p);
     if (designator->loc.kind == TOKEN_DOT) {
       if (p->current.kind != TOKEN_IDENTIFIER)
-        parse_error(p, "expect member name");
+        error_at(p->current, "expect member name");
       designator->member = p->current;
       parser_advance(p);
     } else {
@@ -1078,7 +1084,7 @@ static Initializer *parse_initializer(Parser *p) {
   Initializer *init = calloc(1, sizeof(Initializer));
   Initializer **tail;
   if (!init)
-    parse_error(p, "out of memory");
+    error_at(p->current, "out of memory");
   tail = &init->children;
   init->loc = p->current;
   if (p->current.kind != TOKEN_LBRACE) {
@@ -1087,7 +1093,7 @@ static Initializer *parse_initializer(Parser *p) {
   }
   parser_advance(p);
   if (p->current.kind == TOKEN_RBRACE)
-    parse_error(p, "empty initializer lists are not supported in C11");
+    error_at(p->current, "empty initializer lists are not supported in C11");
   for (;;) {
     Designator *designators = parse_designation(p);
     *tail = parse_initializer(p);
@@ -1123,13 +1129,13 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
   base = parse_declspecs(p, &storage_class, NULL);
   if (storage_class == STORAGE_TYPEDEF) {
     if (!allow_typedef)
-      error_at(p, loc, "typedef is not allowed in a for initializer");
+      error_at(loc, "typedef is not allowed in a for initializer");
     return parse_typedef_declarators(p, base);
   }
   if (storage_class == STORAGE_STATIC && !allow_typedef)
-    error_at(p, loc, "static is not allowed in a for initializer");
+    error_at(loc, "static is not allowed in a for initializer");
   if (storage_class == STORAGE_EXTERN && !allow_typedef)
-    error_at(p, loc, "extern is not allowed in a for initializer");
+    error_at(loc, "extern is not allowed in a for initializer");
   if ((is_record(base) || base->kind == TYPE_ENUM) &&
       p->current.kind == TOKEN_SEMICOLON) {
     AstNode *decl = new_ast_node(p, AST_DECL);
@@ -1143,18 +1149,18 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
     AstNode *decl;
 
     if (type->kind == TYPE_VOID)
-      error_at(p, name.kind == TOKEN_IDENTIFIER ? name : p->current,
+      error_at((name.kind == TOKEN_IDENTIFIER ? name : p->current),
                "variable has void type");
     if (name.kind != TOKEN_IDENTIFIER)
-      error_at(p, name, "expect variable name");
+      error_at(name, "expect variable name");
     if (storage_class == STORAGE_STATIC)
-      error_at(p, name, "static local variables are not supported yet");
+      error_at(name, "static local variables are not supported yet");
     if (storage_class == STORAGE_EXTERN)
-      error_at(p, name,
-               "block-scope extern declarations are not supported yet");
+      error_at(name, "block-scope extern declarations are not supported yet");
     if (p->current.kind == TOKEN_LPAREN)
-      parse_error(p, "function declarations in a declaration list are not "
-                     "supported yet");
+      error_at(p->current,
+               "function declarations in a declaration list are not "
+               "supported yet");
 
     decl = new_ast_node(p, AST_DECL);
     decl->loc = name;
@@ -1167,7 +1173,7 @@ static AstNode *parse_decl(Parser *p, bool allow_typedef) {
                                                    parse_initializer(p));
     }
     if (type_size(decl->d.decl.var->type) < 0)
-      error_at(p, name, "variable has incomplete type");
+      error_at(name, "variable has incomplete type");
 
     *tail = decl;
     tail = &decl->next;
@@ -1533,7 +1539,7 @@ static AstNode *parse_expression(Parser *p) {
  * The caller handles its surrounding parentheses or semicolons.
  */
 static AstNode *parse_condition(Parser *p) {
-  return sema_check_condition(p, parse_expression(p));
+  return sema_check_condition(parse_expression(p));
 }
 
 /*
@@ -1594,7 +1600,7 @@ static AstNode *parse_return_stmt(Parser *p) {
   parse_expect(p, TOKEN_RETURN, "expect 'return'");
   if (p->current.kind == TOKEN_SEMICOLON &&
       p->current_function->return_type->kind != TYPE_VOID)
-    error_at(p, loc, "expect return expr");
+    error_at(loc, "expect return expr");
 
   ast = new_ast_node(p, AST_RETURN);
   ast->loc = loc;
@@ -1624,7 +1630,7 @@ static AstNode *parse_compound_stmt(Parser *p) {
   parse_expect(p, TOKEN_LBRACE, "expect '{'");
   while (p->current.kind != TOKEN_RBRACE) {
     if (p->current.kind == TOKEN_EOF)
-      parse_error(p, "expect '}'");
+      error_at(p->current, "expect '}'");
 
     *tail = parse_stmt(p, /*allow_decl=*/true);
     /* A declaration with several names is a chain of AST_DECL nodes. */
@@ -1658,10 +1664,11 @@ static AstNode *parse_global_declaration(Parser *p, Type *base, Type *type,
   for (;;) {
     AstNode *decl;
     if (name.kind != TOKEN_IDENTIFIER)
-      error_at(p, name, "expect variable name");
+      error_at(name, "expect variable name");
     if (p->current.kind == TOKEN_LPAREN)
-      parse_error(p, "function declarations in a declaration list are not "
-                     "supported yet");
+      error_at(p->current,
+               "function declarations in a declaration list are not "
+               "supported yet");
     decl = declare_global_variable(p, name, type, storage_class,
                                    p->current.kind == TOKEN_ASSIGN);
     if (p->current.kind == TOKEN_ASSIGN) {
@@ -1704,7 +1711,7 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
   vector_init(&param_types, sizeof(Type *));
   fn->loc = func_name;
   if (return_type->kind == TYPE_ARRAY)
-    error_at(p, func_name, "function cannot return an array");
+    error_at(func_name, "function cannot return an array");
 
   parse_expect(p, TOKEN_LPAREN, "expect '('");
   enter_scope(p);
@@ -1722,7 +1729,7 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
 
       if (p->current.kind == TOKEN_ELLIPSIS) {
         if (param_types.len == 0)
-          parse_error(p, "expect parameter before '...'");
+          error_at(p->current, "expect parameter before '...'");
         is_variadic = true;
         parser_advance(p);
         break;
@@ -1732,20 +1739,20 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
       if (param_type->kind == TYPE_ARRAY) {
         param_type = pointer_to(param_type->base);
         if (!param_type)
-          parse_error(p, "out of memory");
+          error_at(p->current, "out of memory");
       }
       if (param_type->kind == TYPE_VOID && !param_type->is_const &&
           param_types.len == 0 && param_name.kind != TOKEN_IDENTIFIER &&
           p->current.kind == TOKEN_RPAREN)
         break;
       if (param_type->kind == TYPE_VOID)
-        error_at(p,
-                 param_name.kind == TOKEN_IDENTIFIER ? param_name : p->current,
-                 "parameter has void type");
+        error_at(
+            (param_name.kind == TOKEN_IDENTIFIER ? param_name : p->current),
+            "parameter has void type");
       if (param_types.len >= INT_MAX)
-        parse_error(p, "too many function parameters");
+        error_at(p->current, "too many function parameters");
       if (!vector_push(&param_types, &param_type))
-        parse_error(p, "out of memory");
+        error_at(p->current, "out of memory");
 
       if (param_name.kind == TOKEN_IDENTIFIER) {
         sema_check_variable_name(p, param_name, true);
@@ -1756,7 +1763,7 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
         param_tail = &param->next;
       } else {
         if (p->current.kind != TOKEN_COMMA && p->current.kind != TOKEN_RPAREN)
-          parse_error(p, "expect parameter name");
+          error_at(p->current, "expect parameter name");
         if (!unnamed_param.start)
           unnamed_param = param_loc;
       }
@@ -1771,18 +1778,18 @@ static AstNode *parse_function_declaration(Parser *p, Type *return_type,
   parse_expect(p, TOKEN_RPAREN, "expect ')'");
 
   if (p->current.kind != TOKEN_SEMICOLON && p->current.kind != TOKEN_LBRACE)
-    parse_error(p, "expect ';' or '{'");
+    error_at(p->current, "expect ';' or '{'");
 
   definition = p->current.kind == TOKEN_LBRACE;
   if (definition && unnamed_param.start)
-    error_at(p, unnamed_param, "expect parameter name in function definition");
+    error_at(unnamed_param, "expect parameter name in function definition");
   if (definition) {
     Variable *param;
     if (is_record(return_type) && type_size(return_type) < 0)
-      error_at(p, func_name, "function return type is incomplete");
+      error_at(func_name, "function return type is incomplete");
     for (param = params; param; param = param->next)
       if (type_size(param->type) < 0)
-        error_at(p, param->name, "parameter has incomplete type");
+        error_at(param->name, "parameter has incomplete type");
   }
 
   nparams = (int)param_types.len;
@@ -1833,7 +1840,7 @@ static AstNode *parse_external_declaration(Parser *p) {
   }
   type = parse_declarator(p, base, &name);
   if (name.kind != TOKEN_IDENTIFIER)
-    error_at(p, name, "expect declaration name");
+    error_at(name, "expect declaration name");
   if (p->current.kind == TOKEN_LPAREN)
     return parse_function_declaration(p, type, name,
                                       storage_class == STORAGE_STATIC);
@@ -1962,7 +1969,7 @@ static AstNode *parse_do_stmt(Parser *p) {
 static AstNode *parse_break_stmt(Parser *p) {
   /* Check before consuming so the error lands on 'break' itself. */
   if (p->loop_depth == 0 && !p->current_switch)
-    parse_error(p, "break statement not within loop or switch");
+    error_at(p->current, "break statement not within loop or switch");
   parse_expect(p, TOKEN_BREAK, "expect 'break'");
   parse_semicolon(p);
   return new_ast_node(p, AST_BREAK);
@@ -1976,7 +1983,7 @@ static AstNode *parse_break_stmt(Parser *p) {
 static AstNode *parse_continue_stmt(Parser *p) {
   /* Check before consuming so the error lands on 'continue' itself. */
   if (p->loop_depth == 0)
-    parse_error(p, "continue statement not within loop");
+    error_at(p->current, "continue statement not within loop");
   parse_expect(p, TOKEN_CONTINUE, "expect 'continue'");
   parse_semicolon(p);
   return new_ast_node(p, AST_CONTINUE);
@@ -1996,11 +2003,11 @@ static AstNode *parse_goto_stmt(Parser *p) {
   goto_tok = p->current;
   parse_expect(p, TOKEN_GOTO, "expect 'goto'");
   if (p->current.kind != TOKEN_IDENTIFIER)
-    parse_error(p, "expect label name");
+    error_at(p->current, "expect label name");
 
   ref = (GotoRef *)calloc(1, sizeof(GotoRef));
   if (!ref)
-    parse_error(p, "out of memory");
+    error_at(p->current, "out of memory");
   ref->name = p->current;
   ref->loc = goto_tok;
   ref->next = p->goto_refs;
@@ -2031,7 +2038,7 @@ static AstNode *parse_label_stmt(Parser *p) {
    */
   for (label = p->labels; label; label = label->next)
     if (same_identifier(label->name, name))
-      parse_error(p, "duplicate label");
+      error_at(p->current, "duplicate label");
 
   /* Consume the identifier and ':'. */
   parser_advance(p);
@@ -2039,7 +2046,7 @@ static AstNode *parse_label_stmt(Parser *p) {
 
   label = (Label *)calloc(1, sizeof(Label));
   if (!label)
-    parse_error(p, "out of memory");
+    error_at(p->current, "out of memory");
   label->name = name;
   label->next = p->labels;
   p->labels = label;
@@ -2063,8 +2070,7 @@ static AstNode *parse_switch_stmt(Parser *p) {
   parse_expect(p, TOKEN_SWITCH, "expect 'switch'");
   parse_expect(p, TOKEN_LPAREN, "expect '('");
   switch_node = new_ast_node(p, AST_SWITCH);
-  switch_node->d.switch_stmt.cond =
-      sema_switch_condition(p, parse_expression(p));
+  switch_node->d.switch_stmt.cond = sema_switch_condition(parse_expression(p));
   parse_expect(p, TOKEN_RPAREN, "expect ')'");
 
   /*
@@ -2095,13 +2101,13 @@ static AstNode *parse_case_stmt(Parser *p) {
 
   /* Check before consuming so the error lands on 'case' itself. */
   if (!p->current_switch)
-    parse_error(p, "case label not within a switch statement");
+    error_at(p->current, "case label not within a switch statement");
 
   case_tok = p->current;
   parse_expect(p, TOKEN_CASE, "expect 'case'");
   expr = parse_assignment(p);
   if (!is_integer(expr->type))
-    error_at(p, expr->loc, "case label must have integer type");
+    error_at(expr->loc, "case label must have integer type");
   expr = sema_convert_expr(p, p->current_switch->d.switch_stmt.cond->type, expr,
                            case_tok, "case label");
   val = eval_const_expr(p, expr);
@@ -2111,7 +2117,7 @@ static AstNode *parse_case_stmt(Parser *p) {
     if (!entry->node->d.case_stmt.is_default &&
         entry->node->d.case_stmt.val == val) {
       p->current = case_tok;
-      parse_error(p, "duplicate case value");
+      error_at(p->current, "duplicate case value");
     }
 
   parse_expect(p, TOKEN_COLON, "expect ':'");
@@ -2121,7 +2127,7 @@ static AstNode *parse_case_stmt(Parser *p) {
 
   entry = (CaseList *)calloc(1, sizeof(CaseList));
   if (!entry)
-    parse_error(p, "out of memory");
+    error_at(p->current, "out of memory");
   entry->node = case_node;
   entry->next = p->current_switch->d.switch_stmt.cases;
   p->current_switch->d.switch_stmt.cases = entry;
@@ -2142,12 +2148,12 @@ static AstNode *parse_default_stmt(Parser *p) {
 
   /* Check before consuming so the error lands on 'default' itself. */
   if (!p->current_switch)
-    parse_error(p, "default label not within a switch statement");
+    error_at(p->current, "default label not within a switch statement");
 
   for (entry = p->current_switch->d.switch_stmt.cases; entry;
        entry = entry->next)
     if (entry->node->d.case_stmt.is_default)
-      parse_error(p, "multiple default labels in one switch");
+      error_at(p->current, "multiple default labels in one switch");
 
   parse_expect(p, TOKEN_DEFAULT, "expect 'default'");
   parse_expect(p, TOKEN_COLON, "expect ':'");
@@ -2157,7 +2163,7 @@ static AstNode *parse_default_stmt(Parser *p) {
 
   entry = (CaseList *)calloc(1, sizeof(CaseList));
   if (!entry)
-    parse_error(p, "out of memory");
+    error_at(p->current, "out of memory");
   entry->node = default_node;
   entry->next = p->current_switch->d.switch_stmt.cases;
   p->current_switch->d.switch_stmt.cases = entry;
@@ -2186,7 +2192,7 @@ static AstNode *parse_stmt(Parser *p, bool allow_decl) {
   if (is_declspec(p, p->current)) {
     if (allow_decl)
       return parse_decl(p, true);
-    parse_error(p, "expect statement");
+    error_at(p->current, "expect statement");
   }
 
   switch (p->current.kind) {
@@ -2231,16 +2237,17 @@ static AstNode *parse_stmt(Parser *p, bool allow_decl) {
  *   external-definition*
  * (C11 6.9)
  */
-AstNode *parse_translation_unit(const char *filename, const char *source) {
+AstNode *parse_translation_unit(const SourceFile *file,
+                                const Vector *include_paths) {
   Parser p;
   AstNode *head = NULL;
   AstNode **tail = &head;
 
-  parser_init(&p, filename, source);
+  parser_init(&p, file, include_paths);
 
   /* Keep the empty-input diagnostics: the loop would just not run. */
   if (p.current.kind == TOKEN_EOF)
-    parse_error(&p, "expect type specifier");
+    error_at((p.current), "expect type specifier");
 
   while (p.current.kind != TOKEN_EOF) {
     *tail = parse_external_declaration(&p);
