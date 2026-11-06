@@ -2255,6 +2255,7 @@ AstNode *parse_translation_unit(const SourceFile *file,
       tail = &(*tail)->next;
   }
 
+  pp_check_end(&p.pp);
   sema_check_global_variables(&p);
   check_calls(&p);
   return head;

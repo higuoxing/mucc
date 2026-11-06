@@ -34,6 +34,7 @@ void pp_init(Preprocessor *pp, const SourceFile *file,
   pp->include_depth = 0;
   pp->macros = NULL;
   vector_init(&pp->expansions, sizeof(MacroFrame));
+  vector_init(&pp->conditionals, sizeof(ConditionalFrame));
 }
 
 static Macro *find_macro(const Preprocessor *pp, Token name) {
@@ -83,21 +84,54 @@ static void push_include(Preprocessor *pp, const SourceFile *file) {
     error_at(lexer_position(&pp->lexer), "out of memory");
   frame->lexer = pp->lexer;
   frame->outer = pp->include_frames;
+  frame->conditional_depth = (int)pp->conditionals.len;
   pp->include_frames = frame;
   lexer_init(&pp->lexer, file);
   pp->include_depth++;
 }
 
+/* A #if cannot span files, so any level still open here began inside. */
+static ConditionalFrame *top_conditional(const Preprocessor *pp) {
+  if (!pp->conditionals.len)
+    return NULL;
+  return &((ConditionalFrame *)pp->conditionals.data)[pp->conditionals.len - 1];
+}
+
 /* Included buffers stay allocated: tokens point into them until exit. */
 static bool pop_include(Preprocessor *pp) {
   IncludeFrame *frame = pp->include_frames;
+  ConditionalFrame *open;
   if (!frame)
     return false;
+  open = top_conditional(pp);
+  if (open && (int)pp->conditionals.len > frame->conditional_depth)
+    error_at(open->loc, "unterminated conditional directive");
   pp->lexer = frame->lexer;
   pp->include_frames = frame->outer;
   pp->include_depth--;
   free(frame);
   return true;
+}
+
+/* True when every enclosing conditional is taking its branch. */
+static bool conditionals_active(const Preprocessor *pp) {
+  ConditionalFrame *frame = top_conditional(pp);
+  return !frame || frame->active;
+}
+
+static void push_conditional(Preprocessor *pp, bool active,
+                             SourcePosition loc) {
+  ConditionalFrame frame;
+  frame.active = active;
+  frame.loc = loc;
+  if (!vector_push(&pp->conditionals, &frame))
+    error_at(pp->lexer, "out of memory");
+}
+
+static void pop_conditional(Preprocessor *pp, SourcePosition loc) {
+  if (!pp->conditionals.len)
+    error_at(loc, "#endif without #if");
+  pp->conditionals.len--;
 }
 
 /* Try one candidate path, returning NULL when it cannot be opened. */
@@ -296,9 +330,51 @@ static void include_directive(Preprocessor *pp) {
   free(header);
 }
 
+/* Discard the rest of a directive, including its newline. */
+static void skip_directive_line(Preprocessor *pp) {
+  Lexer *l = &pp->lexer;
+  while (*l->cursor != '\0' && *l->cursor != '\n' && *l->cursor != '\r')
+    lexer_advance(l);
+  if (*l->cursor == '\n' || *l->cursor == '\r')
+    lexer_advance(l);
+}
+
+/* The name after #ifdef or #ifndef. */
+static Token conditional_name(Preprocessor *pp) {
+  Lexer *l = &pp->lexer;
+  Token name;
+  lexer_skip_horizontal(l);
+  if (!(isalpha((unsigned char)*l->cursor) || *l->cursor == '_'))
+    error_at(lexer_position(l), "expect macro name");
+  name = lexer_next_token(l);
+  finish_directive_line(pp);
+  return name;
+}
+
+static void ifdef_directive(Preprocessor *pp, bool expect_defined) {
+  SourcePosition loc = lexer_position(&pp->lexer);
+  Token name = conditional_name(pp);
+  bool defined = find_macro(pp, name) != NULL;
+  /*
+   * An inactive outer branch keeps everything inside it inactive, whatever
+   * this condition says.
+   */
+  bool active = conditionals_active(pp) && (defined == expect_defined);
+  push_conditional(pp, active, loc);
+}
+
+static void endif_directive(Preprocessor *pp) {
+  SourcePosition loc = lexer_position(&pp->lexer);
+  finish_directive_line(pp);
+  pop_conditional(pp, loc);
+}
+
 /* The directives this preprocessor understands. */
 typedef enum {
   DIRECTIVE_DEFINE,
+  DIRECTIVE_ENDIF,
+  DIRECTIVE_IFDEF,
+  DIRECTIVE_IFNDEF,
   DIRECTIVE_INCLUDE,
   DIRECTIVE_UNDEF,
 } DirectiveKind;
@@ -316,9 +392,9 @@ typedef struct {
 #define DIR(name, kind) {name, sizeof(name) - 1, kind}
 
 static const Directive directives[] = {
-    DIR("define", DIRECTIVE_DEFINE),
-    DIR("include", DIRECTIVE_INCLUDE),
-    DIR("undef", DIRECTIVE_UNDEF),
+    DIR("define", DIRECTIVE_DEFINE),   DIR("endif", DIRECTIVE_ENDIF),
+    DIR("ifdef", DIRECTIVE_IFDEF),     DIR("ifndef", DIRECTIVE_IFNDEF),
+    DIR("include", DIRECTIVE_INCLUDE), DIR("undef", DIRECTIVE_UNDEF),
 };
 
 #undef DIR
@@ -364,6 +440,29 @@ static void pp_directive(Preprocessor *pp) {
     error_at(name_loc, "preprocessor directive '%.*s' is not supported yet",
              len, name);
 
+  /*
+   * Conditional directives are handled even inside a skipped branch, since they
+   * are what tracks the nesting. Anything else in a skipped branch is ignored,
+   * including #include and #define.
+   */
+  switch (directive->kind) {
+  case DIRECTIVE_IFDEF:
+    ifdef_directive(pp, true);
+    return;
+  case DIRECTIVE_IFNDEF:
+    ifdef_directive(pp, false);
+    return;
+  case DIRECTIVE_ENDIF:
+    endif_directive(pp);
+    return;
+  default:
+    break;
+  }
+  if (!conditionals_active(pp)) {
+    skip_directive_line(pp);
+    return;
+  }
+
   switch (directive->kind) {
   case DIRECTIVE_DEFINE:
     define_macro(pp);
@@ -374,6 +473,10 @@ static void pp_directive(Preprocessor *pp) {
   case DIRECTIVE_UNDEF:
     undef_macro(pp);
     break;
+  case DIRECTIVE_ENDIF:
+  case DIRECTIVE_IFDEF:
+  case DIRECTIVE_IFNDEF:
+    break; /* Handled above, before the skipped-branch test. */
   }
 }
 
@@ -438,12 +541,20 @@ static void push_macro(Preprocessor *pp, Macro *macro) {
 Token pp_next_token(Preprocessor *pp) {
   for (;;) {
     Token tok = next_raw_token(pp);
+    /*
+     * Directives are recognized in every branch, since #ifndef and #endif are
+     * what track the nesting. In a skipped branch pp_directive drops the rest
+     * of the line and expands nothing.
+     */
     if (tok.kind == TOKEN_HASH) {
       pp_directive(pp);
       continue;
     }
     /* End of an included file: resume the file that included it. */
     if (tok.kind == TOKEN_EOF && pop_include(pp))
+      continue;
+    /* Tokens in a skipped branch never reach the parser. */
+    if (!conditionals_active(pp))
       continue;
     if (tok.kind == TOKEN_IDENTIFIER) {
       Macro *macro = find_macro(pp, tok);
@@ -455,4 +566,10 @@ Token pp_next_token(Preprocessor *pp) {
     }
     return tok;
   }
+}
+
+void pp_check_end(const Preprocessor *pp) {
+  ConditionalFrame *open = top_conditional(pp);
+  if (open)
+    error_at(open->loc, "unterminated conditional directive");
 }

@@ -27,7 +27,18 @@
 typedef struct IncludeFrame {
   Lexer lexer;
   struct IncludeFrame *outer;
+  /*
+   * Conditionals cannot span a file boundary, so the depth at entry is
+   * recorded and checked when the file ends.
+   */
+  int conditional_depth;
 } IncludeFrame;
+
+/* One conditional-compilation level, from #if to its #endif. */
+typedef struct {
+  bool active;        /* This branch is being compiled. */
+  SourcePosition loc; /* The opening directive, for diagnostics. */
+} ConditionalFrame;
 
 /* One active object-like macro: a replacement list of already-lexed tokens. */
 typedef struct Macro {
@@ -54,12 +65,16 @@ typedef struct {
   IncludeFrame *include_frames; /* Innermost first; NULL at the top level. */
   const Vector *include_paths;  /* char * directory names, in search order. */
   int include_depth;
-  Macro *macros;     /* Defined macros, most recent first. */
-  Vector expansions; /* MacroFrame, innermost last. */
+  Macro *macros;       /* Defined macros, most recent first. */
+  Vector expansions;   /* MacroFrame, innermost last. */
+  Vector conditionals; /* ConditionalFrame, innermost last. */
 } Preprocessor;
 
 extern void pp_init(Preprocessor *pp, const SourceFile *file,
                     const Vector *include_paths);
 extern Token pp_next_token(Preprocessor *pp);
+/* Report a conditional directive left open at the end of the translation unit.
+ */
+extern void pp_check_end(const Preprocessor *pp);
 
 #endif

@@ -3892,6 +3892,12 @@ echo 'int which(void) { return 31; }' > "$WORK_DIR/inc2/which.h"
 echo > "$WORK_DIR/semi.h"
 echo 'int x' >> "$WORK_DIR/semi.h"
 echo '#include "recurse.h"' > "$WORK_DIR/recurse.h"
+cat > "$WORK_DIR/guard.h" <<'GUARD'
+#ifndef GUARD_H
+#define GUARD_H
+int guard_value(void) { return 42; }
+#endif
+GUARD
 
 check include-quote 42 '#include "inc.h"
 int main(void) { return inc() + 2; }'
@@ -3986,6 +3992,62 @@ int main(void) { return A; }
 #define B 42' '1:11: error: undeclared identifier'
 check_error undef-no-name '#undef
 int main(void) { return 0; }' '1:7: error: expect macro name'
+
+# Conditional compilation. A skipped group is discarded, but its #ifndef and
+# #endif still take part in tracking the nesting depth.
+check ifndef-taken 42 '#ifndef FOO
+#define FOO
+#define N 42
+#endif
+int main(void) { return N; }'
+check ifdef-not-taken 42 '#define FOO
+#ifdef FOO
+int main(void) { return 42; }
+#endif'
+check ifndef-skipped 42 '#define FOO
+#ifndef FOO
+int main(void) { return 1; }
+#endif
+int main(void) { return 42; }'
+check ifdef-skipped 42 '#ifdef FOO
+int unused = 1;
+#endif
+int main(void) { return 42; }'
+check ifndef-nested 42 '#ifndef A
+#ifndef B
+#define N 42
+#endif
+#endif
+int main(void) { return N; }'
+check ifndef-include-guard 42 '#ifndef GUARD_H
+#define GUARD_H
+#define VALUE 42
+#endif
+#ifndef GUARD_H
+#define VALUE 0
+#endif
+int main(void) { return VALUE; }'
+check ifndef-guard-across-include 42 '#include "guard.h"
+#include "guard.h"
+int main(void) { return guard_value(); }'
+
+# A guard symbol defined in the file is visible to a later #ifndef in the same
+# run, so the second block is skipped.
+check ifndef-skipped-body 42 '#ifndef NEVER
+#ifdef ALWAYS
+int unused = 1;
+#endif
+#endif
+int main(void) { return 42; }'
+
+check_error ifdef-no-name '#ifdef
+int main(void) { return 0; }' '1:7: error: expect macro name'
+check_error ifndef-no-name '#ifndef
+int main(void) { return 0; }' '1:8: error: expect macro name'
+check_error endif-without-if '#endif
+int main(void) { return 0; }' '1:7: error: #endif without #if'
+check_error ifndef-unterminated '#ifndef FOO
+int main(void) { return 0; }' '1:8: error: unterminated conditional directive'
 
 include_semi_name=include-diagnostic-file
 include_semi_input="$WORK_DIR/$include_semi_name.c"
