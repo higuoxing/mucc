@@ -25,6 +25,7 @@ typedef int int32_t;
 typedef unsigned int uint32_t;
 typedef long int64_t;
 typedef unsigned long uint64_t;
+typedef unsigned long uintptr_t;
 
 #define INT32_MIN (-2147483647 - 1)
 #define INT32_MAX 2147483647

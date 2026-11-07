@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "error.h"
+#include "hashset.h"
 #include "preprocessor.h"
 
 /* Match GCC and Clang's default limit */
@@ -61,15 +62,9 @@ struct Macro {
  * A token's hide set records macros that cannot expand it again. Keeping this
  * on tokens preserves recursion suppression across argument substitution.
  */
-typedef struct HideSet HideSet;
-struct HideSet {
-  Macro *macro;
-  const HideSet *next;
-};
-
 struct MacroToken {
   Token token;
-  const HideSet *hideset;
+  const HashSet *hideset;
   MacroToken *next;
 };
 
@@ -1014,43 +1009,71 @@ static Token next_source_token(Preprocessor *pp) {
   }
 }
 
-static bool hideset_contains(const HideSet *set, const Macro *macro) {
-  for (; set; set = set->next)
-    if (set->macro == macro)
-      return true;
-  return false;
-}
-
 /*
  * Hide sets are immutable and shared by token copies for the translation unit.
+ * NULL represents an empty set. Copy before adding any new suppressed macros.
  */
-static const HideSet *hide_macro(const HideSet *set, Macro *macro) {
-  HideSet *entry;
-  if (hideset_contains(set, macro))
+static HashSet *copy_hideset(const HashSet *set, Token loc) {
+  HashSet *copy = malloc(sizeof(*copy));
+  if (!copy)
+    error_at(loc, "out of memory");
+  hashset_init(copy);
+  if (set && !hashset_copy(copy, set))
+    error_at(loc, "out of memory");
+  return copy;
+}
+
+static const HashSet *hide_macro(const HashSet *set, Macro *macro) {
+  HashSet *result;
+  if (set && hashset_contains(set, macro))
     return set;
-  entry = malloc(sizeof(*entry));
-  if (!entry)
+  result = copy_hideset(set, macro->name);
+  if (!hashset_add(result, macro))
     error_at(macro->name, "out of memory");
-  entry->macro = macro;
-  entry->next = set;
-  return entry;
-}
-
-static const HideSet *hideset_union(const HideSet *a, const HideSet *b) {
-  for (; a; a = a->next)
-    b = hide_macro(b, a->macro);
-  return b;
-}
-
-static const HideSet *hideset_intersection(const HideSet *a, const HideSet *b) {
-  const HideSet *result = NULL;
-  for (; a; a = a->next)
-    if (hideset_contains(b, a->macro))
-      result = hide_macro(result, a->macro);
   return result;
 }
 
-static MacroToken *new_macro_token(Token token, const HideSet *hideset) {
+static const HashSet *hideset_union(const HashSet *a, const HashSet *b,
+                                    Token loc) {
+  HashSet *result = NULL;
+  size_t i;
+  if (!a || a == b)
+    return b;
+  if (!b)
+    return a;
+  for (i = 0; i < a->capacity; ++i) {
+    const void *macro = a->entries[i];
+    if (!macro || hashset_contains(b, macro))
+      continue;
+    if (!result)
+      result = copy_hideset(b, loc);
+    if (!hashset_add(result, macro))
+      error_at(loc, "out of memory");
+  }
+  return result ? result : b;
+}
+
+static const HashSet *hideset_intersection(const HashSet *a, const HashSet *b,
+                                           Token loc) {
+  HashSet *result = NULL;
+  size_t i;
+  if (!a || !b)
+    return NULL;
+  if (a == b)
+    return a;
+  for (i = 0; i < a->capacity; ++i) {
+    const void *macro = a->entries[i];
+    if (!macro || !hashset_contains(b, macro))
+      continue;
+    if (!result)
+      result = copy_hideset(NULL, loc);
+    if (!hashset_add(result, macro))
+      error_at(loc, "out of memory");
+  }
+  return result;
+}
+
+static MacroToken *new_macro_token(Token token, const HashSet *hideset) {
   MacroToken *node = calloc(1, sizeof(*node));
   if (!node)
     error_at(token, "out of memory");
@@ -1157,7 +1180,7 @@ static int macro_parameter_index(const Macro *macro, Token token) {
 }
 
 static MacroToken *substitute_macro(Preprocessor *pp, Macro *macro,
-                                    Vector *args, const HideSet *hideset,
+                                    Vector *args, const HashSet *hideset,
                                     Token name) {
   MacroToken *result = NULL;
   MacroToken **tail = &result;
@@ -1178,8 +1201,8 @@ static MacroToken *substitute_macro(Preprocessor *pp, Macro *macro,
         arg->expanded_ready = true;
       }
       for (item = arg->expanded; item; item = item->next) {
-        *tail =
-            new_macro_token(item->token, hideset_union(item->hideset, hideset));
+        *tail = new_macro_token(item->token,
+                                hideset_union(item->hideset, hideset, name));
         tail = &(*tail)->next;
       }
     } else {
@@ -1194,7 +1217,7 @@ static MacroToken expand_next(TokenStream *stream) {
   for (;;) {
     MacroToken tok = take_macro_token(stream);
     Macro *macro;
-    const HideSet *hideset;
+    const HashSet *hideset;
     Vector args;
     MacroToken *replacement;
     MacroToken **tail;
@@ -1203,7 +1226,7 @@ static MacroToken expand_next(TokenStream *stream) {
         (stream->condition && pp_is_keyword(tok.token, "defined")))
       return tok;
     macro = find_macro(stream->pp, tok.token);
-    if (!macro || hideset_contains(tok.hideset, macro))
+    if (!macro || (tok.hideset && hashset_contains(tok.hideset, macro)))
       return tok;
     if (macro->function_like &&
         peek_macro_token(stream)->token.kind != TOKEN_LPAREN)
@@ -1217,7 +1240,7 @@ static MacroToken expand_next(TokenStream *stream) {
        * Only suppression shared by both ends of the invocation survives.
        * The closing ')' can come from outside the current replacement list.
        */
-      hideset = hideset_intersection(hideset, close.hideset);
+      hideset = hideset_intersection(hideset, close.hideset, tok.token);
     }
     hideset = hide_macro(hideset, macro);
     replacement =

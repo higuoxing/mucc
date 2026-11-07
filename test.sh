@@ -4080,6 +4080,34 @@ int main(void) { return A; }
 check_error undef-no-name '#undef
 int main(void) { return 0; }' '1:7: error: expect macro name'
 
+# A recursive expansion chain grows its hide set beyond the initial table.
+check define-large-hideset 84 'int A00 = 42;
+#define A00 A01
+#define A01 A02
+#define A02 A03
+#define A03 A04
+#define A04 A05
+#define A05 A06
+#define A06 A07
+#define A07 A08
+#define A08 A09
+#define A09 A10
+#define A10 A11
+#define A11 A12
+#define A12 A13
+#define A13 A14
+#define A14 A15
+#define A15 A16
+#define A16 A17
+#define A17 A18
+#define A18 A19
+#define A19 A20
+#define A20 A21
+#define A21 A22
+#define A22 A23
+#define A23 A00
+int main(void) { return A00 + A00; }'
+
 # Function-like macros expand arguments, substitute parameters, then rescan.
 cat >"$WORK_DIR/function-macro.h" <<'FUNCTION_MACRO'
 #ifndef FUNCTION_MACRO_H
