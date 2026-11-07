@@ -4067,9 +4067,6 @@ check_error define-no-name '#define
 int main(void) { return 0; }' '1:8: error: expect macro name'
 check_error define-name-not-identifier '#define 1 2
 int main(void) { return 0; }' '1:9: error: expect macro name'
-check_error define-function-like '#define N(x) x
-int main(void) { return 0; }' \
-  '1:10: error: function-like macros are not supported yet'
 check_error define-redefinition '#define N 1
 #define N 2
 int main(void) { return 0; }' "2:9: error: 'N' redefined"
@@ -4082,6 +4079,182 @@ int main(void) { return A; }
 #define B 42' '1:11: error: undeclared identifier'
 check_error undef-no-name '#undef
 int main(void) { return 0; }' '1:7: error: expect macro name'
+
+# Function-like macros expand arguments, substitute parameters, then rescan.
+cat >"$WORK_DIR/function-macro.h" <<'FUNCTION_MACRO'
+#ifndef FUNCTION_MACRO_H
+#define FUNCTION_MACRO_H
+#define HEADER_ADD(a,b) ((a) + (b))
+#endif
+FUNCTION_MACRO
+check macro-function-include 42 '#include "function-macro.h"
+#include "function-macro.h"
+int main(void) { return HEADER_ADD(20, 22); }'
+check define-function-like 42 '#define N(x) x
+int main(void) { return N(42); }'
+check macro-function-empty-params 42 '#define ANSWER() 42
+int main(void) { return ANSWER(); }'
+check macro-function-multiple-params 42 '#define ADD(a, b) ((a) + (b))
+int main(void) { return ADD(19, 23); }'
+check macro-function-whitespace 42 '#define ID(x) x
+int main(void) { return ID /* gap */
+(42); }'
+check macro-function-definition-gap 42 '#define VALUE (42)
+int main(void) { return VALUE; }'
+check macro-function-definition-comment 42 '#define VALUE/**/(42)
+int main(void) { return VALUE; }'
+check macro-function-definition-splice 42 '#define ID\
+(x) x
+int main(void) { return ID(42); }'
+check macro-function-no-invocation 42 '#define f(x) 99
+int f = 42;
+int main(void) { return f; }'
+check macro-function-no-expanded-open-paren 42 'int f(int x) { return x; }
+#define f(x) 99
+#define OPEN (
+int main(void) { return f OPEN 42); }'
+check macro-function-nested-parentheses 42 '#define ID(x) (x)
+int main(void) { return ID((1, 42)); }'
+check macro-function-nested-call 42 '#define ADD(a, b) ((a) + (b))
+int main(void) { return ADD(ADD(10, 11), ADD(20, 1)); }'
+check macro-function-same-macro-argument 42 '#define INC(x) ((x) + 1)
+int main(void) { return INC(INC(40)); }'
+check macro-function-object-argument 42 '#define N 21
+#define TWICE(x) ((x) + (x))
+int main(void) { return TWICE(N); }'
+check macro-function-argument-comma 42 '#define PAIR 1, 42
+#define ID(x) x
+int main(void) { return (ID(PAIR)); }'
+check macro-function-unused-argument 42 '#define BAD(x) x
+#define IGNORE(x) 42
+int main(void) { return IGNORE(BAD(1, 2)); }'
+check macro-function-empty-argument 42 '#define VALUE(x) 42 x
+int main(void) { return VALUE(); }'
+check macro-function-empty-arguments 42 '#define VALUE(a, b) a 42 b
+int main(void) { return VALUE(,); }'
+check macro-function-empty-replacement 42 '#define NOTHING(x)
+int main(void) { NOTHING(unknown) return 42; }'
+check macro-function-argument-expands-empty 42 '#define EMPTY
+#define VALUE(x) 42 x
+int main(void) { return VALUE(EMPTY); }'
+check macro-function-object-alias 42 '#define ID(x) x
+#define ALIAS ID
+int main(void) { return ALIAS(42); }'
+check macro-function-returned-name 42 '#define ID(x) x
+#define GET() ID
+int main(void) { return GET()(42); }'
+check macro-function-substituted-name 42 '#define ID(x) x
+#define APPLY(f, x) f(x)
+int main(void) { return APPLY(ID, 42); }'
+check macro-function-rescan-boundary 42 'int ID(int x) { return x + 1; }
+#define ID(x) x
+int main(void) { return ID(ID)(41); }'
+check macro-function-partial-invocation 42 '#define ADD(a, b) ((a) + (b))
+#define START ADD(40,
+int main(void) { return START 2); }'
+check macro-function-no-extra-parentheses 14 '#define TWICE(x) x * 2
+int main(void) { return TWICE(10 + 2); }'
+check macro-function-keyword-param 42 '#define ID(int) int
+int main(void) { return ID(42); }'
+check macro-function-keyword-name 42 '#define int(x) x
+int main(void) { return int(42); }'
+check macro-function-string-duplication 1 '#define TWICE(x) x x
+#define S "a"
+int main(void) { return sizeof(TWICE(S)) == 3 && TWICE("b")[1] == 98 && S[0] == 97; }'
+check macro-function-parameter-in-literal 1 '#define TEXT(x) "x"
+int main(void) { return TEXT(42)[0] == 120; }'
+check macro-function-direct-recursion 42 'int f(int x) { return x; }
+#define f(x) f((x) + 1)
+int main(void) { return f(41); }'
+check macro-function-indirect-recursion 42 'int f(int x) { return x; }
+#define f(x) g(x)
+#define g(x) f((x) + 1)
+int main(void) { return f(41); }'
+check macro-function-suppressed-argument 42 'int f(int x) { return x; }
+#define f(x) f((x) + 1)
+#define ID(x) x
+int main(void) { return ID(f(41)); }'
+check macro-function-identical-redefinition 42 '#define ADD(a,b) ((a) + (b))
+#define ADD( a , b ) ((a) + (b))
+int main(void) { return ADD(20, 22); }'
+check macro-function-undef 42 '#define f(x) 99
+#undef f
+int f(int x) { return x; }
+int main(void) { return f(42); }'
+check macro-function-if 42 '#define ADD(a,b) ((a) + (b))
+#define ALIAS ADD
+#if defined(ADD) && ALIAS(20, ADD(10, 12)) == 42
+int main(void) { return 42; }
+#endif'
+check macro-function-if-bare-name 42 '#define F(x) 1
+#if F
+int unused;
+#endif
+int main(void) { return 42; }'
+check macro-function-if-short-circuit 42 '#define DIV(a,b) ((a) / (b))
+#if 1 || DIV(1, 0)
+int main(void) { return 42; }
+#endif'
+check macro-function-if-recursion 42 '#define F() F
+#define ID(x) x
+#if ID(F())
+int unused;
+#endif
+int main(void) { return 42; }'
+
+check macro-function-invocation-hide-intersection 42 '#define F(x) x
+#define G F
+#define H(x) G(x)
+int main(void) { return F(H)(42); }'
+check macro-function-prescan-forms-arguments 42 '#define PAIR 1, 41
+#define ADD(a,b) ((a) + (b))
+#define PASS(x) ADD(x)
+int main(void) { return PASS(PAIR); }'
+check macro-function-parameter-named-like-macro 42 '#define F(F) F
+int main(void) { return F(42); }'
+check macro-function-multiline-initializer 42 '#define ROW(name, value) \
+  {name, sizeof(name) - 1, value}
+struct Entry { char *name; int length; int value; };
+struct Entry entries[] = {ROW("answer", 42)};
+int main(void) { return entries[0].length == 6 ? entries[0].value : 0; }'
+check macro-function-empty-params-redefinition 42 '#define F() 42
+#define F( ) 42
+int main(void) { return F(); }'
+check_error macro-function-name-at-eof '#define F() 99
+F' '2:1: error: expect type specifier'
+
+check_error macro-function-duplicate-param '#define F(x,x) x' "1:13: error: duplicate macro parameter 'x'"
+check_error macro-function-invalid-param '#define F(1) 1' '1:11: error: expect macro parameter name'
+check_error macro-function-trailing-comma '#define F(x,) x' '1:13: error: expect macro parameter name'
+check_error macro-function-missing-comma '#define F(x y) x' "1:13: error: expect ',' or ')' in macro parameter list"
+check_error macro-function-missing-close '#define F(x' "1:12: error: expect ',' or ')' in macro parameter list"
+check_error macro-function-variadic '#define F(x, ...) x' '1:14: error: variadic macros are not supported yet'
+check_error macro-function-stringification '#define F(x) #x' '1:14: error: macro stringification and token pasting are not supported yet'
+check_error macro-function-pasting '#define F(x) x##x' '1:15: error: macro stringification and token pasting are not supported yet'
+check_error macro-function-too-few '#define F(x,y) x
+F(1)' "2:1: error: wrong number of arguments to macro 'F'"
+check_error macro-function-too-many '#define F(x) x
+F(1,2)' "2:1: error: wrong number of arguments to macro 'F'"
+check_error macro-function-zero-params-extra '#define F() 42
+F(1)' "2:1: error: wrong number of arguments to macro 'F'"
+check_error macro-function-braces-do-not-protect-comma '#define F(x) x
+F({1,2})' "2:1: error: wrong number of arguments to macro 'F'"
+check_error macro-function-unterminated '#define F(x) x
+F((1)' "2:1: error: unterminated invocation of macro 'F'"
+check_error macro-function-if-unterminated '#define F(x) x
+#if F(1
+#endif' "2:5: error: unterminated invocation of macro 'F'"
+check_error macro-function-parameter-redefinition '#define F(x) x
+#define F(y) y' "2:9: error: 'F' redefined"
+check_error macro-function-kind-redefinition '#define F() 42
+#define F 42' "2:9: error: 'F' redefined"
+check_error macro-function-dead-if-arguments '#define F(x) x
+#if 1 || F(1,2)
+#endif' "2:10: error: wrong number of arguments to macro 'F'"
+check_error macro-function-prescan-comma-arity '#define PAIR 1, 2
+#define ONE(x) x
+#define PASS(x) ONE(x)
+PASS(PAIR)' "3:17: error: wrong number of arguments to macro 'ONE'"
 
 # Conditional compilation. A skipped group is discarded, but its #ifndef and
 # #endif still take part in tracking the nesting depth.

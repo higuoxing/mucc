@@ -23,12 +23,11 @@
 #include "vector.h"
 
 /*
- * The preprocessor owns two stacks of internal records: one saved scanner
- * state per open include, and one conditional per #if. Only pointers to them
- * cross this boundary, so their layouts stay in preprocessor.c.
+ * Source and macro-expansion records are private to preprocessor.c.
  */
 typedef struct IncludeFrame IncludeFrame;
 typedef struct Macro Macro;
+typedef struct MacroToken MacroToken;
 
 /*
  * The parser asks for tokens here, never from the lexer. Directives are
@@ -40,7 +39,7 @@ typedef struct {
   const Vector *include_paths;  /* char * directory names, in search order. */
   int include_depth;
   Macro *macros;       /* Defined macros, most recent first. */
-  Vector expansions;   /* MacroFrame, innermost last. */
+  MacroToken *pending; /* Tokens awaiting macro expansion. */
   Vector conditionals; /* ConditionalFrame, innermost last. */
 } Preprocessor;
 

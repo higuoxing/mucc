@@ -46,20 +46,50 @@ typedef struct {
   SourcePosition loc; /* The opening directive, for diagnostics. */
 } ConditionalFrame;
 
-/* One active object-like macro: a replacement list of already-lexed tokens. */
+/*
+ * A macro stores its parameter names and unexpanded replacement tokens.
+ */
 struct Macro {
   Token name;
+  bool function_like;
+  Vector params; /* Token elements; empty for object-like macros. */
   Vector tokens; /* The replacement list, in source order. */
-  /* Set while this macro is being expanded, which stops direct recursion. */
-  bool expanding;
   struct Macro *next;
 };
 
-/* A cursor into one macro's replacement list, innermost last. */
+/*
+ * A token's hide set records macros that cannot expand it again. Keeping this
+ * on tokens preserves recursion suppression across argument substitution.
+ */
+typedef struct HideSet HideSet;
+struct HideSet {
+  Macro *macro;
+  const HideSet *next;
+};
+
+struct MacroToken {
+  Token token;
+  const HideSet *hideset;
+  MacroToken *next;
+};
+
+/*
+ * An argument or #if expression ends at its own EOF. Ordinary expansion can
+ * continue into source tokens after exhausting a replacement list.
+ */
 typedef struct {
-  Macro *macro; /* Not const: popping the frame clears macro->expanding. */
-  int index;    /* Next token of macro->tokens to replay. */
-} MacroFrame;
+  Preprocessor *pp;
+  MacroToken *pending;
+  bool read_source;
+  bool condition;
+  Token end;
+} TokenStream;
+
+typedef struct {
+  MacroToken *tokens;
+  MacroToken *expanded;
+  bool expanded_ready;
+} MacroArgument;
 
 /*
  * State for evaluating a controlling constant expression (C11 6.10.1p4), used
@@ -95,7 +125,7 @@ void pp_init(Preprocessor *pp, const SourceFile *file,
   pp->include_paths = include_paths;
   pp->include_depth = 0;
   pp->macros = NULL;
-  vector_init(&pp->expansions, sizeof(MacroFrame));
+  pp->pending = NULL;
   vector_init(&pp->conditionals, sizeof(ConditionalFrame));
 }
 
@@ -334,39 +364,87 @@ static bool is_same_replacement(const Vector *a, const Vector *b) {
   return true;
 }
 
+/*
+ * The opening parenthesis is adjacent to the macro name. Return the first
+ * replacement-token index, after the closing parenthesis.
+ */
+static size_t parse_macro_params(const Vector *tokens, Token end,
+                                 Vector *params) {
+  const Token *items = tokens->data;
+  size_t i = 1;
+  if (i < tokens->len && items[i].kind == TOKEN_RPAREN)
+    return i + 1;
+  for (;;) {
+    size_t j;
+    Token name = i < tokens->len ? items[i] : end;
+    if (name.kind == TOKEN_ELLIPSIS)
+      error_at(name, "variadic macros are not supported yet");
+    if (!is_pp_identifier(name))
+      error_at(name, "expect macro parameter name");
+    for (j = 0; j < params->len; ++j)
+      if (same_identifier(((Token *)params->data)[j], name))
+        error_at(name, "duplicate macro parameter '%.*s'", name.len,
+                 name.start);
+    if (!vector_push(params, &name))
+      error_at(name, "out of memory");
+    ++i;
+    Token separator = i < tokens->len ? items[i] : end;
+    if (separator.kind == TOKEN_RPAREN)
+      return i + 1;
+    if (separator.kind != TOKEN_COMMA)
+      error_at(separator, "expect ',' or ')' in macro parameter list");
+    ++i;
+  }
+}
+
+static bool is_same_parameters(const Vector *a, const Vector *b) {
+  size_t i;
+  if (a->len != b->len)
+    return false;
+  for (i = 0; i < a->len; ++i)
+    if (!same_identifier(((Token *)a->data)[i], ((Token *)b->data)[i]))
+      return false;
+  return true;
+}
+
 static void define_macro(Preprocessor *pp) {
   Lexer *l = &pp->lexer;
-  SourcePosition name_loc;
   Token name;
+  Token end;
+  Vector params;
   Vector tokens;
   Macro *macro;
+  bool function_like;
+  size_t i;
 
   lexer_skip_horizontal(l);
   if (!(isalpha((unsigned char)*l->cursor) || *l->cursor == '_'))
     error_at(lexer_position(l), "expect macro name");
-  name_loc = lexer_position(l);
-
-  /* The name is a normal identifier token, so it carries a spelling. */
   name = lexer_next_token(l);
-  name.file = name_loc.file;
-  name.line = name_loc.line;
-  name.col = name_loc.col;
-
-  /*
-   * A '(' immediately after the name, with no whitespace, makes this a
-   * function-like macro. That form is not implemented yet.
-   */
-  if (*l->cursor == '(')
-    error_at(lexer_position(l), "function-like macros are not supported yet");
-
+  function_like = *l->cursor == '(';
+  vector_init(&params, sizeof(Token));
   vector_init(&tokens, sizeof(Token));
-  directive_tokens(pp, &tokens);
+  end = directive_tokens(pp, &tokens);
+  if (function_like) {
+    size_t first = parse_macro_params(&tokens, end, &params);
+    tokens.len -= first;
+    for (i = 0; i < tokens.len; ++i)
+      ((Token *)tokens.data)[i] = ((Token *)tokens.data)[i + first];
+  }
+  for (i = 0; i < tokens.len; ++i) {
+    Token tok = ((Token *)tokens.data)[i];
+    if (tok.len == 1 && tok.start[0] == '#')
+      error_at(tok,
+               "macro stringification and token pasting are not supported yet");
+  }
 
   macro = find_macro(pp, name);
   if (macro) {
-    /* Redefining is allowed only when the replacement list is identical. */
-    if (!is_same_replacement(&macro->tokens, &tokens))
+    if (macro->function_like != function_like ||
+        !is_same_parameters(&macro->params, &params) ||
+        !is_same_replacement(&macro->tokens, &tokens))
       error_at(name, "'%.*s' redefined", name.len, name.start);
+    vector_free(&params);
     vector_free(&tokens);
     return;
   }
@@ -375,6 +453,8 @@ static void define_macro(Preprocessor *pp) {
   if (!macro)
     error_at(name, "out of memory");
   macro->name = name;
+  macro->function_like = function_like;
+  macro->params = params;
   macro->tokens = tokens;
   macro->next = pp->macros;
   pp->macros = macro;
@@ -742,58 +822,8 @@ static PPValue pp_expr_conditional(PPExpression *expr, Preprocessor *pp,
   return cond;
 }
 
-/*
- * Expand macros in a controlling expression before evaluating it (C11
- * 6.10.1p4). The operand of `defined` is never expanded, since that operator
- * asks about the name itself. A recursive macro stops expanding, so
- * `#define A A` terminates. Names left over are undefined and evaluate to 0.
- */
-static void pp_expand_condition(Preprocessor *pp, const Vector *in,
-                                Vector *out) {
-  const Token *tokens = in->data;
-  int count = (int)in->len;
-  int i;
-  for (i = 0; i < count; ++i) {
-    Token tok = tokens[i];
-    Macro *macro;
-    if (pp_is_keyword(tok, "defined")) {
-      int j = i + 1;
-      bool parenthesized = false;
-      if (!vector_push(out, &tok))
-        error_at(tok, "out of memory");
-      /* Copy the operand verbatim, so a macro name here stays a name. */
-      if (j < count && tokens[j].kind == TOKEN_LPAREN) {
-        parenthesized = true;
-        if (!vector_push(out, &tokens[j++]))
-          error_at(tok, "out of memory");
-      }
-      if (j < count) {
-        if (!vector_push(out, &tokens[j++]))
-          error_at(tok, "out of memory");
-      }
-      if (parenthesized && j < count) {
-        if (!vector_push(out, &tokens[j++]))
-          error_at(tok, "out of memory");
-      }
-      i = j - 1;
-      continue;
-    }
-    if (!is_pp_identifier(tok)) {
-      if (!vector_push(out, &tok))
-        error_at(tok, "out of memory");
-      continue;
-    }
-    macro = find_macro(pp, tok);
-    if (!macro || macro->expanding) {
-      if (!vector_push(out, &tok))
-        error_at(tok, "out of memory");
-      continue;
-    }
-    macro->expanding = true;
-    pp_expand_condition(pp, &macro->tokens, out);
-    macro->expanding = false;
-  }
-}
+static void pp_expand_condition(Preprocessor *pp, const Vector *in, Token end,
+                                Vector *out);
 
 /* Evaluate the tokens and require that all of them were consumed. */
 static bool pp_evaluate_condition(Preprocessor *pp, const Vector *tokens,
@@ -829,7 +859,7 @@ static void if_directive(Preprocessor *pp, SourcePosition loc) {
     return;
   }
   vector_init(&expanded, sizeof(Token));
-  pp_expand_condition(pp, &tokens, &expanded);
+  pp_expand_condition(pp, &tokens, end, &expanded);
   active = pp_evaluate_condition(pp, &expanded, loc, end);
   vector_free(&expanded);
   vector_free(&tokens);
@@ -963,48 +993,304 @@ static void pp_directive(Preprocessor *pp) {
 }
 
 /*
- * A replacement list is replayed one token at a time. Frames are nested, so a
- * list naming another macro expands inside the outer one. Reaching the end of a
- * frame clears its guard, which lets the same macro be used again later.
+ * Read source tokens and handle directives before macro expansion. Replacement
+ * tokens never enter this path, so they cannot introduce directives.
  */
-static MacroFrame *top_frame(Preprocessor *pp) {
-  if (!pp->expansions.len)
-    return NULL;
-  return &((MacroFrame *)pp->expansions.data)[pp->expansions.len - 1];
+static Token next_source_token(Preprocessor *pp) {
+  for (;;) {
+    Token tok = lexer_next_token(&pp->lexer);
+    if (tok.kind == TOKEN_HASH) {
+      pp_directive(pp);
+      continue;
+    }
+    if (tok.kind == TOKEN_EOF) {
+      if (pop_include(pp))
+        continue;
+      pp_check_end(pp);
+      return tok;
+    }
+    if (conditionals_active(pp))
+      return tok;
+  }
 }
 
-static bool pop_frame(Preprocessor *pp) {
-  MacroFrame *frame = top_frame(pp);
-  if (!frame)
-    return false;
-  if (frame->macro)
-    frame->macro->expanding = false;
-  pp->expansions.len--;
-  return true;
+static bool hideset_contains(const HideSet *set, const Macro *macro) {
+  for (; set; set = set->next)
+    if (set->macro == macro)
+      return true;
+  return false;
 }
 
 /*
- * The next token from whichever source is active: a macro replacement list
- * being replayed, or the source file. A finished list is popped here. This is
- * "raw" because no expansion or directive handling has happened yet;
- * pp_next_token does that.
+ * Hide sets are immutable and shared by token copies for the translation unit.
  */
-static Token next_raw_token(Preprocessor *pp) {
-  MacroFrame *frame = top_frame(pp);
-  const Token *tokens;
-  Token tok;
-  if (!frame)
-    return lexer_next_token(&pp->lexer);
-  if (frame->index >= (int)frame->macro->tokens.len) {
-    pop_frame(pp);
-    /* The list ended; whatever follows it is the next token. */
-    return next_raw_token(pp);
+static const HideSet *hide_macro(const HideSet *set, Macro *macro) {
+  HideSet *entry;
+  if (hideset_contains(set, macro))
+    return set;
+  entry = malloc(sizeof(*entry));
+  if (!entry)
+    error_at(macro->name, "out of memory");
+  entry->macro = macro;
+  entry->next = set;
+  return entry;
+}
+
+static const HideSet *hideset_union(const HideSet *a, const HideSet *b) {
+  for (; a; a = a->next)
+    b = hide_macro(b, a->macro);
+  return b;
+}
+
+static const HideSet *hideset_intersection(const HideSet *a, const HideSet *b) {
+  const HideSet *result = NULL;
+  for (; a; a = a->next)
+    if (hideset_contains(b, a->macro))
+      result = hide_macro(result, a->macro);
+  return result;
+}
+
+static MacroToken *new_macro_token(Token token, const HideSet *hideset) {
+  MacroToken *node = calloc(1, sizeof(*node));
+  if (!node)
+    error_at(token, "out of memory");
+  node->token = token;
+  node->hideset = hideset;
+  return node;
+}
+
+static void free_macro_tokens(MacroToken *tokens) {
+  while (tokens) {
+    MacroToken *next = tokens->next;
+    free(tokens);
+    tokens = next;
   }
-  tokens = frame->macro->tokens.data;
-  tok = tokens[frame->index++];
+}
+
+static MacroToken *peek_macro_token(TokenStream *stream) {
+  if (!stream->pending) {
+    Token tok =
+        stream->read_source ? next_source_token(stream->pp) : stream->end;
+    stream->pending = new_macro_token(tok, NULL);
+  }
+  return stream->pending;
+}
+
+static MacroToken take_macro_token(TokenStream *stream) {
+  MacroToken *node = peek_macro_token(stream);
+  MacroToken result = *node;
+  stream->pending = node->next;
+  result.next = NULL;
+  free(node);
+  return result;
+}
+
+static MacroToken expand_next(TokenStream *stream);
+
+static MacroToken *expand_argument(Preprocessor *pp, MacroToken *tokens,
+                                   Token end) {
+  TokenStream stream = {0};
+  MacroToken *result = NULL;
+  MacroToken **tail = &result;
+  stream.pp = pp;
+  stream.pending = tokens;
+  stream.end = end;
+  stream.end.kind = TOKEN_EOF;
+  stream.end.len = 0;
+  for (;;) {
+    MacroToken tok = expand_next(&stream);
+    if (tok.token.kind == TOKEN_EOF)
+      return result;
+    *tail = new_macro_token(tok.token, tok.hideset);
+    tail = &(*tail)->next;
+  }
+}
+
+/*
+ * Collect unexpanded arguments. Only parentheses protect commas; braces and
+ * brackets do not. A single empty argument is valid, and F() supplies zero
+ * arguments only when F has no parameters.
+ */
+static MacroToken read_macro_arguments(TokenStream *stream, Macro *macro,
+                                       Token name, Vector *args) {
+  MacroArgument arg = {0};
+  MacroToken **tail = &arg.tokens;
+  int depth = 0;
+  take_macro_token(stream);
+  for (;;) {
+    MacroToken tok = take_macro_token(stream);
+    if (tok.token.kind == TOKEN_EOF)
+      error_at(name, "unterminated invocation of macro '%.*s'", name.len,
+               name.start);
+    if (tok.token.kind == TOKEN_RPAREN && !depth) {
+      if (macro->params.len || args->len || arg.tokens)
+        if (!vector_push(args, &arg))
+          error_at(name, "out of memory");
+      if (args->len != macro->params.len)
+        error_at(name, "wrong number of arguments to macro '%.*s'", name.len,
+                 name.start);
+      return tok;
+    }
+    if (tok.token.kind == TOKEN_COMMA && !depth) {
+      if (!vector_push(args, &arg))
+        error_at(name, "out of memory");
+      arg = (MacroArgument){0};
+      tail = &arg.tokens;
+      continue;
+    }
+    if (tok.token.kind == TOKEN_LPAREN)
+      ++depth;
+    else if (tok.token.kind == TOKEN_RPAREN)
+      --depth;
+    *tail = new_macro_token(tok.token, tok.hideset);
+    tail = &(*tail)->next;
+  }
+}
+
+static int macro_parameter_index(const Macro *macro, Token token) {
+  size_t i;
+  if (is_pp_identifier(token))
+    for (i = 0; i < macro->params.len; ++i)
+      if (same_identifier(((Token *)macro->params.data)[i], token))
+        return (int)i;
+  return -1;
+}
+
+static MacroToken *substitute_macro(Preprocessor *pp, Macro *macro,
+                                    Vector *args, const HideSet *hideset,
+                                    Token name) {
+  MacroToken *result = NULL;
+  MacroToken **tail = &result;
+  size_t i;
+  for (i = 0; i < macro->tokens.len; ++i) {
+    Token token = ((Token *)macro->tokens.data)[i];
+    int index = macro_parameter_index(macro, token);
+    if (index >= 0) {
+      MacroArgument *arg = &((MacroArgument *)args->data)[index];
+      MacroToken *item;
+      /*
+       * Expand a used argument once, before disabling the invoked macro.
+       * Unused arguments are collected but never expanded.
+       */
+      if (!arg->expanded_ready) {
+        arg->expanded = expand_argument(pp, arg->tokens, name);
+        arg->tokens = NULL;
+        arg->expanded_ready = true;
+      }
+      for (item = arg->expanded; item; item = item->next) {
+        *tail =
+            new_macro_token(item->token, hideset_union(item->hideset, hideset));
+        tail = &(*tail)->next;
+      }
+    } else {
+      *tail = new_macro_token(token, hideset);
+      tail = &(*tail)->next;
+    }
+  }
+  return result;
+}
+
+static MacroToken expand_next(TokenStream *stream) {
+  for (;;) {
+    MacroToken tok = take_macro_token(stream);
+    Macro *macro;
+    const HideSet *hideset;
+    Vector args;
+    MacroToken *replacement;
+    MacroToken **tail;
+    size_t i;
+    if (tok.token.kind == TOKEN_EOF || !is_pp_identifier(tok.token) ||
+        (stream->condition && pp_is_keyword(tok.token, "defined")))
+      return tok;
+    macro = find_macro(stream->pp, tok.token);
+    if (!macro || hideset_contains(tok.hideset, macro))
+      return tok;
+    if (macro->function_like &&
+        peek_macro_token(stream)->token.kind != TOKEN_LPAREN)
+      return tok;
+
+    vector_init(&args, sizeof(MacroArgument));
+    hideset = tok.hideset;
+    if (macro->function_like) {
+      MacroToken close = read_macro_arguments(stream, macro, tok.token, &args);
+      /*
+       * Only suppression shared by both ends of the invocation survives.
+       * The closing ')' can come from outside the current replacement list.
+       */
+      hideset = hideset_intersection(hideset, close.hideset);
+    }
+    hideset = hide_macro(hideset, macro);
+    replacement =
+        substitute_macro(stream->pp, macro, &args, hideset, tok.token);
+    for (i = 0; i < args.len; ++i) {
+      MacroArgument *arg = &((MacroArgument *)args.data)[i];
+      free_macro_tokens(arg->tokens);
+      free_macro_tokens(arg->expanded);
+    }
+    vector_free(&args);
+
+    /*
+     * Rescan together with following tokens, so an expansion that ends in a
+     * function-like macro name can consume '(' from the surrounding source.
+     */
+    tail = &replacement;
+    while (*tail)
+      tail = &(*tail)->next;
+    *tail = stream->pending;
+    stream->pending = replacement;
+  }
+}
+
+static void pp_expand_condition(Preprocessor *pp, const Vector *in, Token end,
+                                Vector *out) {
+  TokenStream stream = {0};
+  MacroToken **tail = &stream.pending;
+  size_t i;
+  stream.pp = pp;
+  stream.condition = true;
+  stream.end = end;
+  for (i = 0; i < in->len; ++i) {
+    *tail = new_macro_token(((Token *)in->data)[i], NULL);
+    tail = &(*tail)->next;
+  }
+  for (;;) {
+    MacroToken tok = expand_next(&stream);
+    bool parenthesized;
+    if (tok.token.kind == TOKEN_EOF)
+      return;
+    if (!vector_push(out, &tok.token))
+      error_at(tok.token, "out of memory");
+    if (!pp_is_keyword(tok.token, "defined"))
+      continue;
+    /*
+     * Copy defined's operand without expansion, in either spelling.
+     */
+    tok = take_macro_token(&stream);
+    parenthesized = tok.token.kind == TOKEN_LPAREN;
+    if (!vector_push(out, &tok.token))
+      error_at(tok.token, "out of memory");
+    if (parenthesized) {
+      tok = take_macro_token(&stream);
+      if (!vector_push(out, &tok.token))
+        error_at(tok.token, "out of memory");
+      tok = take_macro_token(&stream);
+      if (!vector_push(out, &tok.token))
+        error_at(tok.token, "out of memory");
+    }
+  }
+}
+
+Token pp_next_token(Preprocessor *pp) {
+  TokenStream stream = {0};
+  Token tok;
+  stream.pp = pp;
+  stream.pending = pp->pending;
+  stream.read_source = true;
+  tok = expand_next(&stream).token;
+  pp->pending = stream.pending;
   /*
-   * The parser consumes and frees decoded string bytes. Keep the macro's
-   * replacement payload intact for later expansions.
+   * Replacement and argument tokens share immutable decoded string bytes.
+   * Give the parser its own copy, since it consumes and frees this payload.
    */
   if (tok.kind == TOKEN_STRING_LITERAL) {
     unsigned char *bytes = malloc((size_t)tok.d.string_literal.len);
@@ -1014,57 +1300,6 @@ static Token next_raw_token(Preprocessor *pp) {
     tok.d.string_literal.val = bytes;
   }
   return tok;
-}
-
-/*
- * Start replaying a replacement list on top of the current expansions. The
- * caller loops after this, so a mention of another macro inside the list
- * expands on the next iteration. An empty list pushes nothing, which makes the
- * macro expand to no tokens at all.
- */
-static void push_macro(Preprocessor *pp, Macro *macro) {
-  MacroFrame frame;
-  if (!macro->tokens.len)
-    return;
-  frame.macro = macro;
-  frame.index = 0;
-  if (!vector_push(&pp->expansions, &frame))
-    error_at(pp->lexer, "out of memory");
-  macro->expanding = true;
-}
-
-Token pp_next_token(Preprocessor *pp) {
-  for (;;) {
-    Token tok = next_raw_token(pp);
-    /*
-     * Directives are recognized in every branch, since #ifndef and #endif are
-     * what track the nesting. In a skipped branch pp_directive drops the rest
-     * of the line and expands nothing.
-     */
-    if (tok.kind == TOKEN_HASH) {
-      pp_directive(pp);
-      continue;
-    }
-    /* End of an included file: resume the file that included it. */
-    if (tok.kind == TOKEN_EOF) {
-      if (pop_include(pp))
-        continue;
-      pp_check_end(pp);
-      return tok;
-    }
-    /* Tokens in a skipped branch never reach the parser. */
-    if (!conditionals_active(pp))
-      continue;
-    if (is_pp_identifier(tok)) {
-      Macro *macro = find_macro(pp, tok);
-      if (macro && !macro->expanding) {
-        /* The name is replaced, possibly by nothing (C11 6.10.3p4). */
-        push_macro(pp, macro);
-        continue;
-      }
-    }
-    return tok;
-  }
 }
 
 void pp_check_end(const Preprocessor *pp) {
