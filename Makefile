@@ -27,6 +27,7 @@ test: $(TARGET)
 fmt:
 	@echo "Formatting ..."
 	@clang-format -i *.h *.c include/*.h
+	@shfmt -ln bash -i 2 -ci -w test.sh
 
 # Bootstrap follows GCC. stage-1 is built by the host compiler. Each later
 # stage is built by the previous one. The host compiler still preprocesses

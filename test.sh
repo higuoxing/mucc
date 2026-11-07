@@ -11,17 +11,17 @@ TEST_KEEP_TMP="${TEST_KEEP_TMP:-0}"
 
 compare=0
 for arg in "$@"; do
-    case "$arg" in
-        --compare) compare=1 ;;
-        -h|--help)
-            printf 'Usage: %s [--compare]\nCompare exit codes and check mixed-compiler ABI calls with CC (default: gcc).\n' "$0"
-            exit 0
-            ;;
-        *)
-            printf 'Unknown option: %s\nUsage: %s [--compare]\n' "$arg" "$0" >&2
-            exit 2
-            ;;
-    esac
+  case "$arg" in
+    --compare) compare=1 ;;
+    -h | --help)
+      printf 'Usage: %s [--compare]\nCompare exit codes and check mixed-compiler ABI calls with CC (default: gcc).\n' "$0"
+      exit 0
+      ;;
+    *)
+      printf 'Unknown option: %s\nUsage: %s [--compare]\n' "$arg" "$0" >&2
+      exit 2
+      ;;
+  esac
 done
 
 passed=0
@@ -30,149 +30,149 @@ compiled=0
 
 WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/test-mucc.XXXXXX")
 function cleanup() {
-    if [[ "$TEST_KEEP_TMP" == 1 ]]; then
-	printf 'Temporary files kept in %s\n' "$WORK_DIR" >&2
-    else
-	rm -rf -- "$WORK_DIR"
-    fi
+  if [[ "$TEST_KEEP_TMP" == 1 ]]; then
+    printf 'Temporary files kept in %s\n' "$WORK_DIR" >&2
+  else
+    rm -rf -- "$WORK_DIR"
+  fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 function fail() {
-    printf '[FAIL] %s\n' "$*" >&2
-    exit 1
+  printf '[FAIL] %s\n' "$*" >&2
+  exit 1
 }
 
 function check() {
-    local name=${1:-test$((passed + 1))}
-    local expected=$2
-    local source=$3
-    local extra_source=${4:-} # Optional second translation unit.
-    local extra_compiler=${5:-$TEST_CC}
-    local extra_flags=()
-    # An explicit host compiler builds the second unit for ABI interop tests.
-    if [[ -n "${5:-}" ]]; then
-        extra_flags=(-std=c11 -O2 -S)
-    fi
-    local base="$WORK_DIR/execute-$((passed + 1))"
-    local input="$base.c"
-    local assembly_inputs=("$base.s")
-    local reference_inputs=("$input")
-    local actual_code
-    local reference_code
+  local name=${1:-test$((passed + 1))}
+  local expected=$2
+  local source=$3
+  local extra_source=${4:-} # Optional second translation unit.
+  local extra_compiler=${5:-$TEST_CC}
+  local extra_flags=()
+  # An explicit host compiler builds the second unit for ABI interop tests.
+  if [[ -n "${5:-}" ]]; then
+    extra_flags=(-std=c11 -O2 -S)
+  fi
+  local base="$WORK_DIR/execute-$((passed + 1))"
+  local input="$base.c"
+  local assembly_inputs=("$base.s")
+  local reference_inputs=("$input")
+  local actual_code
+  local reference_code
 
-    printf '%s' "$source" > "$input"
-    if "$TEST_CC" "${TEST_CC_FLAGS[@]}" "$input" -o "$base.s" 2> "$base.compile.err"; then
-	:
+  printf '%s' "$source" >"$input"
+  if "$TEST_CC" "${TEST_CC_FLAGS[@]}" "$input" -o "$base.s" 2>"$base.compile.err"; then
+    :
+  else
+    actual_code=$?
+    cat "$base.compile.err" >&2
+    fail "$name: compiler exited with status $actual_code"
+  fi
+
+  if [[ -n "$extra_source" ]]; then
+    printf '%s' "$extra_source" >"$base.extra.c"
+    if "$extra_compiler" "${extra_flags[@]}" "$base.extra.c" -o "$base.extra.s" 2>"$base.extra.compile.err"; then
+      :
     else
-	actual_code=$?
-	cat "$base.compile.err" >&2
-	fail "$name: compiler exited with status $actual_code"
+      actual_code=$?
+      cat "$base.extra.compile.err" >&2
+      fail "$name: compiler ($extra_compiler) exited with status $actual_code for second translation unit"
     fi
+    assembly_inputs+=("$base.extra.s")
+    reference_inputs+=("$base.extra.c")
+  fi
 
-    if [[ -n "$extra_source" ]]; then
-        printf '%s' "$extra_source" > "$base.extra.c"
-        if "$extra_compiler" "${extra_flags[@]}" "$base.extra.c" -o "$base.extra.s" 2> "$base.extra.compile.err"; then
-            :
-        else
-            actual_code=$?
-            cat "$base.extra.compile.err" >&2
-            fail "$name: compiler ($extra_compiler) exited with status $actual_code for second translation unit"
-        fi
-        assembly_inputs+=("$base.extra.s")
-        reference_inputs+=("$base.extra.c")
-    fi
+  # Don't allow a stale executable to hide a linker that produced no output.
+  rm -f -- "$base.out"
+  if "$CC" "${assembly_inputs[@]}" -o "$base.out" >"$base.link.log" 2>&1; then
+    :
+  else
+    actual_code=$?
+    cat "$base.link.log" >&2
+    fail "$name: assembler/linker exited with status $actual_code"
+  fi
+  [[ -f "$base.out" && -x "$base.out" ]] || fail "$name: linker produced no executable"
 
-    # Don't allow a stale executable to hide a linker that produced no output.
-    rm -f -- "$base.out"
-    if "$CC" "${assembly_inputs[@]}" -o "$base.out" > "$base.link.log" 2>&1; then
-	:
+  if "$base.out" >"$base.stdout" 2>"$base.stderr"; then
+    actual_code=0
+  else
+    actual_code=$?
+  fi
+  if [[ "$actual_code" -ne "$expected" ]]; then
+    cat "$base.stdout" "$base.stderr" >&2
+    printf 'Source: %q\n' "$source" >&2
+    fail "$name (exit code $actual_code, expected $expected)"
+  fi
+
+  if ((compare)); then
+    if "$CC" -std=c11 -O0 "${TEST_CC_FLAGS[@]}" "${reference_inputs[@]}" -o "$base.reference.out" >"$base.reference.compile.log" 2>&1; then
+      :
     else
-	actual_code=$?
-	cat "$base.link.log" >&2
-	fail "$name: assembler/linker exited with status $actual_code"
+      reference_code=$?
+      cat "$base.reference.compile.log" >&2
+      printf 'Source: %q\n' "$source" >&2
+      fail "$name: reference compiler ($CC) exited with status $reference_code"
     fi
-    [[ -f "$base.out" && -x "$base.out" ]] || fail "$name: linker produced no executable"
+    [[ -f "$base.reference.out" && -x "$base.reference.out" ]] || fail "$name: reference compiler produced no executable"
 
-    if "$base.out" > "$base.stdout" 2> "$base.stderr"; then
-	actual_code=0
+    if "$base.reference.out" >"$base.reference.stdout" 2>"$base.reference.stderr"; then
+      reference_code=0
     else
-	actual_code=$?
+      reference_code=$?
     fi
-    if [[ "$actual_code" -ne "$expected" ]]; then
-        cat "$base.stdout" "$base.stderr" >&2
-        printf 'Source: %q\n' "$source" >&2
-        fail "$name (exit code $actual_code, expected $expected)"
+    if [[ "$actual_code" -ne "$reference_code" ]]; then
+      cat "$base.stdout" "$base.stderr" "$base.reference.stdout" "$base.reference.stderr" >&2
+      printf 'Source: %q\n' "$source" >&2
+      fail "$name: $TEST_CC exit code $actual_code, $CC exit code $reference_code, expected $expected"
     fi
+  fi
 
-    if ((compare)); then
-        if "$CC" -std=c11 -O0 "${TEST_CC_FLAGS[@]}" "${reference_inputs[@]}" -o "$base.reference.out" > "$base.reference.compile.log" 2>&1; then
-            :
-        else
-            reference_code=$?
-            cat "$base.reference.compile.log" >&2
-            printf 'Source: %q\n' "$source" >&2
-            fail "$name: reference compiler ($CC) exited with status $reference_code"
-        fi
-        [[ -f "$base.reference.out" && -x "$base.reference.out" ]] || fail "$name: reference compiler produced no executable"
-
-        if "$base.reference.out" > "$base.reference.stdout" 2> "$base.reference.stderr"; then
-            reference_code=0
-        else
-            reference_code=$?
-        fi
-        if [[ "$actual_code" -ne "$reference_code" ]]; then
-            cat "$base.stdout" "$base.stderr" "$base.reference.stdout" "$base.reference.stderr" >&2
-            printf 'Source: %q\n' "$source" >&2
-            fail "$name: $TEST_CC exit code $actual_code, $CC exit code $reference_code, expected $expected"
-        fi
-    fi
-
-    passed=$((passed + 1))
-    if ((compare)); then
-        printf '[PASS] %s (exit code %s, matches %s)\n' "$name" "$actual_code" "$CC"
-    else
-        printf '[PASS] %s (exit code %s)\n' "$name" "$actual_code"
-    fi
+  passed=$((passed + 1))
+  if ((compare)); then
+    printf '[PASS] %s (exit code %s, matches %s)\n' "$name" "$actual_code" "$CC"
+  else
+    printf '[PASS] %s (exit code %s)\n' "$name" "$actual_code"
+  fi
 }
 
 function check_error() {
-    local name=$1
-    local source=$2
-    local diag=$3
-    local base="$WORK_DIR/reject-$((rejected + 1))"
-    local input="$base.c"
-    local actual_code
+  local name=$1
+  local source=$2
+  local diag=$3
+  local base="$WORK_DIR/reject-$((rejected + 1))"
+  local input="$base.c"
+  local actual_code
 
-    printf '%s' "$source" > "$input"
-    if "$TEST_CC" "${TEST_CC_FLAGS[@]}" "$input" -o "$base.s" 2> "$base.err"; then
-	actual_code=0
-    else
-	actual_code=$?
-    fi
+  printf '%s' "$source" >"$input"
+  if "$TEST_CC" "${TEST_CC_FLAGS[@]}" "$input" -o "$base.s" 2>"$base.err"; then
+    actual_code=0
+  else
+    actual_code=$?
+  fi
 
-    # Crash, missing compiler, or accidental acceptance is not a rejection.
-    if [[ $actual_code -ne 1 ]]; then
-	cat "$base.err" >&2
-	fail "$name: compiler exited with status $actual_code, expected 1"
-    fi
+  # Crash, missing compiler, or accidental acceptance is not a rejection.
+  if [[ $actual_code -ne 1 ]]; then
+    cat "$base.err" >&2
+    fail "$name: compiler exited with status $actual_code, expected 1"
+  fi
 
-    printf '%s:%s\n' "$input" "$diag" > "$base.expected.err"
-    if ! cmp -s "$base.expected.err" "$base.err"; then
-	printf 'Expected diagnostic:\n' >&2
-	cat "$base.expected.err" >&2
-	printf 'Actual diagnostic:\n' >&2
-	cat "$base.err" >&2
-	fail "$name: unexpected diagnostic"
-    fi
-    if [[ -s "$base.s" ]]; then
-	fail "$name: emitted assembly for invalid input"
-    fi
+  printf '%s:%s\n' "$input" "$diag" >"$base.expected.err"
+  if ! cmp -s "$base.expected.err" "$base.err"; then
+    printf 'Expected diagnostic:\n' >&2
+    cat "$base.expected.err" >&2
+    printf 'Actual diagnostic:\n' >&2
+    cat "$base.err" >&2
+    fail "$name: unexpected diagnostic"
+  fi
+  if [[ -s "$base.s" ]]; then
+    fail "$name: emitted assembly for invalid input"
+  fi
 
-    rejected=$((rejected + 1))
-    printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
+  rejected=$((rejected + 1))
+  printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
 # Variadic builtins read and copy register and stack argument cursors.
@@ -231,7 +231,7 @@ check_error va-arg-not-lvalue 'int f(int n, ...) { __builtin_va_list ap; __built
 check_error va-arg-address 'int f(int n, ...) { __builtin_va_list ap; int *p=&__builtin_va_arg(ap,int); return 0; }' '1:50: error: invalid address-of target'
 
 # Exercise the public header through an external preprocessor.
-cat > "$WORK_DIR/stdarg-header.c" <<'EOF'
+cat >"$WORK_DIR/stdarg-header.c" <<'EOF'
 #define __need___va_list
 #include <stdarg.h>
 #include <stdarg.h>
@@ -250,36 +250,36 @@ int sum(int n, ...) {
 int main(void) { return sum(8, 1, 2, 3, 4, 5, 6, 7, 14); }
 EOF
 "$CC" -std=c11 -E -P -nostdinc -I"$SCRIPT_DIR/include" \
-    "$WORK_DIR/stdarg-header.c" -o "$WORK_DIR/stdarg-header.i"
+  "$WORK_DIR/stdarg-header.c" -o "$WORK_DIR/stdarg-header.i"
 check va-stdarg-header 42 "$(cat "$WORK_DIR/stdarg-header.i")"
 
 # ABI checks compile the other translation unit with the host compiler.
 if ((compare)); then
-    check va-abi-scalar 1 'int inspect(int n, ...); int main(void) { char c=-1; unsigned short s=65535; int x=42; return inspect(9,c,s,&x,18446744073709551615UL,1,2,3,4,5); }' \
-        'int inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int a=__builtin_va_arg(ap,int); int b=__builtin_va_arg(ap,int); int *p=__builtin_va_arg(ap,int *); unsigned long l=__builtin_va_arg(ap,unsigned long); int sum=0; for (int i=0;i<5;++i) sum+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return a==-1 && b==65535 && *p==42 && l==18446744073709551615UL && sum==15; } ' "$CC"
-    check va-abi-scalar-reverse 1 'int inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int a=__builtin_va_arg(ap,int); int b=__builtin_va_arg(ap,int); int *p=__builtin_va_arg(ap,int *); unsigned long l=__builtin_va_arg(ap,unsigned long); int sum=0; for (int i=0;i<5;++i) sum+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return a==-1 && b==65535 && *p==42 && l==18446744073709551615UL && sum==15; } ' \
-        'int inspect(int n, ...); int main(void) { char c=-1; unsigned short s=65535; int x=42; return inspect(9,c,s,&x,18446744073709551615UL,1,2,3,4,5); }' "$CC"
-    check va-abi-record-rollback 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,12); }' \
-        'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' "$CC"
-    check va-abi-record-rollback-reverse 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' \
-        'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,12); }' "$CC"
-    check va-abi-memory-return 42 'struct S { long a,b,c; }; struct S inspect(int n, ...); int main(void) { struct S s={10,20,5}; struct S r=inspect(2,s,7); return r.a+r.b+r.c; }' \
-        'struct S { long a,b,c; }; struct S inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); s.c+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s; } ' "$CC"
-    check va-abi-memory-return-reverse 42 'struct S { long a,b,c; }; struct S inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); s.c+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s; } ' \
-        'struct S { long a,b,c; }; struct S inspect(int n, ...); int main(void) { struct S s={10,20,5}; struct S r=inspect(2,s,7); return r.a+r.b+r.c; }' "$CC"
-    check va-abi-fixed-stack 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,6,12); }' \
-        'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' "$CC"
-    check va-abi-fixed-stack-reverse 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' \
-        'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,6,12); }' "$CC"
-    check va-abi-list-from-host 42 'int read(__builtin_va_list ap) { return __builtin_va_arg(ap,int); } ' \
-        'int read(__builtin_va_list ap); int collect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int sum=0; for (int i=0;i<n;++i) sum+=read(ap); __builtin_va_end(ap); return sum; } int main(void) { return collect(8,1,2,3,4,5,6,7,14); }' "$CC"
-    check va-abi-list-to-host 42 'int read(__builtin_va_list ap); int collect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int sum=0; for (int i=0;i<n;++i) sum+=read(ap); __builtin_va_end(ap); return sum; } int main(void) { return collect(8,1,2,3,4,5,6,7,14); }' \
-        'int read(__builtin_va_list ap) { return __builtin_va_arg(ap,int); } ' "$CC"
-    check va-abi-forward-xmm 1 'int vsprintf(char *s,const char *fmt,__builtin_va_list ap); int format(char *s,const char *fmt, ...) { __builtin_va_list ap; __builtin_va_start(ap,fmt); int n=vsprintf(s,fmt,ap); __builtin_va_end(ap); return n; }' \
-        'int format(char *s,const char *fmt, ...); int main(void) { char s[64]; int n=format(s,"%.1f %d %.1f",3.5,42,7.5); return n==10 && s[0]==51 && s[4]==52 && s[7]==55; }' "$CC"
-    # One fixed parameter leaves an 8-byte hole before the save area. The area must still be 16-byte aligned so the host can reload an XMM slot with movaps.
-    check va-abi-forward-xmm-aligned 42 'int read128(__builtin_va_list ap); int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int r=read128(ap); __builtin_va_end(ap); return r; }' \
-        $'#include <xmmintrin.h>\n#include <stdarg.h>\nint f(int n, ...);\nint read128(va_list ap) { __m128 v = va_arg(ap, __m128); return (int)_mm_cvtss_f32(v) == 4 ? 42 : 0; }\nint main(void) { __m128 v = _mm_set_ps(1.f, 2.f, 3.f, 4.f); return f(1, v); }' "$CC"
+  check va-abi-scalar 1 'int inspect(int n, ...); int main(void) { char c=-1; unsigned short s=65535; int x=42; return inspect(9,c,s,&x,18446744073709551615UL,1,2,3,4,5); }' \
+    'int inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int a=__builtin_va_arg(ap,int); int b=__builtin_va_arg(ap,int); int *p=__builtin_va_arg(ap,int *); unsigned long l=__builtin_va_arg(ap,unsigned long); int sum=0; for (int i=0;i<5;++i) sum+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return a==-1 && b==65535 && *p==42 && l==18446744073709551615UL && sum==15; } ' "$CC"
+  check va-abi-scalar-reverse 1 'int inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int a=__builtin_va_arg(ap,int); int b=__builtin_va_arg(ap,int); int *p=__builtin_va_arg(ap,int *); unsigned long l=__builtin_va_arg(ap,unsigned long); int sum=0; for (int i=0;i<5;++i) sum+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return a==-1 && b==65535 && *p==42 && l==18446744073709551615UL && sum==15; } ' \
+    'int inspect(int n, ...); int main(void) { char c=-1; unsigned short s=65535; int x=42; return inspect(9,c,s,&x,18446744073709551615UL,1,2,3,4,5); }' "$CC"
+  check va-abi-record-rollback 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,12); }' \
+    'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' "$CC"
+  check va-abi-record-rollback-reverse 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' \
+    'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,12); }' "$CC"
+  check va-abi-memory-return 42 'struct S { long a,b,c; }; struct S inspect(int n, ...); int main(void) { struct S s={10,20,5}; struct S r=inspect(2,s,7); return r.a+r.b+r.c; }' \
+    'struct S { long a,b,c; }; struct S inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); s.c+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s; } ' "$CC"
+  check va-abi-memory-return-reverse 42 'struct S { long a,b,c; }; struct S inspect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); struct S s=__builtin_va_arg(ap,struct S); s.c+=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s; } ' \
+    'struct S { long a,b,c; }; struct S inspect(int n, ...); int main(void) { struct S s={10,20,5}; struct S r=inspect(2,s,7); return r.a+r.b+r.c; }' "$CC"
+  check va-abi-fixed-stack 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,6,12); }' \
+    'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' "$CC"
+  check va-abi-fixed-stack-reverse 42 'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int x=__builtin_va_arg(ap,int); __builtin_va_end(ap); return s.a+s.b+x; } ' \
+    'struct S { long a,b; }; int inspect(int a,int b,int c,int d,int e,struct S s,int n, ...); int main(void) { struct S s={10,20}; return inspect(1,2,3,4,5,s,6,12); }' "$CC"
+  check va-abi-list-from-host 42 'int read(__builtin_va_list ap) { return __builtin_va_arg(ap,int); } ' \
+    'int read(__builtin_va_list ap); int collect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int sum=0; for (int i=0;i<n;++i) sum+=read(ap); __builtin_va_end(ap); return sum; } int main(void) { return collect(8,1,2,3,4,5,6,7,14); }' "$CC"
+  check va-abi-list-to-host 42 'int read(__builtin_va_list ap); int collect(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int sum=0; for (int i=0;i<n;++i) sum+=read(ap); __builtin_va_end(ap); return sum; } int main(void) { return collect(8,1,2,3,4,5,6,7,14); }' \
+    'int read(__builtin_va_list ap) { return __builtin_va_arg(ap,int); } ' "$CC"
+  check va-abi-forward-xmm 1 'int vsprintf(char *s,const char *fmt,__builtin_va_list ap); int format(char *s,const char *fmt, ...) { __builtin_va_list ap; __builtin_va_start(ap,fmt); int n=vsprintf(s,fmt,ap); __builtin_va_end(ap); return n; }' \
+    'int format(char *s,const char *fmt, ...); int main(void) { char s[64]; int n=format(s,"%.1f %d %.1f",3.5,42,7.5); return n==10 && s[0]==51 && s[4]==52 && s[7]==55; }' "$CC"
+  # One fixed parameter leaves an 8-byte hole before the save area. The area must still be 16-byte aligned so the host can reload an XMM slot with movaps.
+  check va-abi-forward-xmm-aligned 42 'int read128(__builtin_va_list ap); int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap,n); int r=read128(ap); __builtin_va_end(ap); return r; }' \
+    $'#include <xmmintrin.h>\n#include <stdarg.h>\nint f(int n, ...);\nint read128(va_list ap) { __m128 v = va_arg(ap, __m128); return (int)_mm_cvtss_f32(v) == 4 ? 42 : 0; }\nint main(void) { __m128 v = _mm_set_ps(1.f, 2.f, 3.f, 4.f); return f(1, v); }' "$CC"
 fi
 
 # Variadic functions retain fixed parameter types and promote trailing arguments.
@@ -320,8 +320,8 @@ check_error variadic-conflicts-with-empty-definition 'int f(int, ...); int f() {
 
 # Host va_arg checks the types and values passed through the ellipsis.
 if ((compare)); then
-    check variadic-host-promotions 1 'int inspect(int tag, ...); int main(void) { char c = -1; unsigned short s = 65535; int a[1] = {42}; return inspect(7, c, s, a, 4294967297L, 4, 5, 6, 7); }' \
-        $'#include <stdarg.h>\nint inspect(int tag, ...) { va_list ap; va_start(ap, tag); int c=va_arg(ap,int); int s=va_arg(ap,int); int *p=va_arg(ap,int *); long l=va_arg(ap,long); int sum=0; for (int i=0;i<4;++i) sum+=va_arg(ap,int); va_end(ap); return tag==7 && c==-1 && s==65535 && *p==42 && l==4294967297L && sum==22; }' "$CC"
+  check variadic-host-promotions 1 'int inspect(int tag, ...); int main(void) { char c = -1; unsigned short s = 65535; int a[1] = {42}; return inspect(7, c, s, a, 4294967297L, 4, 5, 6, 7); }' \
+    $'#include <stdarg.h>\nint inspect(int tag, ...) { va_list ap; va_start(ap, tag); int c=va_arg(ap,int); int s=va_arg(ap,int); int *p=va_arg(ap,int *); long l=va_arg(ap,long); int sum=0; for (int i=0;i<4;++i) sum+=va_arg(ap,int); va_end(ap); return tag==7 && c==-1 && s==65535 && *p==42 && l==4294967297L && sum==22; }' "$CC"
 fi
 
 # Block-scope compound literals are lvalues with enclosing-block lifetime.
@@ -396,53 +396,53 @@ check compound-literal-register-and-stack-arguments 42 'struct S { int a[9]; }; 
 check compound-literal-two-address-arguments 42 'struct S { int x; }; int f(struct S *a, struct S *b) { return a->x + b->x; } int main(void) { return f(&(struct S){40}, &(struct S){2}); }'
 
 check_error compound-literal-file-scope 'int x = (int){42};' \
-            "1:9: error: file-scope compound literals are not supported yet"
+  "1:9: error: file-scope compound literals are not supported yet"
 check_error compound-literal-file-scope-address 'int *p = &(int){42};' \
-            "1:11: error: file-scope compound literals are not supported yet"
+  "1:11: error: file-scope compound literals are not supported yet"
 check_error compound-literal-file-scope-after-function 'int f(void) { return 0; } int x = (int){42};' \
-            "1:35: error: file-scope compound literals are not supported yet"
+  "1:35: error: file-scope compound literals are not supported yet"
 check_error compound-literal-void 'int main(void) { (void){0}; return 0; }' \
-            "1:18: error: compound literal has void type"
+  "1:18: error: compound literal has void type"
 check_error compound-literal-incomplete 'struct S; int main(void) { &(struct S){0}; return 0; }' \
-            "1:29: error: compound literal has incomplete type"
+  "1:29: error: compound literal has incomplete type"
 check_error compound-literal-type-name-identifier 'int main(void) { return (int x){42}; }' \
-            "1:30: error: type name cannot contain an identifier"
+  "1:30: error: type name cannot contain an identifier"
 check_error compound-literal-empty 'int main(void) { return (int){}; }' \
-            "1:31: error: empty initializer lists are not supported in C11"
+  "1:31: error: empty initializer lists are not supported in C11"
 check_error compound-literal-excess-scalar 'int main(void) { return (int){1, 2}; }' \
-            "1:34: error: excess elements in initializer"
+  "1:34: error: excess elements in initializer"
 check_error compound-literal-excess-array 'int main(void) { return (int[1]){1, 2}[0]; }' \
-            "1:37: error: excess elements in initializer"
+  "1:37: error: excess elements in initializer"
 check_error compound-literal-missing-rbrace 'int main(void) { return (int){42; }' \
-            "1:33: error: expect '}'"
+  "1:33: error: expect '}'"
 check_error compound-literal-unknown-member 'struct S { int x; }; int main(void) { return (struct S){.y = 42}.x; }' \
-            "1:58: error: no member named 'y'"
+  "1:58: error: no member named 'y'"
 check_error compound-literal-out-of-bounds 'int main(void) { return (int[1]){[1] = 42}[0]; }' \
-            "1:34: error: array designator index is out of bounds"
+  "1:34: error: array designator index is out of bounds"
 check_error compound-literal-const-assignment 'int main(void) { (const int){1} = 42; return 0; }' \
-            "1:33: error: invalid assignment target"
+  "1:33: error: invalid assignment target"
 check_error compound-literal-const-increment 'int main(void) { return ++(const int){1}; }' \
-            "1:25: error: invalid increment target"
+  "1:25: error: invalid increment target"
 check_error compound-literal-const-member-assignment 'struct S { int x; }; int main(void) { (const struct S){1}.x = 42; return 0; }' \
-            "1:61: error: invalid assignment target"
+  "1:61: error: invalid assignment target"
 check_error compound-literal-const-array-assignment 'int main(void) { (const int[]){1}[0] = 42; return 0; }' \
-            "1:38: error: invalid assignment target"
+  "1:38: error: invalid assignment target"
 check_error compound-literal-array-assignment 'int main(void) { (int[]){1} = (int[]){42}; return 0; }' \
-            "1:29: error: invalid assignment target"
+  "1:29: error: invalid assignment target"
 check_error compound-literal-array-increment 'int main(void) { (int[]){1}++; return 0; }' \
-            "1:28: error: invalid increment target"
+  "1:28: error: invalid increment target"
 check_error compound-literal-discarded-const 'int main(void) { int *p = &(const int){42}; return 0; }' \
-            "1:23: error: incompatible initializer type"
+  "1:23: error: incompatible initializer type"
 check_error compound-literal-incompatible-initializer 'int main(void) { return *(int *){42}; }' \
-            "1:26: error: incompatible initializer type"
+  "1:26: error: incompatible initializer type"
 check_error compound-literal-nonconstant-enumerator 'int main(void) { enum { A = (int){42} }; return 0; }' \
-            "1:39: error: not an integer constant expression"
+  "1:39: error: not an integer constant expression"
 check_error compound-literal-nonconstant-array-bound 'int main(void) { int a[(int){3}]; return 0; }' \
-            "1:32: error: not an integer constant expression"
+  "1:32: error: not an integer constant expression"
 check_error compound-literal-nonconstant-case 'int main(void) { switch (0) { case (int){0}: return 42; } return 0; }' \
-            "1:44: error: not an integer constant expression"
+  "1:44: error: not an integer constant expression"
 check_error compound-literal-stack-overflow 'int main(void) { &(char[2147483647]){0}; return 0; }' \
-            "1:19: error: local variables exceed supported stack size"
+  "1:19: error: local variables exceed supported stack size"
 
 # Local aggregate initializers.
 check aggregate-init-local-array-partial 1 'int main(void) { int a[4] = {1, 2}; return a[0] == 1 && a[1] == 2 && a[2] == 0 && a[3] == 0; }'
@@ -541,12 +541,12 @@ check aggregate-init-local-copy-and-call 1 'struct S { int x; }; struct S make(v
 # GCC discards copied members in these cases; Clang and mucc preserve them.
 # WG14 DR 413: https://open-std.org/JTC1/SC22/WG14/issues/c11c17/issue0413.html
 # Keep these direct regressions out of differential comparison.
-if ((!compare)); then
-    check aggregate-init-local-copy-member-override 1 'struct S { int x; int y; }; int main(void) { struct S source = {1, 2}; struct { struct S s; int end; } value = {.s = source, .s.x = 42}; return source.x == 1 && value.s.x == 42 && value.s.y == 2 && value.end == 0; }'
-    check aggregate-init-local-copy-whole-subobject-override 1 'struct S { int head; struct { int x; int y; } inner; int end; }; int main(void) { struct S source = {7, {1, 2}, 8}; struct { struct S s; } value = {.s = source, .s.inner = {42}}; return value.s.head == 7 && value.s.inner.x == 42 && value.s.inner.y == 0 && value.s.end == 8; }'
-    check aggregate-init-local-copy-string-override 1 'struct S { char text[4]; int end; }; int main(void) { struct S source = {"abc", 7}; struct { struct S s; } value = {.s = source, .s.text = "x"}; return value.s.text[0] == 120 && value.s.text[1] == 0 && value.s.text[2] == 0 && value.s.text[3] == 0 && value.s.end == 7; }'
+if ((! compare)); then
+  check aggregate-init-local-copy-member-override 1 'struct S { int x; int y; }; int main(void) { struct S source = {1, 2}; struct { struct S s; int end; } value = {.s = source, .s.x = 42}; return source.x == 1 && value.s.x == 42 && value.s.y == 2 && value.end == 0; }'
+  check aggregate-init-local-copy-whole-subobject-override 1 'struct S { int head; struct { int x; int y; } inner; int end; }; int main(void) { struct S source = {7, {1, 2}, 8}; struct { struct S s; } value = {.s = source, .s.inner = {42}}; return value.s.head == 7 && value.s.inner.x == 42 && value.s.inner.y == 0 && value.s.end == 8; }'
+  check aggregate-init-local-copy-string-override 1 'struct S { char text[4]; int end; }; int main(void) { struct S source = {"abc", 7}; struct { struct S s; } value = {.s = source, .s.text = "x"}; return value.s.text[0] == 120 && value.s.text[1] == 0 && value.s.text[2] == 0 && value.s.text[3] == 0 && value.s.end == 7; }'
 else
-    printf '[SKIP] Three DR 413 regressions: reference compilers disagree\n'
+  printf '[SKIP] Three DR 413 regressions: reference compilers disagree\n'
 fi
 check aggregate-init-local-loop-reinitialization 1 'int main(void) { for (int i = 0; i < 3; i++) { int a[3] = {42}; if (a[0] != 42 || a[1] || a[2]) return 0; a[2] = 7; } return 1; }'
 check aggregate-init-local-for-declaration 1 'int main(void) { for (int a[] = {1, 2, 0}; a[0] != 42; a[0] = 42) { if (a[1] != 2 || a[2] != 0) return 0; } return 1; }'
@@ -555,28 +555,28 @@ check aggregate-init-local-calls-and-side-effects 1 'int count; int next(void) {
 check aggregate-init-local-eight-parameters 1 'int f(int a,int b,int c,int d,int e,int f,int g,int h) { int value[9] = {a,b,c,d,e,f,g,h}; for (int i=0; i<8; i++) if (value[i] != i+1) return 0; return value[8] == 0; } int main(void) { return f(1,2,3,4,5,6,7,8); }'
 check aggregate-init-local-eight-argument-call 1 'int sum(int a,int b,int c,int d,int e,int f,int g,int h) { return a+b+c+d+e+f+g+h; } int main(void) { int a[3] = {sum(1,2,3,4,5,6,7,8), 42 + sum(1,2,3,4,5,6,7,8)}; return a[0] == 36 && a[1] == 78 && a[2] == 0; }'
 for size in 1 3 7 8 9 15 16 17 40 257; do
-    check "aggregate-init-local-call-record-$size" 1 "struct S { unsigned char bytes[$size]; }; struct S make(int n) { struct S s = {0}; for (int i=0; i<$size; i++) s.bytes[i]=n+i; return s; } int main(void) { struct S a[3] = {make(42), make(7)}; for (int i=0; i<$size; i++) if (a[0].bytes[i]!=(unsigned char)(42+i) || a[1].bytes[i]!=(unsigned char)(7+i) || a[2].bytes[i]!=0) return 0; return 1; }"
+  check "aggregate-init-local-call-record-$size" 1 "struct S { unsigned char bytes[$size]; }; struct S make(int n) { struct S s = {0}; for (int i=0; i<$size; i++) s.bytes[i]=n+i; return s; } int main(void) { struct S a[3] = {make(42), make(7)}; for (int i=0; i<$size; i++) if (a[0].bytes[i]!=(unsigned char)(42+i) || a[1].bytes[i]!=(unsigned char)(7+i) || a[2].bytes[i]!=0) return 0; return 1; }"
 done
 
 # Check the supported size limit without assembling a 2 GiB data section.
 sparse_name=aggregate-init-large-sparse-array
 sparse_input="$WORK_DIR/$sparse_name.c"
 sparse_assembly="$WORK_DIR/$sparse_name.s"
-printf '%s' 'char value[] = {[2147483646] = 42};' > "$sparse_input"
-if "$TEST_CC" "$sparse_input" -o "$sparse_assembly" 2> "$WORK_DIR/$sparse_name.err"; then
-    :
+printf '%s' 'char value[] = {[2147483646] = 42};' >"$sparse_input"
+if "$TEST_CC" "$sparse_input" -o "$sparse_assembly" 2>"$WORK_DIR/$sparse_name.err"; then
+  :
 else
-    cat "$WORK_DIR/$sparse_name.err" >&2
-    fail "$sparse_name: compilation failed"
+  cat "$WORK_DIR/$sparse_name.err" >&2
+  fail "$sparse_name: compilation failed"
 fi
 [[ -f "$sparse_assembly" ]] || fail "$sparse_name: compiler produced no assembly"
-[[ $(wc -c < "$sparse_assembly") -lt 4096 ]] || fail "$sparse_name: assembly is not sparse"
+[[ $(wc -c <"$sparse_assembly") -lt 4096 ]] || fail "$sparse_name: assembly is not sparse"
 grep -Eq '^[[:space:]]*\.size[[:space:]]+value,[[:space:]]*2147483647$' "$sparse_assembly" ||
-    fail "$sparse_name: incorrect inferred array bound"
+  fail "$sparse_name: incorrect inferred array bound"
 grep -Eq '^[[:space:]]*\.zero[[:space:]]+2147483646$' "$sparse_assembly" ||
-    fail "$sparse_name: incorrect omitted element count"
+  fail "$sparse_name: incorrect omitted element count"
 grep -Eq '^[[:space:]]*\.byte[[:space:]]+42$' "$sparse_assembly" ||
-    fail "$sparse_name: missing last element initializer"
+  fail "$sparse_name: missing last element initializer"
 compiled=$((compiled + 1))
 printf '[PASS] %s (compact assembly with inferred bound)\n' "$sparse_name"
 
@@ -588,135 +588,135 @@ check initializer-local-bool-braces 1 'int main(void) { int x; _Bool b = {&x}; r
 
 # Aggregate initializer syntax and semantics are checked before code generation.
 check_error initializer-empty 'int a[1] = {};' \
-            "1:13: error: empty initializer lists are not supported in C11"
+  "1:13: error: empty initializer lists are not supported in C11"
 check_error initializer-scalar-nested-braces 'int a = {{1}};' \
-            "1:10: error: too many braces around scalar initializer"
+  "1:10: error: too many braces around scalar initializer"
 check_error initializer-array-excess 'int a[1] = {1, 2};' \
-            "1:16: error: excess elements in initializer"
+  "1:16: error: excess elements in initializer"
 check_error initializer-struct-excess 'struct S { int x; } a = {1, 2};' \
-            "1:29: error: excess elements in initializer"
+  "1:29: error: excess elements in initializer"
 check_error initializer-union-excess 'union U { int x; int y; } a = {1, 2};' \
-            "1:35: error: excess elements in initializer"
+  "1:35: error: excess elements in initializer"
 check_error initializer-scalar-excess 'int a = {1, 2};' \
-            "1:13: error: excess elements in initializer"
+  "1:13: error: excess elements in initializer"
 check_error initializer-nested-excess 'struct S { int a[1]; } s = {{1, 2}};' \
-            "1:33: error: excess elements in initializer"
+  "1:33: error: excess elements in initializer"
 check_error initializer-designator-member-name 'struct S { int x; } a = {. = 1};' \
-            "1:28: error: expect member name"
+  "1:28: error: expect member name"
 check_error initializer-designator-missing-equal 'struct S { int x; } a = {.x 1};' \
-            "1:29: error: expect '='"
+  "1:29: error: expect '='"
 check_error initializer-designator-missing-bracket 'int a[2] = {[0 = 1};' \
-            "1:16: error: expect ']'"
+  "1:16: error: expect ']'"
 check_error initializer-designator-unknown-member 'struct S { int x; } a = {.y = 1};' \
-            "1:27: error: no member named 'y'"
+  "1:27: error: no member named 'y'"
 check_error initializer-designator-member-on-array 'int a[2] = {.x = 1};' \
-            "1:13: error: member designator requires a struct or union"
+  "1:13: error: member designator requires a struct or union"
 check_error initializer-designator-index-on-struct 'struct S { int x; } a = {[0] = 1};' \
-            "1:26: error: array designator requires an array"
+  "1:26: error: array designator requires an array"
 check_error initializer-designator-scalar 'int a = {.x = 1};' \
-            "1:10: error: designator is not allowed in a scalar initializer"
+  "1:10: error: designator is not allowed in a scalar initializer"
 check_error initializer-designator-nested-scalar 'struct S { int x; } a = {.x.y = 1};' \
-            "1:28: error: member designator requires a struct or union"
+  "1:28: error: member designator requires a struct or union"
 check_error initializer-designator-negative 'int a[2] = {[-1] = 1};' \
-            "1:14: error: array designator index is out of range"
+  "1:14: error: array designator index is out of range"
 check_error initializer-designator-out-of-bounds 'int a[2] = {[2] = 1};' \
-            "1:13: error: array designator index is out of bounds"
+  "1:13: error: array designator index is out of bounds"
 check_error initializer-designator-huge 'char a[] = {[18446744073709551615ULL] = 1};' \
-            "1:14: error: array designator index is out of range"
+  "1:14: error: array designator index is out of range"
 check_error initializer-designator-size-overflow 'int a[] = {[536870911] = 1};' \
-            "1:12: error: array initializer exceeds supported size"
+  "1:12: error: array initializer exceeds supported size"
 check_error initializer-designator-nonconstant 'int n; int a[2] = {[n] = 1};' \
-            "1:21: error: not an integer constant expression"
+  "1:21: error: not an integer constant expression"
 check_error initializer-designator-pointer-index 'int a[2] = {[(int *)0] = 1};' \
-            "1:14: error: array designator index must have integer type"
+  "1:14: error: array designator index must have integer type"
 check_error initializer-element-type 'int *a[2] = {42};' \
-            "1:14: error: incompatible initializer type"
+  "1:14: error: incompatible initializer type"
 check_error initializer-overridden-element-type 'struct S { int *p; } a = {.p = 0, .p = 42};' \
-            "1:40: error: incompatible initializer type"
+  "1:40: error: incompatible initializer type"
 check_error initializer-discarded-const 'const int n; int *a[1] = {&n};' \
-            "1:27: error: incompatible initializer type"
+  "1:27: error: incompatible initializer type"
 check_error initializer-void-element 'void f(void); int a[1] = {f()};' \
-            "1:27: error: void expression used as a value"
+  "1:27: error: void expression used as a value"
 check_error initializer-incomplete-record 'struct S; extern struct S a = {0};' \
-            "1:31: error: initializer has incomplete type"
+  "1:31: error: initializer has incomplete type"
 check_error initializer-global-array-nonconstant 'int n; int a[2] = {n};' \
-            "1:20: error: global initializer is not a constant expression"
+  "1:20: error: global initializer is not a constant expression"
 check_error initializer-global-member-nonconstant 'int n; struct S { int x; } a = {n};' \
-            "1:33: error: global initializer is not a constant expression"
+  "1:33: error: global initializer is not a constant expression"
 check_error initializer-global-call 'int f(void); int a[2] = {f()};' \
-            "1:26: error: global initializer is not a constant expression"
+  "1:26: error: global initializer is not a constant expression"
 check_error initializer-global-pointer-nonconstant 'int *p; struct S { int *p; } a = {p};' \
-            "1:35: error: global initializer is not a constant expression"
+  "1:35: error: global initializer is not a constant expression"
 check_error initializer-array-redefinition 'int a[2] = {1}; int a[2] = {2};' \
-            "1:21: error: redefinition of variable 'a'"
+  "1:21: error: redefinition of variable 'a'"
 check_error initializer-record-redefinition 'struct S { int x; } a = {1}; struct S a = {2};' \
-            "1:39: error: redefinition of variable 'a'"
+  "1:39: error: redefinition of variable 'a'"
 check_error initializer-missing-comma 'int a[2] = {1 2};' \
-            "1:15: error: expect '}'"
+  "1:15: error: expect '}'"
 check_error initializer-missing-rbrace 'int a[2] = {1, 2;' \
-            "1:17: error: expect '}'"
+  "1:17: error: expect '}'"
 check_error initializer-missing-element 'int a[2] = {1,,2};' \
-            "1:15: error: expect expr"
+  "1:15: error: expect expr"
 check_error initializer-nested-string-too-long 'struct S { char s[2]; } a = {"abc"};' \
-            "1:30: error: string literal is too long for character array"
+  "1:30: error: string literal is too long for character array"
 
 # Aggregate calls share the System V ABI with the selected host compiler.
 for record in struct union; do
-    for size in 1 3 7 8 9 15 16 17 24 40 257; do
-        decl="$record S { unsigned char bytes[$size]; };"
-        implementation="$record S make(int seed) { $record S s; int i; for (i=0; i<$size; i++) s.bytes[i]=seed+i; return s; } int sum($record S s) { int i; for (i=0; i<$size; i++) if (s.bytes[i]!=(unsigned char)(42+i)) return 1; s.bytes[0]=7; return 42; }"
-        caller="$record S make(int); int sum($record S); int main(void) { $record S a=make(42); int result=sum(a); return a.bytes[0]==42 ? result : 2; }"
-        check "aggregate-call-$record-$size" 42 "$decl $implementation $caller"
-        if ((compare)); then
-            check \
-                "aggregate-call-$record-$size-host-callee" \
-                42 \
-                "$decl $caller" \
-                "$decl $implementation" \
-                "$CC"
-            check \
-                "aggregate-call-$record-$size-host-caller" \
-                42 \
-                "$decl $implementation" \
-                "$decl $caller" \
-                "$CC"
-        fi
-    done
+  for size in 1 3 7 8 9 15 16 17 24 40 257; do
+    decl="$record S { unsigned char bytes[$size]; };"
+    implementation="$record S make(int seed) { $record S s; int i; for (i=0; i<$size; i++) s.bytes[i]=seed+i; return s; } int sum($record S s) { int i; for (i=0; i<$size; i++) if (s.bytes[i]!=(unsigned char)(42+i)) return 1; s.bytes[0]=7; return 42; }"
+    caller="$record S make(int); int sum($record S); int main(void) { $record S a=make(42); int result=sum(a); return a.bytes[0]==42 ? result : 2; }"
+    check "aggregate-call-$record-$size" 42 "$decl $implementation $caller"
+    if ((compare)); then
+      check \
+        "aggregate-call-$record-$size-host-callee" \
+        42 \
+        "$decl $caller" \
+        "$decl $implementation" \
+        "$CC"
+      check \
+        "aggregate-call-$record-$size-host-caller" \
+        42 \
+        "$decl $implementation" \
+        "$decl $caller" \
+        "$CC"
+    fi
+  done
 done
 
 # A two-register argument spills as a whole and leaves one register available.
 for count in 0 4 5 6 7; do
-    for size in 9 17; do
-        decl="struct S { unsigned char bytes[$size]; };"
-        params=''
-        args=''
-        sum='z'
-        for ((i=0; i<count; i++)); do
-            params+="long a$i, "
-            args+="$((i+1)), "
-            sum+=" + a$i"
-        done
-        params+='struct S s, long z'
-        args+='s, 9'
-        expected=$((count*(count+1)/2+9))
-        implementation="struct S change($params) { int i; for (i=0; i<$size; i++) if (s.bytes[i]!=(unsigned char)(42+i)) s.bytes[0]=0; if ($sum != $expected) s.bytes[0]=0; return s; }"
-        caller="struct S change($params); int main(void) { struct S s; int i; for (i=0; i<$size; i++) s.bytes[i]=42+i; struct S t=change($args); return t.bytes[0]; }"
-        check "aggregate-placement-$count-$size" 42 "$decl $implementation $caller"
-        if ((compare)); then
-            check \
-                "aggregate-placement-$count-$size-host-callee" \
-                42 \
-                "$decl $caller" \
-                "$decl $implementation" \
-                "$CC"
-            check \
-                "aggregate-placement-$count-$size-host-caller" \
-                42 \
-                "$decl $implementation" \
-                "$decl $caller" \
-                "$CC"
-        fi
+  for size in 9 17; do
+    decl="struct S { unsigned char bytes[$size]; };"
+    params=''
+    args=''
+    sum='z'
+    for ((i = 0; i < count; i++)); do
+      params+="long a$i, "
+      args+="$((i + 1)), "
+      sum+=" + a$i"
     done
+    params+='struct S s, long z'
+    args+='s, 9'
+    expected=$((count * (count + 1) / 2 + 9))
+    implementation="struct S change($params) { int i; for (i=0; i<$size; i++) if (s.bytes[i]!=(unsigned char)(42+i)) s.bytes[0]=0; if ($sum != $expected) s.bytes[0]=0; return s; }"
+    caller="struct S change($params); int main(void) { struct S s; int i; for (i=0; i<$size; i++) s.bytes[i]=42+i; struct S t=change($args); return t.bytes[0]; }"
+    check "aggregate-placement-$count-$size" 42 "$decl $implementation $caller"
+    if ((compare)); then
+      check \
+        "aggregate-placement-$count-$size-host-callee" \
+        42 \
+        "$decl $caller" \
+        "$decl $implementation" \
+        "$CC"
+      check \
+        "aggregate-placement-$count-$size-host-caller" \
+        42 \
+        "$decl $implementation" \
+        "$decl $caller" \
+        "$CC"
+    fi
+  done
 done
 check aggregate-return-wide-bits 1 'struct S { unsigned long x; long y; }; struct S make(void) { struct S s; s.x=18446744073709551615UL; s.y=-4294967296L; return s; } int main(void) { struct S s=make(); return s.x==18446744073709551615UL && s.y==-4294967296L; }'
 check aggregate-return-pointers 42 'struct S { int *p; long x; }; struct S make(int *p) { struct S s; s.p=p; s.x=20; return s; } int main(void) { int n=22; struct S s=make(&n); return *s.p+s.x; }'
@@ -741,82 +741,82 @@ check aggregate-call-large-then-register-record 42 'struct L { long x[3]; }; str
 check aggregate-call-rollback-then-small-record 42 'struct P { long x; long y; }; struct S { int x; }; int sum(int a, int b, int c, int d, int e, struct P p, struct S s, long z) { return a+b+c+d+e+p.x+p.y+s.x+z; } int main(void) { struct P p; p.x=10; p.y=10; struct S s; s.x=6; return sum(1,2,3,4,5,p,s,1); }'
 check aggregate-call-unprototyped-return 42 'struct S { long x[3]; }; struct S make(); int main(void) { return make(42).x[0]; } struct S make(int n) { struct S s; s.x[0]=n; s.x[1]=0; s.x[2]=0; return s; }'
 check_error aggregate-return-incomplete-definition 'struct S; struct S make(void) { return make(); }' \
-            '1:20: error: function return type is incomplete'
+  '1:20: error: function return type is incomplete'
 check_error aggregate-return-incomplete-call 'struct S; struct S make(void); int main(void) { make(); return 0; }' \
-            '1:49: error: function return type is incomplete'
+  '1:49: error: function return type is incomplete'
 check_error aggregate-parameter-incomplete-definition 'struct S; int sum(struct S s) { return 0; }' \
-            '1:28: error: parameter has incomplete type'
+  '1:28: error: parameter has incomplete type'
 check_error aggregate-return-incompatible-record 'struct S { int x; }; struct T { int x; }; struct S make(void) { struct T s; return s; }' \
-            '1:77: error: incompatible return type'
+  '1:77: error: incompatible return type'
 check_error aggregate-return-scalar 'struct S { int x; }; struct S make(void) { return 42; }' \
-            '1:44: error: incompatible return type'
+  '1:44: error: incompatible return type'
 check_error aggregate-return-missing-value 'struct S { int x; }; struct S make(void) { return; }' \
-            '1:44: error: expect return expr'
+  '1:44: error: expect return expr'
 check_error aggregate-parameter-incompatible-record 'struct S { int x; }; struct T { int x; }; int sum(struct S s); int main(void) { struct T t; return sum(t); }' \
-            '1:104: error: incompatible argument type'
+  '1:104: error: incompatible argument type'
 check_error aggregate-parameter-scalar-argument 'struct S { int x; }; int sum(struct S s); int main(void) { return sum(42); }' \
-            '1:71: error: incompatible argument type'
+  '1:71: error: incompatible argument type'
 check_error aggregate-parameter-pointer-argument 'struct S { int x; }; int sum(struct S s); int main(void) { struct S s; return sum(&s); }' \
-            '1:83: error: incompatible argument type'
+  '1:83: error: incompatible argument type'
 check_error aggregate-parameter-conflicting-prototype 'struct S { int x; }; struct T { int x; }; int sum(struct S s); int sum(struct T t);' \
-            '1:68: error: conflicting declaration of function '\''sum'\'''
+  '1:68: error: conflicting declaration of function '\''sum'\'''
 check_error aggregate-return-member-not-lvalue 'struct S { int x; }; struct S make(void); int main(void) { make().x=42; return 0; }' \
-            '1:68: error: invalid assignment target'
+  '1:68: error: invalid assignment target'
 check_error aggregate-return-member-no-address 'struct S { int x; }; struct S make(void); int main(void) { int *p=&make().x; return 0; }' \
-            '1:67: error: invalid address-of target'
+  '1:67: error: invalid address-of target'
 check_error aggregate-return-result-not-lvalue 'struct S { int x; }; struct S make(void); int main(void) { struct S s; make()=s; return 0; }' \
-            '1:78: error: invalid assignment target'
+  '1:78: error: invalid assignment target'
 check_error aggregate-return-const-parameter-write 'struct S { int x; }; int sum(const struct S s) { s.x=42; return s.x; }' \
-            '1:53: error: invalid assignment target'
+  '1:53: error: invalid assignment target'
 check_error aggregate-call-temporary-stack-overflow 'struct S { char a[2147483647]; }; struct S make(void); int main(void) { make(); return 0; }' \
-            '1:73: error: local variables exceed supported stack size'
+  '1:73: error: local variables exceed supported stack size'
 check_error aggregate-parameter-stack-overflow 'struct S { char a[2147483647]; }; int sum(struct S s) { return 0; }' \
-            '1:52: error: local variables exceed supported stack size'
+  '1:52: error: local variables exceed supported stack size'
 
 check aggregate-sret-small-parameter-3 42 'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + z + q; r.z=99; return r; }struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, p, 9, -11); return r.x==42 && r.y==4 && r.z==99 ? 42 : 1; }'
 if ((compare)); then
-    check \
-        aggregate-sret-small-parameter-3-host-callee \
-        42 \
-        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, p, 9, -11); return r.x==42 && r.y==4 && r.z==99 ? 42 : 1; }' \
-        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + z + q; r.z=99; return r; }' \
-        "$CC"
-    check \
-        aggregate-sret-small-parameter-3-host-caller \
-        42 \
-        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + z + q; r.z=99; return r; }' \
-        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, p, 9, -11); return r.x==42 && r.y==4 && r.z==99 ? 42 : 1; }' \
-        "$CC"
+  check \
+    aggregate-sret-small-parameter-3-host-callee \
+    42 \
+    'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, p, 9, -11); return r.x==42 && r.y==4 && r.z==99 ? 42 : 1; }' \
+    'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + z + q; r.z=99; return r; }' \
+    "$CC"
+  check \
+    aggregate-sret-small-parameter-3-host-caller \
+    42 \
+    'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + z + q; r.z=99; return r; }' \
+    'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, p, 9, -11); return r.x==42 && r.y==4 && r.z==99 ? 42 : 1; }' \
+    "$CC"
 fi
 check aggregate-sret-small-parameter-4 42 'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + a3 + z + q; r.z=99; return r; }struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, 4, p, 9, -11); return r.x==42 && r.y==8 && r.z==99 ? 42 : 1; }'
 if ((compare)); then
-    check \
-        aggregate-sret-small-parameter-4-host-callee \
-        42 \
-        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, 4, p, 9, -11); return r.x==42 && r.y==8 && r.z==99 ? 42 : 1; }' \
-        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + a3 + z + q; r.z=99; return r; }' \
-        "$CC"
-    check \
-        aggregate-sret-small-parameter-4-host-caller \
-        42 \
-        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + a3 + z + q; r.z=99; return r; }' \
-        'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, 4, p, 9, -11); return r.x==42 && r.y==8 && r.z==99 ? 42 : 1; }' \
-        "$CC"
+  check \
+    aggregate-sret-small-parameter-4-host-callee \
+    42 \
+    'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, 4, p, 9, -11); return r.x==42 && r.y==8 && r.z==99 ? 42 : 1; }' \
+    'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + a3 + z + q; r.z=99; return r; }' \
+    "$CC"
+  check \
+    aggregate-sret-small-parameter-4-host-caller \
+    42 \
+    'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q) { struct L r; r.x=p.x+p.y; r.y=a0 + a1 + a2 + a3 + z + q; r.z=99; return r; }' \
+    'struct P { long x; long y; }; struct L { long x; long y; long z; }; struct L make(long a0, long a1, long a2, long a3, struct P p, unsigned char z, short q); int main(void) { struct P p; p.x=20; p.y=22; struct L r=make(1, 2, 3, 4, p, 9, -11); return r.x==42 && r.y==8 && r.z==99 ? 42 : 1; }' \
+    "$CC"
 fi
 check aggregate-multiple-register-and-stack-parameters 42 'struct P { long x; long y; }; struct P combine(struct P a, struct P b, struct P c, struct P d) { struct P r; r.x=a.x+b.x+c.x+d.x; r.y=a.y+b.y+c.y+d.y; return r; }struct P combine(struct P,struct P,struct P,struct P); int main(void) { struct P a; a.x=4; a.y=6; struct P b=a; struct P c=a; struct P d=a; d.y=8; struct P r=combine(a,b,c,d); return r.x+r.y; }'
 if ((compare)); then
-    check \
-        aggregate-multiple-register-and-stack-parameters-host-callee \
-        42 \
-        'struct P { long x; long y; }; struct P combine(struct P,struct P,struct P,struct P); int main(void) { struct P a; a.x=4; a.y=6; struct P b=a; struct P c=a; struct P d=a; d.y=8; struct P r=combine(a,b,c,d); return r.x+r.y; }' \
-        'struct P { long x; long y; }; struct P combine(struct P a, struct P b, struct P c, struct P d) { struct P r; r.x=a.x+b.x+c.x+d.x; r.y=a.y+b.y+c.y+d.y; return r; }' \
-        "$CC"
-    check \
-        aggregate-multiple-register-and-stack-parameters-host-caller \
-        42 \
-        'struct P { long x; long y; }; struct P combine(struct P a, struct P b, struct P c, struct P d) { struct P r; r.x=a.x+b.x+c.x+d.x; r.y=a.y+b.y+c.y+d.y; return r; }' \
-        'struct P { long x; long y; }; struct P combine(struct P,struct P,struct P,struct P); int main(void) { struct P a; a.x=4; a.y=6; struct P b=a; struct P c=a; struct P d=a; d.y=8; struct P r=combine(a,b,c,d); return r.x+r.y; }' \
-        "$CC"
+  check \
+    aggregate-multiple-register-and-stack-parameters-host-callee \
+    42 \
+    'struct P { long x; long y; }; struct P combine(struct P,struct P,struct P,struct P); int main(void) { struct P a; a.x=4; a.y=6; struct P b=a; struct P c=a; struct P d=a; d.y=8; struct P r=combine(a,b,c,d); return r.x+r.y; }' \
+    'struct P { long x; long y; }; struct P combine(struct P a, struct P b, struct P c, struct P d) { struct P r; r.x=a.x+b.x+c.x+d.x; r.y=a.y+b.y+c.y+d.y; return r; }' \
+    "$CC"
+  check \
+    aggregate-multiple-register-and-stack-parameters-host-caller \
+    42 \
+    'struct P { long x; long y; }; struct P combine(struct P a, struct P b, struct P c, struct P d) { struct P r; r.x=a.x+b.x+c.x+d.x; r.y=a.y+b.y+c.y+d.y; return r; }' \
+    'struct P { long x; long y; }; struct P combine(struct P,struct P,struct P,struct P); int main(void) { struct P a; a.x=4; a.y=6; struct P b=a; struct P c=a; struct P d=a; d.y=8; struct P r=combine(a,b,c,d); return r.x+r.y; }' \
+    "$CC"
 fi
 
 # Aggregate values copy records and preserve non-lvalue expression results.
@@ -845,10 +845,10 @@ check aggregate-nested-const-copy-initializer 0 'struct I { const int x; }; stru
 check aggregate-const-pointer-copy-initializer 0 'struct S { int *const p; } a; int main(void) { struct S b = a; return b.p != 0; }'
 check aggregate-global-source-and-destination 42 'struct S { long x; } a; struct S b; int main(void) { a.x = 42; b = a; a.x = 0; return b.x; }'
 check \
-    aggregate-extern-source \
-    42 \
-    'struct S { long x; }; extern struct S a; int main(void) { a.x = 42; struct S b = a; return b.x; }' \
-    'struct S { long x; } a;'
+  aggregate-extern-source \
+  42 \
+  'struct S { long x; }; extern struct S a; int main(void) { a.x = 42; struct S b = a; return b.x; }' \
+  'struct S { long x; } a;'
 check aggregate-conditional-true 42 'struct S { int x; }; int main(void) { struct S a; struct S b; a.x = 42; b.x = 7; struct S c = 1 ? a : b; return c.x; }'
 check aggregate-conditional-false 42 'union U { long x; }; int main(void) { union U a; union U b; a.x = 7; b.x = 42; union U c = 0 ? a : b; return c.x; }'
 check aggregate-conditional-const-member 42 'struct S { int x; }; int main(void) { struct S a; a.x = 42; const struct S b = a; return (0 ? a : b).x; }'
@@ -874,69 +874,69 @@ check aggregate-copy-bytes-64 42 'struct S { unsigned char bytes[64]; }; int mai
 check aggregate-copy-bytes-257 42 'struct S { unsigned char bytes[257]; }; int main(void) { struct S a; int i; for (i=0; i<257; i++) a.bytes[i]=42; struct S b=a; for (i=0; i<257; i++) if (b.bytes[i]!=42) return 1; return 42; }'
 
 check_error aggregate-incompatible-struct-assignment 'struct A { int x; }; struct B { int x; }; int main(void) { struct A a; struct B b; a = b; return 0; }' \
-            '1:86: error: incompatible assignment type'
+  '1:86: error: incompatible assignment type'
 check_error aggregate-incompatible-union-initializer 'union A { int x; }; union B { int x; }; int main(void) { union A a; union B b = a; return 0; }' \
-            '1:77: error: incompatible initializer type'
+  '1:77: error: incompatible initializer type'
 check_error aggregate-struct-union-assignment 'struct S { int x; }; union U { int x; }; int main(void) { struct S a; union U b; a = b; return 0; }' \
-            '1:84: error: incompatible assignment type'
+  '1:84: error: incompatible assignment type'
 check_error aggregate-to-scalar-initializer 'struct S { int x; }; int main(void) { struct S a; int b = a; return 0; }' \
-            '1:55: error: incompatible initializer type'
+  '1:55: error: incompatible initializer type'
 check_error aggregate-const-assignment 'struct S { int x; }; int main(void) { struct S a; const struct S b = a; b = a; return 0; }' \
-            '1:75: error: invalid assignment target'
+  '1:75: error: invalid assignment target'
 check_error aggregate-const-member-assignment 'struct S { const int x; }; int main(void) { struct S a; struct S b; a = b; return 0; }' \
-            '1:71: error: invalid assignment target'
+  '1:71: error: invalid assignment target'
 check_error aggregate-const-union-member-assignment 'union U { int x; const long y; }; int main(void) { union U a; union U b; a = b; return 0; }' \
-            '1:76: error: invalid assignment target'
+  '1:76: error: invalid assignment target'
 check_error aggregate-nested-const-assignment 'struct I { const int x; }; struct S { struct I i; }; int main(void) { struct S a; struct S b; a = b; return 0; }' \
-            '1:97: error: invalid assignment target'
+  '1:97: error: invalid assignment target'
 check_error aggregate-array-const-assignment 'struct S { const int x[2]; }; int main(void) { struct S a; struct S b; a = b; return 0; }' \
-            '1:74: error: invalid assignment target'
+  '1:74: error: invalid assignment target'
 check_error aggregate-array-nested-const-assignment 'struct I { const int x; }; struct S { struct I i[2]; }; int main(void) { struct S a; struct S b; a = b; return 0; }' \
-            '1:100: error: invalid assignment target'
+  '1:100: error: invalid assignment target'
 check_error aggregate-const-pointer-member-assignment 'struct S { int *const p; }; int main(void) { struct S a; struct S b; a = b; return 0; }' \
-            '1:72: error: invalid assignment target'
+  '1:72: error: invalid assignment target'
 check_error aggregate-result-assignment 'struct S { int x; }; int main(void) { struct S a; struct S b; (a=b) = b; return 0; }' \
-            '1:69: error: invalid assignment target'
+  '1:69: error: invalid assignment target'
 check_error aggregate-result-member-assignment 'struct S { int x; }; int main(void) { struct S a; struct S b; (a=b).x = 1; return 0; }' \
-            '1:71: error: invalid assignment target'
+  '1:71: error: invalid assignment target'
 check_error aggregate-result-member-address 'struct S { int x; }; int main(void) { struct S a; struct S b; int *p = &(a=b).x; return 0; }' \
-            '1:72: error: invalid address-of target'
+  '1:72: error: invalid address-of target'
 check_error aggregate-conditional-member-assignment 'struct S { int x; }; int main(void) { struct S a; struct S b; (1 ? a : b).x = 1; return 0; }' \
-            '1:77: error: invalid assignment target'
+  '1:77: error: invalid assignment target'
 check_error aggregate-comma-member-assignment 'struct S { int x; }; int main(void) { struct S a; (0, a).x = 1; return 0; }' \
-            '1:60: error: invalid assignment target'
+  '1:60: error: invalid assignment target'
 check_error aggregate-array-assignment 'struct S { int x; }; int main(void) { struct S a[2]; struct S b[2]; a = b; return 0; }' \
-            '1:71: error: invalid assignment target'
+  '1:71: error: invalid assignment target'
 check_error aggregate-conditional-incompatible 'struct A { int x; }; struct B { int x; }; int main(void) { struct A a; struct B b; 1 ? a : b; return 0; }' \
-            '1:86: error: incompatible conditional operand types'
+  '1:86: error: incompatible conditional operand types'
 check_error aggregate-global-copy-initializer 'struct S { int x; } a; struct S b = a;' \
-            '1:33: error: global initializer requires a scalar type'
+  '1:33: error: global initializer requires a scalar type'
 check_error aggregate-incomplete-assignment 'struct S; extern struct S a; int main(void) { a = a; return 0; }' \
-            '1:49: error: invalid assignment target'
+  '1:49: error: invalid assignment target'
 check_error aggregate-comparison-eq 'struct S { int x; }; int main(void) { struct S a; return a == a; }' \
-            '1:60: error: invalid operands to comparison'
+  '1:60: error: invalid operands to comparison'
 check_error aggregate-comparison-ne 'struct S { int x; }; int main(void) { struct S a; return a != a; }' \
-            '1:60: error: invalid operands to comparison'
+  '1:60: error: invalid operands to comparison'
 check_error aggregate-comparison-lt 'struct S { int x; }; int main(void) { struct S a; return a < a; }' \
-            '1:60: error: invalid operands to comparison'
+  '1:60: error: invalid operands to comparison'
 check_error aggregate-comparison-le 'struct S { int x; }; int main(void) { struct S a; return a <= a; }' \
-            '1:60: error: invalid operands to comparison'
+  '1:60: error: invalid operands to comparison'
 check_error aggregate-comparison-gt 'struct S { int x; }; int main(void) { struct S a; return a > a; }' \
-            '1:60: error: invalid operands to comparison'
+  '1:60: error: invalid operands to comparison'
 check_error aggregate-comparison-ge 'struct S { int x; }; int main(void) { struct S a; return a >= a; }' \
-            '1:60: error: invalid operands to comparison'
+  '1:60: error: invalid operands to comparison'
 check_error aggregate-invalid-operator-add 'struct S { int x; }; int main(void) { struct S a; a + a; return 0; }' \
-            '1:53: error: invalid operands to binary +'
+  '1:53: error: invalid operands to binary +'
 check_error aggregate-invalid-operator-sub 'struct S { int x; }; int main(void) { struct S a; a - a; return 0; }' \
-            '1:53: error: invalid operands to binary -'
+  '1:53: error: invalid operands to binary -'
 check_error aggregate-invalid-operator-mul 'struct S { int x; }; int main(void) { struct S a; a * a; return 0; }' \
-            '1:53: error: invalid operands to integer operator'
+  '1:53: error: invalid operands to integer operator'
 check_error aggregate-invalid-operator-shift 'struct S { int x; }; int main(void) { struct S a; a << a; return 0; }' \
-            '1:53: error: invalid operands to integer operator'
+  '1:53: error: invalid operands to integer operator'
 
 # Union members share storage; anonymous records promote member names.
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' 'long' 'unsigned long' 'long long' 'unsigned long long'; do
-    check "union-scalar-member-$spec" 1 "union U { $spec value; char bytes[16]; }; int main(void) { union U u; u.value = 1; return u.value == 1 && sizeof u == 16; }"
+  check "union-scalar-member-$spec" 1 "union U { $spec value; char bytes[16]; }; int main(void) { union U u; u.value = 1; return u.value == 1 && sizeof u == 16; }"
 done
 check union-sizeof 8 'union U { char c; long n; }; int main(void) { return sizeof(union U); }'
 check union-tail-padding 16 'union U { char bytes[9]; long n; }; int main(void) { return sizeof(union U); }'
@@ -990,86 +990,86 @@ check union-anonymous-global-member-address 42 'struct S { char c; union { long 
 check union-anonymous-base-evaluated-once 1 'struct S { union { int x; long n; }; }; struct S s; int calls; struct S *get(void) { calls++; return &s; } int main(void) { s.x = 41; get()->x++; return s.x == 42 && calls == 1; }'
 
 check_error union-empty 'union U {};' \
-            "1:10: error: empty unions are not supported"
+  "1:10: error: empty unions are not supported"
 check_error union-missing-tag 'union;' \
-            "1:6: error: expect union tag or '{'"
+  "1:6: error: expect union tag or '{'"
 check_error union-missing-member-name 'union U { int; };' \
-            "1:14: error: expect member name"
+  "1:14: error: expect member name"
 check_error union-duplicate-member 'union U { int x; long x; };' \
-            "1:23: error: duplicate union member"
+  "1:23: error: duplicate union member"
 check_error union-incomplete-member 'union U { struct S s; };' \
-            "1:20: error: member has incomplete type"
+  "1:20: error: member has incomplete type"
 check_error union-self-member 'union U { union U value; };' \
-            "1:19: error: member has incomplete type"
+  "1:19: error: member has incomplete type"
 check_error union-void-member 'union U { void x; };' \
-            "1:16: error: member has void type"
+  "1:16: error: member has void type"
 check_error union-incomplete-array-member 'union U { int a[]; };' \
-            "1:15: error: member has incomplete type"
+  "1:15: error: member has incomplete type"
 check_error union-redefinition 'union U { int x; }; union U { long n; };' \
-            "1:27: error: redefinition of union 'U'"
+  "1:27: error: redefinition of union 'U'"
 check_error union-recursive-redefinition 'union U { union U { int x; } nested; };' \
-            "1:17: error: redefinition of union 'U'"
+  "1:17: error: redefinition of union 'U'"
 check_error union-struct-tag-conflict 'struct S { int x; }; union S *p;' \
-            "1:28: error: tag 'S' declared as a different kind"
+  "1:28: error: tag 'S' declared as a different kind"
 check_error union-tag-struct-conflict 'union U { int x; }; struct U *p;' \
-            "1:28: error: tag 'U' declared as a different kind"
+  "1:28: error: tag 'U' declared as a different kind"
 check_error union-enum-tag-conflict 'enum E { A }; union E *p;' \
-            "1:21: error: tag 'E' declared as a different kind"
+  "1:21: error: tag 'E' declared as a different kind"
 check_error union-tag-enum-conflict 'union U { int x; }; enum U { A };' \
-            "1:26: error: tag 'U' declared as a different kind"
+  "1:26: error: tag 'U' declared as a different kind"
 check_error union-incomplete-local 'int main(void) { union U u; return 0; }' \
-            "1:26: error: variable has incomplete type"
+  "1:26: error: variable has incomplete type"
 check_error union-incomplete-sizeof 'union U; int main(void) { return sizeof(union U); }' \
-            "1:34: error: sizeof cannot be applied to an incomplete type"
+  "1:34: error: sizeof cannot be applied to an incomplete type"
 check_error union-incomplete-member-access 'union U *p; int main(void) { return p->x; }' \
-            "1:38: error: member access on incomplete union"
+  "1:38: error: member access on incomplete union"
 check_error union-incomplete-pointer-step 'union U *p; int main(void) { p++; return 0; }' \
-            "1:31: error: pointer arithmetic on incomplete type"
+  "1:31: error: pointer arithmetic on incomplete type"
 check_error union-missing-member 'union U { int x; }; int main(void) { union U u; return u.y; }' \
-            "1:58: error: no member named 'y' in union"
+  "1:58: error: no member named 'y' in union"
 check_error union-type-identity 'union A { int x; }; union B { int x; }; int main(void) { union A a; union B *p = &a; return 0; }' \
-            "1:78: error: incompatible initializer type"
+  "1:78: error: incompatible initializer type"
 check_error union-anonymous-type-identity 'int main(void) { union { int x; } a; union { int x; } *p = &a; return 0; }' \
-            "1:56: error: incompatible initializer type"
+  "1:56: error: incompatible initializer type"
 check_error union-struct-pointer-mismatch 'union U { int x; }; struct S { int x; }; int main(void) { union U u; struct S *p = &u; return 0; }' \
-            "1:80: error: incompatible initializer type"
+  "1:80: error: incompatible initializer type"
 check_error union-initializer-not-supported 'union U { int x; }; int main(void) { union U u = 0; return 0; }' \
-            "1:46: error: incompatible initializer type"
+  "1:46: error: incompatible initializer type"
 check union-return-by-value 42 'union U { int x; }; union U f(void) { union U u; u.x=42; return u; } int main(void) { return f().x; }'
 check union-parameter-by-value 42 'union U { int x; }; int f(union U u) { return u.x; } int main(void) { union U u; u.x=42; return f(u); }'
 check union-unprototyped-value-argument 42 'int f(); union U { int x; }; int main(void) { union U u; u.x=42; return f(u); } int f(union U u) { return u.x; }'
 check_error union-condition 'union U { int x; }; int main(void) { union U u; if (u) return 1; return 0; }' \
-            "1:53: error: condition must have scalar type"
+  "1:53: error: condition must have scalar type"
 check_error union-increment 'union U { int x; }; int main(void) { union U u; ++u; return 0; }' \
-            "1:49: error: invalid increment target"
+  "1:49: error: invalid increment target"
 check_error union-const-member-write 'union U { int x; }; const union U u; int main(void) { u.x = 1; return 0; }' \
-            "1:59: error: invalid assignment target"
+  "1:59: error: invalid assignment target"
 check_error union-const-array-element-write 'union U { int a[2]; }; const union U u; int main(void) { u.a[0] = 1; return 0; }' \
-            "1:65: error: invalid assignment target"
+  "1:65: error: invalid assignment target"
 check_error union-anonymous-const-write 'struct S { union { int x; }; }; const struct S s; int main(void) { s.x = 1; return 0; }' \
-            "1:72: error: invalid assignment target"
+  "1:72: error: invalid assignment target"
 check_error union-anonymous-qualified-member-write 'struct S { const union { int x; }; } s; int main(void) { s.x = 1; return 0; }' \
-            "1:62: error: invalid assignment target"
+  "1:62: error: invalid assignment target"
 check_error union-anonymous-const-array-conversion 'struct S { union { int a[2]; }; }; const struct S s; int main(void) { int *p = s.a; return 0; }' \
-            "1:76: error: incompatible initializer type"
+  "1:76: error: incompatible initializer type"
 check_error union-anonymous-duplicate-outer-before 'struct S { int x; union { int x; }; };' \
-            "1:31: error: duplicate struct member"
+  "1:31: error: duplicate struct member"
 check_error union-anonymous-duplicate-outer-after 'struct S { union { int x; }; int x; };' \
-            "1:34: error: duplicate struct member"
+  "1:34: error: duplicate struct member"
 check_error union-anonymous-duplicate-siblings 'struct S { union { int x; }; union { long x; }; };' \
-            "1:43: error: duplicate struct member"
+  "1:43: error: duplicate struct member"
 check_error union-anonymous-nested-duplicate 'union U { struct { union { int x; }; }; int x; };' \
-            "1:45: error: duplicate union member"
+  "1:45: error: duplicate union member"
 check_error union-tagged-member-needs-name 'struct S { union U { int x; }; };' \
-            "1:30: error: expect member name"
+  "1:30: error: expect member name"
 check_error union-typedef-member-needs-name 'typedef union { int x; } U; struct S { U; };' \
-            "1:41: error: expect member name"
+  "1:41: error: expect member name"
 check_error union-tail-padding-overflow 'union U { char a[2147483647]; long n; };' \
-            "1:1: error: union size exceeds supported limit"
+  "1:1: error: union size exceeds supported limit"
 check_error union-tag-outside-block 'int main(void) { { union U { int x; }; } union U u; return 0; }' \
-            "1:50: error: variable has incomplete type"
+  "1:50: error: variable has incomplete type"
 check_error union-forward-shadow 'union U { int x; }; int main(void) { union U; union U u; return 0; }' \
-            "1:55: error: variable has incomplete type"
+  "1:55: error: variable has incomplete type"
 
 # File-scope extern declarations share objects without allocating storage.
 check extern-object-before-definition 42 'extern int x; int x = 42; int main(void) { return x; }'
@@ -1106,100 +1106,100 @@ check extern-object-local-shadowing 42 'extern int x; int x = 42; int main(void)
 check extern-unused-object-no-definition 42 'extern int missing; int main(void) { return 42; }'
 check extern-keyword-boundaries 42 'int main(void) { int external = 20; int extern_ = 21; int extern1 = 1; return external + extern_ + extern1; }'
 check \
-    extern-object-another-translation-unit \
-    42 \
-    'extern int shared; int main(void) { return shared; }' \
-    'int shared = 42;'
+  extern-object-another-translation-unit \
+  42 \
+  'extern int shared; int main(void) { return shared; }' \
+  'int shared = 42;'
 check \
-    extern-object-write-another-translation-unit \
-    42 \
-    'extern int shared; int read_shared(void); int main(void) { shared = 42; return read_shared(); }' \
-    'int shared; int read_shared(void) { return shared; }'
+  extern-object-write-another-translation-unit \
+  42 \
+  'extern int shared; int read_shared(void); int main(void) { shared = 42; return read_shared(); }' \
+  'int shared; int read_shared(void) { return shared; }'
 check \
-    extern-function-another-translation-unit \
-    42 \
-    'extern int other(int); int main(void) { return other(42); }' \
-    'int other(int x) { return x; }'
+  extern-function-another-translation-unit \
+  42 \
+  'extern int other(int); int main(void) { return other(42); }' \
+  'int other(int x) { return x; }'
 check \
-    extern-definition-exports-object \
-    42 \
-    'extern int shared = 42; int other(void); int main(void) { return other(); }' \
-    'extern int shared; int other(void) { return shared; }'
+  extern-definition-exports-object \
+  42 \
+  'extern int shared = 42; int other(void); int main(void) { return other(); }' \
+  'extern int shared; int other(void) { return shared; }'
 check \
-    extern-static-object-separate-translation-units \
-    42 \
-    'static int shared = 20; extern int shared; int other(void); int main(void) { return shared + other(); }' \
-    'int shared = 22; int other(void) { return shared; }'
+  extern-static-object-separate-translation-units \
+  42 \
+  'static int shared = 20; extern int shared; int other(void); int main(void) { return shared + other(); }' \
+  'int shared = 22; int other(void) { return shared; }'
 check \
-    extern-static-function-separate-translation-units \
-    42 \
-    'static int shared(void); extern int shared(void) { return 20; } int other(void); int main(void) { return shared() + other(); }' \
-    'int shared(void) { return 22; } int other(void) { return shared(); }'
+  extern-static-function-separate-translation-units \
+  42 \
+  'static int shared(void); extern int shared(void) { return 20; } int other(void); int main(void) { return shared() + other(); }' \
+  'int shared(void) { return 22; } int other(void) { return shared(); }'
 
 check_error extern-duplicate-storage 'extern extern int x;' \
-            "1:8: error: duplicate extern specifier"
+  "1:8: error: duplicate extern specifier"
 check_error extern-duplicate-storage-after-type 'extern int extern x;' \
-            "1:12: error: duplicate extern specifier"
+  "1:12: error: duplicate extern specifier"
 check_error extern-with-static 'extern static int x;' \
-            "1:8: error: multiple storage classes in declaration"
+  "1:8: error: multiple storage classes in declaration"
 check_error extern-after-static 'static int extern x;' \
-            "1:12: error: multiple storage classes in declaration"
+  "1:12: error: multiple storage classes in declaration"
 check_error extern-with-typedef 'extern typedef int T;' \
-            "1:8: error: multiple storage classes in declaration"
+  "1:8: error: multiple storage classes in declaration"
 check_error extern-after-typedef 'typedef int extern T;' \
-            "1:13: error: multiple storage classes in declaration"
+  "1:13: error: multiple storage classes in declaration"
 check_error extern-parameter 'int f(extern int x);' \
-            "1:7: error: extern is not allowed here"
+  "1:7: error: extern is not allowed here"
 check_error extern-member 'struct S { extern int x; };' \
-            "1:12: error: extern is not allowed here"
+  "1:12: error: extern is not allowed here"
 check_error extern-sizeof-type 'int main(void) { return sizeof(extern int); }' \
-            "1:32: error: extern is not allowed here"
+  "1:32: error: extern is not allowed here"
 check_error extern-cast-type 'int main(void) { return (extern int)1; }' \
-            "1:26: error: extern is not allowed here"
+  "1:26: error: extern is not allowed here"
 check_error extern-for-initializer 'int main(void) { for (extern int x; ; ) {} }' \
-            "1:23: error: extern is not allowed in a for initializer"
+  "1:23: error: extern is not allowed in a for initializer"
 check_error extern-static-variable-conflict 'extern int x; static int x;' \
-            "1:26: error: static declaration of 'x' follows non-static declaration"
+  "1:26: error: static declaration of 'x' follows non-static declaration"
 check_error extern-static-function-conflict 'extern int f(void); static int f(void);' \
-            "1:32: error: static declaration of 'f' follows non-static declaration"
+  "1:32: error: static declaration of 'f' follows non-static declaration"
 check_error extern-object-type-conflict 'extern int x; long x;' \
-            "1:20: error: conflicting declaration of variable 'x'"
+  "1:20: error: conflicting declaration of variable 'x'"
 check_error extern-object-const-conflict 'extern const int x; int x;' \
-            "1:25: error: conflicting declaration of variable 'x'"
+  "1:25: error: conflicting declaration of variable 'x'"
 check_error extern-array-bound-conflict 'extern int a[2]; int a[3];' \
-            "1:22: error: conflicting declaration of variable 'a'"
+  "1:22: error: conflicting declaration of variable 'a'"
 check_error extern-function-type-conflict 'extern int f(int); int f(long);' \
-            "1:24: error: conflicting declaration of function 'f'"
+  "1:24: error: conflicting declaration of function 'f'"
 check_error extern-variable-redefinition 'extern int x = 1; int x = 2;' \
-            "1:23: error: redefinition of variable 'x'"
+  "1:23: error: redefinition of variable 'x'"
 check_error extern-static-variable-redefinition 'static int x = 1; extern int x = 2;' \
-            "1:30: error: redefinition of variable 'x'"
+  "1:30: error: redefinition of variable 'x'"
 check_error extern-variable-typedef-conflict 'typedef int T; extern int T;' \
-            "1:27: error: variable conflicts with typedef 'T'"
+  "1:27: error: variable conflicts with typedef 'T'"
 check_error extern-function-variable-conflict 'int f; extern int f(void);' \
-            "1:19: error: function conflicts with variable 'f'"
+  "1:19: error: function conflicts with variable 'f'"
 check_error extern-variable-function-conflict 'int f(void); extern int f;' \
-            "1:25: error: variable conflicts with function 'f'"
+  "1:25: error: variable conflicts with function 'f'"
 check_error extern-void-object 'extern void x;' \
-            "1:13: error: variable has void type"
+  "1:13: error: variable has void type"
 check_error extern-incomplete-object-definition 'extern struct S x; struct S x;' \
-            "1:29: error: variable has incomplete type"
+  "1:29: error: variable has incomplete type"
 check_error extern-incomplete-array-sizeof 'extern int a[]; int main(void) { return sizeof a; }' \
-            "1:41: error: sizeof cannot be applied to an incomplete type"
+  "1:41: error: sizeof cannot be applied to an incomplete type"
 check_error extern-nonconstant-initializer 'int f(void); extern int x = f();' \
-            "1:29: error: global initializer is not a constant expression"
+  "1:29: error: global initializer is not a constant expression"
 check_error extern-missing-type 'extern x;' \
-            "1:8: error: expect type specifier"
+  "1:8: error: expect type specifier"
 check_error extern-missing-name 'int extern;' \
-            "1:11: error: expect declaration name"
+  "1:11: error: expect declaration name"
 check_error extern-keyword-as-variable 'int main() { int extern; return 0; }' \
-            "1:24: error: expect variable name"
+  "1:24: error: expect variable name"
 check_error extern-unbraced-declaration 'int main(void) { if (1) extern int x; return 0; }' \
-            "1:25: error: expect statement"
+  "1:25: error: expect statement"
 check_error extern-block-object-not-supported 'int main(void) { extern int x; return 0; }' \
-            "1:29: error: block-scope extern declarations are not supported yet"
+  "1:29: error: block-scope extern declarations are not supported yet"
 check_error extern-block-function-not-supported 'int main(void) { extern int f(void); return 0; }' \
-            "1:29: error: block-scope extern declarations are not supported yet"
+  "1:29: error: block-scope extern declarations are not supported yet"
 
 # File-scope static declarations retain internal linkage across redeclarations.
 check static-global-zero 0 'static int x; int main(void) { return x; }'
@@ -1229,87 +1229,87 @@ check static-keyword-boundaries 42 'int main(void) { int statically = 20; int st
 
 # Static symbols with the same spelling belong to their own translation units.
 check \
-    static-separate-translation-units \
-    42 \
-    'static int value = 20; static int zero; static char text[] = "*"; static int *ptr = &value; static int helper(void); int helper(void) { return *ptr + zero; } int helper(void); int other(void); int main(void) { if (text[0] != 42) return 99; zero = 1; return helper() + other(); }' \
-    'static int value = 21; static int zero; static char text[] = "+"; static int *ptr = &value; static int helper(void) { return *ptr + zero; } int other(void) { if (zero != 0 || text[0] != 43 || *ptr != 21) return 100; return helper(); }'
+  static-separate-translation-units \
+  42 \
+  'static int value = 20; static int zero; static char text[] = "*"; static int *ptr = &value; static int helper(void); int helper(void) { return *ptr + zero; } int helper(void); int other(void); int main(void) { if (text[0] != 42) return 99; zero = 1; return helper() + other(); }' \
+  'static int value = 21; static int zero; static char text[] = "+"; static int *ptr = &value; static int helper(void) { return *ptr + zero; } int other(void) { if (zero != 0 || text[0] != 43 || *ptr != 21) return 100; return helper(); }'
 check \
-    static-object-independent-of-external \
-    42 \
-    'static int shared = 20; int other(void); int main(void) { return shared + other(); }' \
-    'int shared = 22; int other(void) { return shared; }'
+  static-object-independent-of-external \
+  42 \
+  'static int shared = 20; int other(void); int main(void) { return shared + other(); }' \
+  'int shared = 22; int other(void) { return shared; }'
 check \
-    static-function-independent-of-external \
-    42 \
-    'static int shared(void) { return 20; } int other(void); int main(void) { return shared() + other(); }' \
-    'int shared(void) { return 22; } int other(void) { return shared(); }'
+  static-function-independent-of-external \
+  42 \
+  'static int shared(void) { return 20; } int other(void); int main(void) { return shared() + other(); }' \
+  'int shared(void) { return 22; } int other(void) { return shared(); }'
 
 check_error static-variable-after-external 'int x; static int x;' \
-            "1:19: error: static declaration of 'x' follows non-static declaration"
+  "1:19: error: static declaration of 'x' follows non-static declaration"
 check_error static-variable-before-external 'static int x; int x;' \
-            "1:19: error: non-static declaration of 'x' follows static declaration"
+  "1:19: error: non-static declaration of 'x' follows static declaration"
 check_error static-variable-after-definition 'int x = 1; static int x;' \
-            "1:23: error: static declaration of 'x' follows non-static declaration"
+  "1:23: error: static declaration of 'x' follows non-static declaration"
 check_error static-variable-later-external-definition 'static int x; int x = 1;' \
-            "1:19: error: non-static declaration of 'x' follows static declaration"
+  "1:19: error: non-static declaration of 'x' follows static declaration"
 check_error static-function-after-external 'int f(void); static int f(void);' \
-            "1:25: error: static declaration of 'f' follows non-static declaration"
+  "1:25: error: static declaration of 'f' follows non-static declaration"
 check_error static-function-after-external-definition 'int f(void) { return 0; } static int f(void);' \
-            "1:38: error: static declaration of 'f' follows non-static declaration"
+  "1:38: error: static declaration of 'f' follows non-static declaration"
 check_error static-duplicate-storage 'static static int x;' \
-            "1:8: error: duplicate static specifier"
+  "1:8: error: duplicate static specifier"
 check_error static-duplicate-storage-after-type 'static int static x;' \
-            "1:12: error: duplicate static specifier"
+  "1:12: error: duplicate static specifier"
 check_error static-with-typedef 'static typedef int T;' \
-            "1:8: error: multiple storage classes in declaration"
+  "1:8: error: multiple storage classes in declaration"
 check_error static-after-typedef 'typedef int static T;' \
-            "1:13: error: multiple storage classes in declaration"
+  "1:13: error: multiple storage classes in declaration"
 check_error static-parameter 'int f(static int x);' \
-            "1:7: error: static is not allowed here"
+  "1:7: error: static is not allowed here"
 check_error static-unnamed-parameter 'int f(int static);' \
-            "1:11: error: static is not allowed here"
+  "1:11: error: static is not allowed here"
 check_error static-member 'struct S { static int x; };' \
-            "1:12: error: static is not allowed here"
+  "1:12: error: static is not allowed here"
 check_error static-sizeof-type 'int main(void) { return sizeof(static int); }' \
-            "1:32: error: static is not allowed here"
+  "1:32: error: static is not allowed here"
 check_error static-cast-type 'int main(void) { return (static int)1; }' \
-            "1:26: error: static is not allowed here"
+  "1:26: error: static is not allowed here"
 check_error static-for-initializer 'int main(void) { for (static int x = 0; x < 1; x++) {} return 0; }' \
-            "1:23: error: static is not allowed in a for initializer"
+  "1:23: error: static is not allowed in a for initializer"
 check_error static-incomplete-array 'static int a[];' \
-            "1:12: error: static variable has incomplete type"
+  "1:12: error: static variable has incomplete type"
 check_error static-array-completed-too-late 'static int a[]; static int a[2];' \
-            "1:12: error: static variable has incomplete type"
+  "1:12: error: static variable has incomplete type"
 check_error static-incomplete-struct 'static struct S x; struct S { int a; };' \
-            "1:17: error: static variable has incomplete type"
+  "1:17: error: static variable has incomplete type"
 check_error static-incomplete-const-struct 'static const struct S x; struct S { int a; };' \
-            "1:23: error: static variable has incomplete type"
+  "1:23: error: static variable has incomplete type"
 check_error static-conflicting-variable-type 'static int x; static long x;' \
-            "1:27: error: conflicting declaration of variable 'x'"
+  "1:27: error: conflicting declaration of variable 'x'"
 check_error static-conflicting-function-type 'static int f(int); static int f(long);' \
-            "1:31: error: conflicting declaration of function 'f'"
+  "1:31: error: conflicting declaration of function 'f'"
 check_error static-variable-redefinition 'static int x = 1; static int x = 2;' \
-            "1:30: error: redefinition of variable 'x'"
+  "1:30: error: redefinition of variable 'x'"
 check_error static-function-redefinition 'static int f(void) { return 1; } int f(void) { return 2; }' \
-            "1:38: error: redefinition of function 'f'"
+  "1:38: error: redefinition of function 'f'"
 check_error static-variable-typedef-conflict 'typedef int T; static int T;' \
-            "1:27: error: variable conflicts with typedef 'T'"
+  "1:27: error: variable conflicts with typedef 'T'"
 check_error static-function-variable-conflict 'int f; static int f(void);' \
-            "1:19: error: function conflicts with variable 'f'"
+  "1:19: error: function conflicts with variable 'f'"
 check_error static-nonconstant-initializer 'int f(void); static int x = f();' \
-            "1:29: error: global initializer is not a constant expression"
+  "1:29: error: global initializer is not a constant expression"
 check_error static-missing-type 'static x;' \
-            "1:8: error: expect type specifier"
+  "1:8: error: expect type specifier"
 check_error static-missing-name 'int static;' \
-            "1:11: error: expect declaration name"
+  "1:11: error: expect declaration name"
 check_error static-keyword-as-variable 'int main() { int static; return 0; }' \
-            "1:24: error: expect variable name"
+  "1:24: error: expect variable name"
 check_error static-unbraced-declaration 'int main(void) { if (1) static int x; return 0; }' \
-            "1:25: error: expect statement"
+  "1:25: error: expect statement"
 check_error static-local-not-supported 'int main(void) { static int x; return 0; }' \
-            "1:29: error: static local variables are not supported yet"
+  "1:29: error: static local variables are not supported yet"
 check_error static-local-initializer-not-supported 'int main(void) { int static x = 1; return x; }' \
-            "1:29: error: static local variables are not supported yet"
+  "1:29: error: static local variables are not supported yet"
 
 # Const qualification applies independently to objects and pointed-to types.
 check const-local-int 42 'int main(void) { const int x = 42; return x; }'
@@ -1375,99 +1375,99 @@ check const-sizeof-qualified-types 1 'int main(void) { return sizeof(const int) 
 check const-qualified-cast 42 'int main(void) { return (const int)42; }'
 check const-keyword-boundaries 42 'int main(void) { int constancy = 20; int const_ = 22; return constancy + const_; }'
 check_error const-assign-object 'int main(void) { const int x = 1; x = 2; return x; }' \
-            '1:37: error: invalid assignment target'
+  '1:37: error: invalid assignment target'
 check_error const-compound-object 'int main(void) { const int x = 1; x += 2; return x; }' \
-            '1:37: error: invalid assignment target'
+  '1:37: error: invalid assignment target'
 check_error const-increment-object 'int main(void) { const int x = 1; ++x; return x; }' \
-            '1:35: error: invalid increment target'
+  '1:35: error: invalid increment target'
 check_error const-decrement-object 'int main(void) { const int x = 1; x--; return x; }' \
-            '1:36: error: invalid decrement target'
+  '1:36: error: invalid decrement target'
 check_error const-assign-through-pointer 'int main(void) { int x; const int *p = &x; *p = 1; return 0; }' \
-            '1:47: error: invalid assignment target'
+  '1:47: error: invalid assignment target'
 check_error const-increment-through-pointer 'int main(void) { int x; const int *p = &x; (*p)++; return 0; }' \
-            '1:48: error: invalid increment target'
+  '1:48: error: invalid increment target'
 check_error const-assign-pointer 'int main(void) { int x; int *const p = &x; p = 0; return 0; }' \
-            '1:46: error: invalid assignment target'
+  '1:46: error: invalid assignment target'
 check_error const-increment-pointer 'int main(void) { int x; int *const p = &x; p++; return 0; }' \
-            '1:45: error: invalid increment target'
+  '1:45: error: invalid increment target'
 check_error const-assign-array-element 'int main(void) { const int a[2]; a[0] = 1; return 0; }' \
-            '1:39: error: invalid assignment target'
+  '1:39: error: invalid assignment target'
 check_error const-assign-array-typedef 'typedef int A[2]; int main(void) { const A a; a[0] = 1; return 0; }' \
-            '1:52: error: invalid assignment target'
+  '1:52: error: invalid assignment target'
 check_error const-assign-string-array 'int main(void) { const char a[] = "abc"; a[0] = 1; return 0; }' \
-            '1:47: error: invalid assignment target'
+  '1:47: error: invalid assignment target'
 check_error const-assign-parameter 'int f(const int x) { x = 1; return x; }' \
-            '1:24: error: invalid assignment target'
+  '1:24: error: invalid assignment target'
 check_error const-assign-pointer-parameter 'int f(int *const p) { p = 0; return 0; }' \
-            '1:25: error: invalid assignment target'
+  '1:25: error: invalid assignment target'
 check_error const-assign-array-parameter 'int f(const int a[]) { a[0] = 1; return 0; }' \
-            '1:29: error: invalid assignment target'
+  '1:29: error: invalid assignment target'
 check_error const-assign-struct-member 'struct S { int x; }; int main(void) { const struct S s; s.x = 1; return 0; }' \
-            '1:61: error: invalid assignment target'
+  '1:61: error: invalid assignment target'
 check_error const-assign-arrow-member 'struct S { int x; }; int main(void) { struct S s; const struct S *p = &s; p->x = 1; return 0; }' \
-            '1:80: error: invalid assignment target'
+  '1:80: error: invalid assignment target'
 check_error const-assign-nested-member 'struct I { int x; }; struct O { struct I i; }; int main(void) { const struct O o; o.i.x = 1; return 0; }' \
-            '1:89: error: invalid assignment target'
+  '1:89: error: invalid assignment target'
 check_error const-assign-member-array 'struct S { int a[2]; }; int main(void) { const struct S s; s.a[0] = 1; return 0; }' \
-            '1:67: error: invalid assignment target'
+  '1:67: error: invalid assignment target'
 check_error const-assign-member-pointer 'struct S { int *p; }; int main(void) { const struct S s; s.p = 0; return 0; }' \
-            '1:62: error: invalid assignment target'
+  '1:62: error: invalid assignment target'
 check_error const-assign-explicit-const-member 'struct S { const int x; }; int main(void) { struct S s; s.x = 1; return 0; }' \
-            '1:61: error: invalid assignment target'
+  '1:61: error: invalid assignment target'
 check_error const-discard-pointer-initializer 'int main(void) { const int x = 1; int *p = &x; return 0; }' \
-            '1:40: error: incompatible initializer type'
+  '1:40: error: incompatible initializer type'
 check_error const-discard-pointer-assignment 'int main(void) { int *p; const int *q = 0; p = q; return 0; }' \
-            '1:46: error: incompatible assignment type'
+  '1:46: error: incompatible assignment type'
 check_error const-discard-pointer-argument 'int f(int *p); int main(void) { const int x = 1; return f(&x); }' \
-            '1:59: error: incompatible argument type'
+  '1:59: error: incompatible argument type'
 check_error const-discard-pointer-return 'const int x = 1; int *f(void) { return &x; }' \
-            '1:33: error: incompatible return type'
+  '1:33: error: incompatible return type'
 check_error const-discard-void-initializer 'int main(void) { const void *p = 0; int *q = p; return 0; }' \
-            '1:42: error: incompatible initializer type'
+  '1:42: error: incompatible initializer type'
 check_error const-discard-to-void 'int main(void) { const int *p = 0; void *q = p; return 0; }' \
-            '1:42: error: incompatible initializer type'
+  '1:42: error: incompatible initializer type'
 check_error const-discard-member-address 'struct S { int x; }; int main(void) { const struct S s; int *p = &s.x; return 0; }' \
-            '1:62: error: incompatible initializer type'
+  '1:62: error: incompatible initializer type'
 check_error const-discard-array-typedef 'typedef int A[2]; int main(void) { const A a; int *p = a; return 0; }' \
-            '1:52: error: incompatible initializer type'
+  '1:52: error: incompatible initializer type'
 check_error const-discard-conditional 'int main(void) { int *p = 0; const int *q = 0; int *r = 1 ? p : q; return 0; }' \
-            '1:53: error: incompatible initializer type'
+  '1:53: error: incompatible initializer type'
 check_error const-discard-conditional-reversed 'int main(void) { int *p = 0; const int *q = 0; int *r = 1 ? q : p; return 0; }' \
-            '1:53: error: incompatible initializer type'
+  '1:53: error: incompatible initializer type'
 check_error const-discard-qualified-void-null 'int main(void) { int x; int *p = 1 ? &x : (const void *)0; return 0; }' \
-            '1:30: error: incompatible initializer type'
+  '1:30: error: incompatible initializer type'
 check_error const-unsafe-nested-pointer 'int main(void) { int **p = 0; const int **q = p; return 0; }' \
-            '1:43: error: incompatible initializer type'
+  '1:43: error: incompatible initializer type'
 check_error const-unsafe-nested-pointer-with-const 'int main(void) { int **p = 0; const int *const *q = p; return 0; }' \
-            '1:49: error: incompatible initializer type'
+  '1:49: error: incompatible initializer type'
 check_error const-discard-inner-pointer-const 'int main(void) { int x; int *const p = &x; int **q = &p; return 0; }' \
-            '1:50: error: incompatible initializer type'
+  '1:50: error: incompatible initializer type'
 check_error const-parameter-pointee-conflict 'int f(int *p); int f(const int *p);' \
-            "1:20: error: conflicting declaration of function 'f'"
+  "1:20: error: conflicting declaration of function 'f'"
 check_error const-global-qualifier-conflict 'const int x; int x;' \
-            "1:18: error: conflicting declaration of variable 'x'"
+  "1:18: error: conflicting declaration of variable 'x'"
 check_error const-typedef-qualifier-conflict 'typedef int T; typedef const int T;' \
-            "1:34: error: conflicting typedef for 'T'"
+  "1:34: error: conflicting typedef for 'T'"
 check_error const-typedef-pointer-qualifier-conflict 'typedef int *T; typedef int *const T;' \
-            "1:36: error: conflicting typedef for 'T'"
+  "1:36: error: conflicting typedef for 'T'"
 check_error const-qualified-void-parameter 'int f(const void);' \
-            '1:17: error: parameter has void type'
+  '1:17: error: parameter has void type'
 check_error const-qualifier-without-type 'int main(void) { const x; return 0; }' \
-            '1:24: error: expect type specifier'
+  '1:24: error: expect type specifier'
 check_error const-incomplete-qualified-sizeof 'struct S; int main(void) { return sizeof(const struct S); }' \
-            '1:35: error: sizeof cannot be applied to an incomplete type'
+  '1:35: error: sizeof cannot be applied to an incomplete type'
 check_error const-incomplete-qualified-step 'struct S; int main(void) { const struct S *p = 0; p++; return 0; }' \
-            '1:52: error: pointer arithmetic on incomplete type'
+  '1:52: error: pointer arithmetic on incomplete type'
 check_error const-const-object-not-integer-constant 'const int n = 2; int a[n];' \
-            '1:25: error: not an integer constant expression'
+  '1:25: error: not an integer constant expression'
 check_error const-const-object-not-static-initializer 'const int n = 2; int m = n;' \
-            '1:26: error: global initializer is not a constant expression'
+  '1:26: error: global initializer is not a constant expression'
 check_error const-conditional-unsafe-nested-pointer 'int main(void) { int **p = 0; const int **q = 0; return sizeof(1 ? p : q); }' \
-            '1:66: error: incompatible conditional operand types'
+  '1:66: error: incompatible conditional operand types'
 check_error const-forward-qualified-write 'struct S; const struct S *p; struct S { int x; }; int main(void) { p->x = 1; return 0; }' \
-            '1:73: error: invalid assignment target'
+  '1:73: error: invalid assignment target'
 check_error const-reserved-keyword 'int main() { int const; return 0; }' \
-            '1:23: error: expect variable name'
+  '1:23: error: expect variable name'
 
 # Recursive scalar initializer evaluation keeps address and integer contexts separate.
 check constant-nested-integer-cast 1 'int x; int b = (_Bool)&x; int main(void) { return b; }'
@@ -1507,44 +1507,44 @@ check constant-shift-after-address-bool 1 'int x; int b = (_Bool)&x << 8; int ma
 check constant-unsigned-wrap-after-address-bool 0 'int x; unsigned b = (unsigned)(_Bool)&x + 4294967295U; int main(void) { return b; }'
 check constant-nested-narrowing-before-bool 1 'int x; _Bool b = (_Bool)(unsigned char)((_Bool)&x + 255); int main(void) { return b == 0; }'
 check_error constant-integer-enum-address 'int x; enum { A = (_Bool)&x + 1 };' \
-            '1:33: error: not an integer constant expression'
+  '1:33: error: not an integer constant expression'
 check_error constant-integer-array-address 'int x; int a[(_Bool)&x + 1];' \
-            '1:27: error: not an integer constant expression'
+  '1:27: error: not an integer constant expression'
 check_error constant-integer-case-address 'int x; int main(void) { switch(1) { case (_Bool)&x: return 1; } return 0; }' \
-            '1:51: error: not an integer constant expression'
+  '1:51: error: not an integer constant expression'
 check_error constant-integer-enum-logical-address 'int x; enum { A = !&x };' \
-            '1:23: error: not an integer constant expression'
+  '1:23: error: not an integer constant expression'
 check_error constant-integer-enum-comparison-address 'int x; enum { A = &x != 0 };' \
-            '1:27: error: not an integer constant expression'
+  '1:27: error: not an integer constant expression'
 check_error constant-integer-array-conditional-address 'int x; int a[&x ? 1 : 2];' \
-            '1:24: error: not an integer constant expression'
+  '1:24: error: not an integer constant expression'
 check_error constant-initializer-nested-variable 'int x; int b = (_Bool)x;' \
-            '1:16: error: global initializer is not a constant expression'
+  '1:16: error: global initializer is not a constant expression'
 check_error constant-initializer-nested-pointer-variable 'int x; int *p = &x; int b = (int)(_Bool)p;' \
-            '1:29: error: global initializer is not a constant expression'
+  '1:29: error: global initializer is not a constant expression'
 check_error constant-initializer-address-with-dynamic-condition 'int n, x; int b = n ? (_Bool)&x : 0;' \
-            '1:21: error: global initializer is not a constant expression'
+  '1:21: error: global initializer is not a constant expression'
 check_error constant-initializer-address-with-evaluated-call 'int f(void); int x; int b = &x && f();' \
-            '1:32: error: global initializer is not a constant expression'
+  '1:32: error: global initializer is not a constant expression'
 check_error constant-initializer-logical-pointer-read 'int *p = 0; int b = !p;' \
-            '1:21: error: global initializer is not a constant expression'
+  '1:21: error: global initializer is not a constant expression'
 check_error constant-initializer-address-comma 'int x; int b = (0, (_Bool)&x);' \
-            '1:18: error: global initializer is not a constant expression'
+  '1:18: error: global initializer is not a constant expression'
 check_error constant-initializer-address-assignment 'int x; _Bool b; int n = (b = &x);' \
-            '1:28: error: global initializer is not a constant expression'
+  '1:28: error: global initializer is not a constant expression'
 check_error constant-initializer-address-arithmetic-overflow 'int x; int n = (_Bool)&x + 2147483647;' \
-            '1:38: error: integer overflow in constant expression'
+  '1:38: error: integer overflow in constant expression'
 check_error constant-initializer-address-arithmetic-division-zero 'int x; int n = (_Bool)&x / 0;' \
-            '1:29: error: division by zero in constant expression'
+  '1:29: error: division by zero in constant expression'
 check_error constant-initializer-address-arithmetic-invalid-shift 'int x; int n = (_Bool)&x << 32;' \
-            '1:31: error: invalid shift count in constant expression'
+  '1:31: error: invalid shift count in constant expression'
 
 check_error constant-integer-null-cast-enum 'enum { A = (_Bool)(void *)0 };' \
-            '1:29: error: not an integer constant expression'
+  '1:29: error: not an integer constant expression'
 check_error constant-null-pointer-from-address-expression 'int x; int *p = (_Bool)&x - 1;' \
-            '1:13: error: incompatible initializer type'
+  '1:13: error: incompatible initializer type'
 check_error constant-address-offset-not-integer-constant 'int a[2]; int *p = a + ((_Bool)&a - 1);' \
-            '1:22: error: global initializer is not a constant expression'
+  '1:22: error: global initializer is not a constant expression'
 
 # _Bool codegen: scalar conversions, byte storage, updates and calls.
 check bool-runtime-init-zero 0 'int main(void) { _Bool b = 0; return b; }'
@@ -1663,43 +1663,43 @@ check bool-global-nested-casts 1 'int x; int a[3]; _Bool b = (_Bool)(_Bool)&x; i
 check bool-global-address-offset 1 'int x; int a[3]; _Bool b = (_Bool)(a + 2); int main(void) { return *(unsigned char *)&b; }'
 check bool-global-pointer-conditional 1 'int x; int a[3]; _Bool b = 0 ? (int *)0 : &x; int main(void) { return *(unsigned char *)&b; }'
 check_error bool-unsigned 'unsigned _Bool b;' \
-            '1:10: error: invalid combination of type specifiers'
+  '1:10: error: invalid combination of type specifiers'
 check_error bool-unsigned-reversed '_Bool unsigned b;' \
-            '1:7: error: invalid combination of type specifiers'
+  '1:7: error: invalid combination of type specifiers'
 check_error bool-int '_Bool int b;' \
-            '1:7: error: invalid combination of type specifiers'
+  '1:7: error: invalid combination of type specifiers'
 check_error bool-char 'char _Bool b;' \
-            '1:6: error: invalid combination of type specifiers'
+  '1:6: error: invalid combination of type specifiers'
 check_error bool-long 'long _Bool b;' \
-            '1:6: error: invalid combination of type specifiers'
+  '1:6: error: invalid combination of type specifiers'
 check_error bool-short '_Bool short b;' \
-            '1:7: error: invalid combination of type specifiers'
+  '1:7: error: invalid combination of type specifiers'
 check_error bool-duplicate '_Bool _Bool b;' \
-            '1:7: error: duplicate _Bool type specifier'
+  '1:7: error: duplicate _Bool type specifier'
 check_error bool-global-type-conflict '_Bool b; unsigned char b;' \
-            "1:24: error: conflicting declaration of variable 'b'"
+  "1:24: error: conflicting declaration of variable 'b'"
 check_error bool-prototype-conflict 'int f(); int f(_Bool b);' \
-            "1:14: error: conflicting declaration of function 'f'"
+  "1:14: error: conflicting declaration of function 'f'"
 check_error bool-prototype-conflict-reversed 'int f(_Bool b); int f();' \
-            "1:21: error: conflicting declaration of function 'f'"
+  "1:21: error: conflicting declaration of function 'f'"
 check_error bool-void-init 'void f(void); int main(void) { _Bool b = f(); return 0; }' \
-            '1:42: error: void expression used as a value'
+  '1:42: error: void expression used as a value'
 check_error bool-struct-init 'struct S { int x; }; int main(void) { struct S s; _Bool b = s; return 0; }' \
-            "1:57: error: incompatible initializer type"
+  "1:57: error: incompatible initializer type"
 check_error bool-void-cast 'void f(void); int main(void) { return (_Bool)f(); }' \
-            '1:46: error: cast operand must have scalar type'
+  '1:46: error: cast operand must have scalar type'
 check_error bool-pointer-incompatible 'int main(void) { _Bool b; unsigned char *p = &b; return 0; }' \
-            '1:42: error: incompatible initializer type'
+  '1:42: error: incompatible initializer type'
 check_error bool-nonzero-to-pointer 'int main(void) { int *p = (_Bool)256; return 0; }' \
-            '1:23: error: incompatible initializer type'
+  '1:23: error: incompatible initializer type'
 check_error bool-global-variable-init 'int x; _Bool b = x;' \
-            '1:18: error: global initializer is not a constant expression'
+  '1:18: error: global initializer is not a constant expression'
 check_error bool-global-pointer-variable-init 'int *p; _Bool b = p;' \
-            '1:19: error: global initializer is not a constant expression'
+  '1:19: error: global initializer is not a constant expression'
 check_error bool-address-enumerator 'int x; enum E { A = (_Bool)&x };' \
-            '1:31: error: not an integer constant expression'
+  '1:31: error: not an integer constant expression'
 check_error bool-address-array-bound 'int x; int a[(_Bool)&x];' \
-            '1:23: error: not an integer constant expression'
+  '1:23: error: not an integer constant expression'
 
 # Explicit casts share AST_CAST with implicit conversions.
 check cast-signed-char 1 'int main(void) { return (char)255 == -1; }'
@@ -2296,8 +2296,8 @@ check octal-ten 8 'int main() { return 010; }'
 check octal-fifty-two 42 'int main() { return 052; }'
 # Integer suffix spelling and token boundaries.
 for suffix in U u L l UL Ul uL ul LU Lu lU lu LL ll ULL Ull uLL ull LLU LLu llU llu; do
-    check "integer-suffix-decimal-$suffix" 42 "int main(void) { return 42$suffix; }"
-    check "integer-suffix-octal-$suffix" 42 "int main(void) { return 052$suffix; }"
+  check "integer-suffix-decimal-$suffix" 42 "int main(void) { return 42$suffix; }"
+  check "integer-suffix-octal-$suffix" 42 "int main(void) { return 052$suffix; }"
 done
 check integer-suffix-before-operator 42 'int main(void) { return 1U+051L; }'
 check integer-suffix-zero 0 'int main(void) { return 0uL; }'
@@ -2306,7 +2306,7 @@ check_error integer-suffix-duplicate-unsigned-case 'int main(void) { return 42Uu
 check_error integer-suffix-duplicate-unsigned-after-long 'int main(void) { return 42ULU; }' '1:25: error: invalid integer suffix'
 check_error integer-suffix-long-long-mixed-case 'int main(void) { return 42lL; }' '1:25: error: invalid integer suffix'
 for suffix in Ll ULl lLU LLL lll lUl LuL ULLU LLUU LL2 ll_name; do
-    check_error "integer-suffix-invalid-$suffix" "int main(void) { return 42$suffix; }" '1:25: error: invalid integer suffix'
+  check_error "integer-suffix-invalid-$suffix" "int main(void) { return 42$suffix; }" '1:25: error: invalid integer suffix'
 done
 check_error integer-suffix-trailing-letter 'int main(void) { return 42ULx; }' '1:25: error: invalid integer suffix'
 check_error integer-suffix-trailing-digit 'int main(void) { return 42U2; }' '1:25: error: invalid integer suffix'
@@ -2550,17 +2550,17 @@ check binary-pointer-type 0 'int main() { int x; return (&x + 0) - &x; }'
 
 # Compound assignments preserve one target address and the operation's type.
 for entry in '+= 20 22 42' '-= 50 8 42' '*= 6 7 42' '/= 84 2 42' \
-             '%= 85 43 42' '<<= 21 1 42' '>>= 84 1 42' \
-             '&= 63 42 42' '^= 43 1 42' '|= 40 2 42'; do
-    read -r op initial rhs expected <<< "$entry"
-    check "compound-dereference-$op" 1 "int main(void) { int x = $initial; int *p = &x; return (*p $op $rhs) == $expected && x == $expected; }"
-    check "compound-subscript-$op" 1 "int main(void) { int a[2]; a[0] = $initial; a[1] = 99; return (a[0] $op $rhs) == $expected && a[0] == $expected && a[1] == 99; }"
-    for target in s.x 'p->x'; do
-        check "compound-member-$target-$op" 1 "struct S { int x; int guard; }; int main(void) { struct S s; struct S *p = &s; s.x = $initial; s.guard = 99; return ($target $op $rhs) == $expected && s.x == $expected && s.guard == 99; }"
-    done
+  '%= 85 43 42' '<<= 21 1 42' '>>= 84 1 42' \
+  '&= 63 42 42' '^= 43 1 42' '|= 40 2 42'; do
+  read -r op initial rhs expected <<<"$entry"
+  check "compound-dereference-$op" 1 "int main(void) { int x = $initial; int *p = &x; return (*p $op $rhs) == $expected && x == $expected; }"
+  check "compound-subscript-$op" 1 "int main(void) { int a[2]; a[0] = $initial; a[1] = 99; return (a[0] $op $rhs) == $expected && a[0] == $expected && a[1] == 99; }"
+  for target in s.x 'p->x'; do
+    check "compound-member-$target-$op" 1 "struct S { int x; int guard; }; int main(void) { struct S s; struct S *p = &s; s.x = $initial; s.guard = 99; return ($target $op $rhs) == $expected && s.x == $expected && s.guard == 99; }"
+  done
 done
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' 'long' 'unsigned long' 'long long' 'unsigned long long'; do
-    check "compound-store-width-$spec" 1 "struct S { char before; $spec x; char after; }; int main(void) { struct S s; $spec *p = &s.x; s.before = 7; s.x = 20; s.after = 9; return (*p += 22) == 42 && s.x == 42 && s.before == 7 && s.after == 9; }"
+  check "compound-store-width-$spec" 1 "struct S { char before; $spec x; char after; }; int main(void) { struct S s; $spec *p = &s.x; s.before = 7; s.x = 20; s.after = 9; return (*p += 22) == 42 && s.x == 42 && s.before == 7 && s.after == 9; }"
 done
 check compound-member-char-narrowing 1 'struct S { char x; unsigned char y; }; int main(void) { struct S s; s.x = 127; s.y = 255; return (s.x += 1) == -128 && s.x == -128 && (s.y += 1) == 0 && s.y == 0; }'
 check compound-short-narrowing 1 'int main(void) { short a[2]; a[0] = 32767; a[1] = -32768; return (a[0] += 1) == -32768 && (a[1] -= 1) == 32767 && a[0] == -32768 && a[1] == 32767; }'
@@ -2601,7 +2601,7 @@ check_error compound-pointer-member-void 'struct S { void *p; }; int main(void) 
 check_error compound-pointer-member-incomplete 'struct S { struct T *p; }; int main(void) { struct S s; s.p += 1; return 0; }' '1:61: error: pointer arithmetic on incomplete type'
 check_error compound-array-member-target 'struct S { int a[2]; }; int main(void) { struct S s; s.a += 1; return 0; }' '1:58: error: invalid assignment target'
 check_error compound-struct-target 'struct S { int x; }; int main(void) { struct S s; s += 1; return 0; }' \
-            "1:53: error: invalid operands to binary +"
+  "1:53: error: invalid operands to binary +"
 check_error compound-result-is-not-lvalue 'int main(void) { int a = 0; (a += 1) += 1; return 0; }' '1:38: error: invalid assignment target'
 check_error compound-result-address 'int main(void) { int a = 0; int *p = &(a += 1); return 0; }' '1:38: error: invalid address-of target'
 check_error compound-result-not-null-constant 'int main(void) { int a = 0; int *p = (a += 0); return 0; }' '1:34: error: incompatible initializer type'
@@ -2609,13 +2609,13 @@ check_error compound-member-void-rhs 'void f(void); struct S { int x; }; int mai
 
 # sizeof keeps array types and does not evaluate expression operands.
 for entry in 'char:1' 'unsigned char:1' 'short:2' 'short int:2' \
-             'unsigned short int:2' 'int:4' 'unsigned:4' 'int unsigned:4' \
-             'long:8' 'unsigned long int:8' 'long long:8' \
-             'unsigned long long int:8'; do
-    spec=${entry%:*}
-    size=${entry##*:}
-    check "sizeof-type-$spec" "$size" "int main(void) { return sizeof($spec); }"
-    check "sizeof-variable-$spec" "$size" "int main(void) { $spec x; return sizeof x; }"
+  'unsigned short int:2' 'int:4' 'unsigned:4' 'int unsigned:4' \
+  'long:8' 'unsigned long int:8' 'long long:8' \
+  'unsigned long long int:8'; do
+  spec=${entry%:*}
+  size=${entry##*:}
+  check "sizeof-type-$spec" "$size" "int main(void) { return sizeof($spec); }"
+  check "sizeof-variable-$spec" "$size" "int main(void) { $spec x; return sizeof x; }"
 done
 check sizeof-void-pointer 8 'int main(void) { return sizeof(void *); }'
 check sizeof-pointer-to-pointer 8 'int main(void) { return sizeof(int **); }'
@@ -2996,8 +2996,8 @@ check_error string-parenthesized-concat 'int main(void) { ("a") "b"; return 0; }
 
 # Fixed-size array declarations and array parameter adjustment.
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' \
-    'long' 'unsigned long' 'long long' 'unsigned long long'; do
-    check "array-declaration-$spec" 42 "int main(void) { $spec a[3]; return 42; }"
+  'long' 'unsigned long' 'long long' 'unsigned long long'; do
+  check "array-declaration-$spec" 42 "int main(void) { $spec a[3]; return 42; }"
 done
 check array-pointer-elements 42 'int main(void) { int *a[3]; void *b[2]; int **c[1]; return 42; }'
 check array-constant-bounds 42 'int main(void) { int a[1 + 2 * 3]; char b[1 ? 5 : 2]; short c[1U << 3]; return 42; }'
@@ -3064,7 +3064,7 @@ check_error struct-incomplete-array 'int main(void) { struct S a[2]; return 0; }
 check_error struct-array-overflow 'struct S { long x[268435455]; long y[2]; };' '1:36: error: struct size exceeds supported limit'
 check_error struct-tail-padding-overflow 'struct S { long x; char a[2147483639]; };' '1:1: error: struct size exceeds supported limit'
 check_error struct-initializer 'struct S { int x; }; int main(void) { struct S s = 0; return 0; }' \
-            "1:48: error: incompatible initializer type"
+  "1:48: error: incompatible initializer type"
 check struct-return-by-value 42 'struct S { int x; }; struct S f(void) { struct S s; s.x=42; return s; } int main(void) { return f().x; }'
 check struct-parameter-by-value 42 'struct S { int x; }; int f(struct S s) { return s.x; } int main(void) { struct S s; s.x=42; return f(s); }'
 check_error struct-pointer-type-mismatch 'struct A { int x; }; struct B { int x; }; int main(void) { struct A *a; struct B *b = a; return 0; }' '1:83: error: incompatible initializer type'
@@ -3078,14 +3078,14 @@ check_error struct-incomplete-pointer-increment 'int main(void) { struct S *p; p
 check_error struct-incomplete-pointer-compound 'int main(void) { struct S *p; p += 1; return 0; }' '1:33: error: pointer arithmetic on incomplete type'
 check struct-unprototyped-call 42 'int f(); struct S { int x; }; int main(void) { struct S s; s.x=42; return f(s); } int f(struct S s) { return s.x; }'
 check_error struct-condition 'struct S { int x; }; int main(void) { struct S a; if (a) return 1; return 0; }' \
-            "1:55: error: condition must have scalar type"
+  "1:55: error: condition must have scalar type"
 check_error struct-prefix-increment 'struct S { int x; }; int main(void) { struct S a; ++a; return 0; }' '1:51: error: invalid increment target'
 check_error struct-comparison 'struct S { int x; }; int main(void) { struct S a; return a == a; }' \
-            "1:60: error: invalid operands to comparison"
+  "1:60: error: invalid operands to comparison"
 
 # Struct member addresses reuse scalar loads, stores, and pointer arithmetic.
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' 'long' 'unsigned long' 'long long' 'unsigned long long'; do
-    check "member-load-store-$spec" 42 "struct S { char before; $spec value; char after; }; int main(void) { struct S s; struct S *p = &s; s.before = 7; s.after = 9; s.value = 20; p->value = p->value + 22; return s.before == 7 && s.after == 9 ? s.value : 0; }"
+  check "member-load-store-$spec" 42 "struct S { char before; $spec value; char after; }; int main(void) { struct S s; struct S *p = &s; s.before = 7; s.after = 9; s.value = 20; p->value = p->value + 22; return s.before == 7 && s.after == 9 ? s.value : 0; }"
 done
 check member-dot-and-arrow 42 'struct Point { int x; int y; }; int main(void) { struct Point p; struct Point *ptr = &p; p.x = 20; ptr->y = 22; return p.x + p.y; }'
 check member-narrow-and-signed-values 1 'struct S { char a; unsigned char b; short c; unsigned short d; int e; unsigned f; }; int main(void) { struct S s; s.a = 255; s.b = 511; s.c = 65535; s.d = 131071; s.e = -1; s.f = 4294967295U; return s.a == -1 && s.b == 255 && s.c == -1 && s.d == 65535 && s.e < 0 && s.f > 0; }'
@@ -3123,7 +3123,7 @@ check_error member-arrow-integer 'int main(void) { int x; return x->y; }' '1:33:
 check_error member-arrow-integer-pointer 'int main(void) { int *p; return p->x; }' '1:34: error: '\''->'\'' requires a pointer to struct or union'
 check_error member-arrow-void-pointer 'int main(void) { void *p; return p->x; }' '1:35: error: '\''->'\'' requires a pointer to struct or union'
 check_error member-arrow-struct 'struct S { int x; }; int main(void) { struct S s; return s->x; }' \
-            "1:59: error: '->' requires a pointer to struct or union"
+  "1:59: error: '->' requires a pointer to struct or union"
 check_error member-arrow-pointer-to-pointer 'struct S { int x; }; int main(void) { struct S **p; return p->x; }' '1:61: error: '\''->'\'' requires a pointer to struct or union'
 check_error member-incomplete-struct 'int main(void) { struct S *p; return p->x; }' '1:39: error: member access on incomplete struct'
 check_error member-missing-dot 'struct S { int x; }; int main(void) { struct S s; return s.y; }' '1:60: error: no member named '\''y'\'' in struct'
@@ -3169,7 +3169,7 @@ check string-libc-call 1 'int strcmp(char *a, char *b); int main(void) { return 
 
 # Array expressions, element access, and pointer conversion.
 for spec in 'char' 'unsigned char' 'short' 'unsigned short' 'int' 'unsigned' 'long' 'unsigned long' 'long long' 'unsigned long long'; do
-    check "array-elements-$spec" 42 "int main(void) { $spec a[3]; a[0] = 7; a[1] = 11; a[2] = 24; return a[0] + a[1] + a[2]; }"
+  check "array-elements-$spec" 42 "int main(void) { $spec a[3]; a[0] = 7; a[1] = 11; a[2] = 24; return a[0] + a[1] + a[2]; }"
 done
 check array-signed-char 1 'int main(void) { char a[2]; a[0] = 255; a[1] = 42; return a[0] == -1 && a[1] == 42; }'
 check array-unsigned-char 1 'int main(void) { unsigned char a[2]; a[0] = 511; a[1] = 42; return a[0] == 255 && a[1] == 42; }'
@@ -3379,9 +3379,9 @@ check short-recursion 120 'short fact(short n) { if (n == 0) return 1; return n 
 
 # Short declaration specifiers.
 for spec in 'short' 'short int' 'int short' 'unsigned short' 'short unsigned' \
-    'unsigned short int' 'unsigned int short' 'short unsigned int' \
-    'short int unsigned' 'int unsigned short' 'int short unsigned'; do
-    check "short-declspecs-$spec" 42 "$spec f($spec); int main(void) { $spec x; return 42; }"
+  'unsigned short int' 'unsigned int short' 'short unsigned int' \
+  'short int unsigned' 'int unsigned short' 'int short unsigned'; do
+  check "short-declspecs-$spec" 42 "$spec f($spec); int main(void) { $spec x; return 42; }"
 done
 check short-compatible-prototypes 42 'short f(short int); short int f(int short); int main(void) { return 42; }'
 check unsigned-short-compatible-prototypes 42 'unsigned short f(short unsigned int); int unsigned short f(unsigned int short); int main(void) { return 42; }'
@@ -3461,9 +3461,9 @@ check long-nested-calls 1 'long f(long x) { return x + 1; } int main(void) { lon
 
 # Long declaration specifiers.
 for spec in 'long' 'long int' 'int long' 'unsigned long' 'long unsigned' \
-    'unsigned long int' 'unsigned int long' 'long unsigned int' \
-    'long int unsigned' 'int unsigned long' 'int long unsigned'; do
-    check "long-declspecs-$spec" 42 "$spec f($spec); int main(void) { $spec x; return 42; }"
+  'unsigned long int' 'unsigned int long' 'long unsigned int' \
+  'long int unsigned' 'int unsigned long' 'int long unsigned'; do
+  check "long-declspecs-$spec" 42 "$spec f($spec); int main(void) { $spec x; return 42; }"
 done
 check long-compatible-prototypes 42 'long f(long int); long int f(int long); int main(void) { return 42; }'
 check unsigned-long-compatible-prototypes 42 'unsigned long f(long unsigned int); int unsigned long f(unsigned int long); int main(void) { return 42; }'
@@ -3486,12 +3486,12 @@ check_error long-declaration-as-statement 'int main(void) { if (1) long x; retur
 
 # Long long declaration specifiers, including nonadjacent long keywords.
 for spec in 'long long' 'long long int' 'long int long' 'int long long' \
-    'unsigned long long' 'long unsigned long' 'long long unsigned' \
-    'unsigned int long long' 'unsigned long int long' 'unsigned long long int' \
-    'int unsigned long long' 'int long unsigned long' 'int long long unsigned' \
-    'long unsigned int long' 'long unsigned long int' 'long int unsigned long' \
-    'long int long unsigned' 'long long unsigned int' 'long long int unsigned'; do
-    check "long-long-declspecs-$spec" 42 "$spec f($spec); $spec f($spec x) { return x; } int main(void) { $spec x = 42; return f(x); }"
+  'unsigned long long' 'long unsigned long' 'long long unsigned' \
+  'unsigned int long long' 'unsigned long int long' 'unsigned long long int' \
+  'int unsigned long long' 'int long unsigned long' 'int long long unsigned' \
+  'long unsigned int long' 'long unsigned long int' 'long int unsigned long' \
+  'long int long unsigned' 'long long unsigned int' 'long long int unsigned'; do
+  check "long-long-declspecs-$spec" 42 "$spec f($spec); $spec f($spec x) { return x; } int main(void) { $spec x = 42; return f(x); }"
 done
 check long-long-for-declaration 42 'int main(void) { for (long long i = 42; i;) return i; return 0; }'
 check unsigned-long-long-for-declaration 42 'int main(void) { for (unsigned long long i = 42; i;) return i; return 0; }'
@@ -3703,166 +3703,166 @@ check_error local-comma-function 'int main(void) { int a, f(void); return 0; }' 
 check discarded-comparison-expression 42 'int main() { int a = 42; a == 3; return a; }'
 check_error invalid-int-char-specifiers 'int main() { int char; return 0; }' '1:18: error: invalid combination of type specifiers'
 for kw in \
-    _Alignas _Alignof _Atomic _Complex _Generic _Imaginary \
-	     _Noreturn _Static_assert _Thread_local \
-	     auto break case continue default do double else \
-	     float for goto if inline register restrict signed sizeof \
-	     switch volatile while; do
-    check_error "reserved-kw-$kw" \
-		"int main() { int $kw; return 0; }" \
-		'1:18: error: expect variable name'
+  _Alignas _Alignof _Atomic _Complex _Generic _Imaginary \
+  _Noreturn _Static_assert _Thread_local \
+  auto break case continue default do double else \
+  float for goto if inline register restrict signed sizeof \
+  switch volatile while; do
+  check_error "reserved-kw-$kw" \
+    "int main() { int $kw; return 0; }" \
+    '1:18: error: expect variable name'
 done
 for kw in _Bool enum struct union void; do
-    check_error "reserved-kw-$kw" \
-                "int main() { int $kw; return 0; }" \
-                '1:18: error: invalid combination of type specifiers'
+  check_error "reserved-kw-$kw" \
+    "int main() { int $kw; return 0; }" \
+    '1:18: error: invalid combination of type specifiers'
 done
 check_error reserved-kw-typedef 'int main() { int typedef; return 0; }' \
-            '1:25: error: expect typedef name'
+  '1:25: error: expect typedef name'
 check_error invalid-increment 'int main() { return ++1; }' \
-	    '1:21: error: invalid increment target'
+  '1:21: error: invalid increment target'
 check_error invalid-increment 'int main() { return 1++; }' \
-	    '1:22: error: invalid increment target'
+  '1:22: error: invalid increment target'
 check_error invalid-increment 'int main() { int a; return ++(a+1); }' \
-	    '1:28: error: invalid increment target'
+  '1:28: error: invalid increment target'
 check_error invalid-decrement 'int main() { return --1; }' \
-	    '1:21: error: invalid decrement target'
+  '1:21: error: invalid decrement target'
 check_error invalid-postfix-chain 'int main() { int a; return (a++)++; }' \
-	    '1:33: error: invalid increment target'
+  '1:33: error: invalid increment target'
 check_error undeclared-postfix 'int main() { a++; return 0; }' \
-	    '1:14: error: undeclared identifier'
+  '1:14: error: undeclared identifier'
 check_error missing-compare-rhs 'int main() { return 1 <; }' \
-	    '1:24: error: expect expr'
+  '1:24: error: expect expr'
 check_error missing-eq-rhs 'int main() { return 1 ==; }' \
-	    '1:25: error: expect expr'
+  '1:25: error: expect expr'
 check_error compound-assign-literal 'int main() { 1 += 2; return 0; }' \
-	    '1:16: error: invalid assignment target'
+  '1:16: error: invalid assignment target'
 check_error compound-assign-sum 'int main() { int a; a + 1 += 2; }' \
-	    '1:27: error: invalid assignment target'
+  '1:27: error: invalid assignment target'
 check_error missing-shift-rhs 'int main() { return 1 <<; }' \
-	    '1:25: error: expect expr'
+  '1:25: error: expect expr'
 check_error shift-assign-literal 'int main() { 1 <<= 2; return 0; }' \
-	    '1:16: error: invalid assignment target'
+  '1:16: error: invalid assignment target'
 check_error missing-if-paren 'int main() { if 1; return 0; }' \
-	    "1:17: error: expect '('"
+  "1:17: error: expect '('"
 check_error missing-if-cond 'int main() { if () return 2; }' \
-	    '1:18: error: expect expr'
+  '1:18: error: expect expr'
 check_error missing-if-rparen 'int main() { if (1 return 2; }' \
-	    "1:20: error: expect ')'"
+  "1:20: error: expect ')'"
 check_error missing-if-body 'int main() { if (1) }' \
-	    '1:21: error: expect expr'
+  '1:21: error: expect expr'
 check_error missing-while-paren 'int main() { while 1; return 0; }' \
-	    "1:20: error: expect '('"
+  "1:20: error: expect '('"
 check_error missing-while-cond 'int main() { while () return 0; }' \
-	    '1:21: error: expect expr'
+  '1:21: error: expect expr'
 check_error missing-while-rparen 'int main() { while (1 return 0; }' \
-	    "1:23: error: expect ')'"
+  "1:23: error: expect ')'"
 check_error missing-while-body 'int main() { while (1) }' \
-	    '1:24: error: expect expr'
+  '1:24: error: expect expr'
 check_error missing-for-paren 'int main() { for 1; return 0; }' \
-	    "1:18: error: expect '('"
+  "1:18: error: expect '('"
 check_error missing-for-semi 'int main() { for (1) return 0; }' \
-	    "1:20: error: expect ';'"
+  "1:20: error: expect ';'"
 check_error missing-for-rparen 'int main() { for (1; 1; 1 return 0; }' \
-	    "1:27: error: expect ')'"
+  "1:27: error: expect ')'"
 check_error logical-and-operand 'int main() { return && 1; }' \
-	    '1:21: error: expect expr'
+  '1:21: error: expect expr'
 check_error missing-logical-and-rhs 'int main() { return 1 &&; }' \
-	    '1:25: error: expect expr'
+  '1:25: error: expect expr'
 check_error missing-logical-or-rhs 'int main() { return 1 ||; }' \
-	    '1:25: error: expect expr'
+  '1:25: error: expect expr'
 check_error missing-bitand-rhs 'int main() { return 1 &; }' \
-	    '1:24: error: expect expr'
+  '1:24: error: expect expr'
 check_error missing-bitor-rhs 'int main() { return 1 |; }' \
-	    '1:24: error: expect expr'
+  '1:24: error: expect expr'
 check_error missing-bitxor-rhs 'int main() { return 1 ^; }' \
-	    '1:24: error: expect expr'
+  '1:24: error: expect expr'
 check_error bitand-operand 'int main() { return & 1; }' \
-	    '1:21: error: invalid address-of target'
+  '1:21: error: invalid address-of target'
 check_error bitand-assign-literal 'int main() { 1 &= 2; return 0; }' \
-	    '1:16: error: invalid assignment target'
+  '1:16: error: invalid assignment target'
 check_error missing-do-while 'int main() { do return 0; }' \
-	    "1:27: error: expect 'while'"
+  "1:27: error: expect 'while'"
 check_error missing-do-cond 'int main() { do return 0; while (); }' \
-	    '1:34: error: expect expr'
+  '1:34: error: expect expr'
 check_error missing-do-rparen 'int main() { do return 0; while (1; }' \
-	    "1:35: error: expect ')'"
+  "1:35: error: expect ')'"
 check_error missing-do-semi 'int main() { do return 0; while (1) }' \
-	    "1:36: error: expect ';'"
+  "1:36: error: expect ';'"
 check_error missing-do-body 'int main() { do }' \
-	    '1:17: error: expect expr'
+  '1:17: error: expect expr'
 check_error unterminated-comment 'int main() { /* comment' \
-	    '1:14: error: unterminated comment'
+  '1:14: error: unterminated comment'
 check_error break-outside-loop 'int main() { break; }' \
-	    '1:14: error: break statement not within loop or switch'
+  '1:14: error: break statement not within loop or switch'
 check_error continue-outside-loop 'int main() { continue; }' \
-	    '1:14: error: continue statement not within loop'
+  '1:14: error: continue statement not within loop'
 check_error break-after-loop 'int main() { while (1) break; break; }' \
-	    '1:31: error: break statement not within loop or switch'
+  '1:31: error: break statement not within loop or switch'
 check_error case-outside-switch 'int main() { case 1: ; }' \
-	    '1:14: error: case label not within a switch statement'
+  '1:14: error: case label not within a switch statement'
 check_error default-outside-switch 'int main() { default: ; }' \
-	    '1:14: error: default label not within a switch statement'
+  '1:14: error: default label not within a switch statement'
 check_error duplicate-case 'int main() { switch (1) { case 1: ; case 1: ; } }' \
-	    '1:37: error: duplicate case value'
+  '1:37: error: duplicate case value'
 check_error duplicate-default \
-	    'int main() { switch (1) { default: ; default: ; } }' \
-	    '1:38: error: multiple default labels in one switch'
+  'int main() { switch (1) { default: ; default: ; } }' \
+  '1:38: error: multiple default labels in one switch'
 check_error case-not-constant \
-	    'int main() { int a; switch (1) { case a: ; } }' \
-	    '1:40: error: not an integer constant expression'
+  'int main() { int a; switch (1) { case a: ; } }' \
+  '1:40: error: not an integer constant expression'
 check_error decl-as-if-body 'int main() { if (1) int a = 1; return 0; }' \
-	    '1:21: error: expect statement'
+  '1:21: error: expect statement'
 check_error decl-as-else-body 'int main() { if (1) ; else int b = 2; }' \
-	    '1:28: error: expect statement'
+  '1:28: error: expect statement'
 check_error decl-as-while-body 'int main() { while (1) int a; }' \
-	    '1:24: error: expect statement'
+  '1:24: error: expect statement'
 check_error decl-as-for-body 'int main() { for (;;) int a; }' \
-	    '1:23: error: expect statement'
+  '1:23: error: expect statement'
 check_error decl-as-do-body 'int main() { do int a; while (1); }' \
-	    '1:17: error: expect statement'
+  '1:17: error: expect statement'
 check_error decl-as-label-body 'int main() { L: int a; }' \
-	    '1:17: error: expect statement'
+  '1:17: error: expect statement'
 check_error decl-as-case-body \
-	    'int main() { switch (1) { case 1: int a; } }' \
-	    '1:35: error: expect statement'
+  'int main() { switch (1) { case 1: int a; } }' \
+  '1:35: error: expect statement'
 check_error redefinition \
-	    'int foo() { return 0; } int foo() { return 1; } int main() { return 0; }' \
-	    "1:29: error: redefinition of function 'foo'"
+  'int foo() { return 0; } int foo() { return 1; } int main() { return 0; }' \
+  "1:29: error: redefinition of function 'foo'"
 check_error call-undefined 'int main() { return foo(); }' \
-	    "1:21: error: function 'foo' not declared"
+  "1:21: error: function 'foo' not declared"
 check_error call-on-variable 'int main() { int a = 1; return a(); }' \
-	    '1:32: error: called object is not a function'
+  '1:32: error: called object is not a function'
 check_error param-shadow 'int foo(int a) { int a = 42; return a; } int main() { return foo(24); }' \
-	    "1:22: error: redefinition of parameter 'a'"
+  "1:22: error: redefinition of parameter 'a'"
 check_error too-many-args 'int foo(int a) { return a; } int main() { return foo(1, 2); }' \
-	    "1:50: error: wrong number of arguments to function 'foo'"
+  "1:50: error: wrong number of arguments to function 'foo'"
 check_error too-few-args 'int foo(int a) { return a; } int main() { return foo(); }' \
-	    "1:50: error: wrong number of arguments to function 'foo'"
+  "1:50: error: wrong number of arguments to function 'foo'"
 check_error missing-conditional-colon 'int main() { return 1 ? 2; }' \
-	    "1:26: error: expect ':'"
+  "1:26: error: expect ':'"
 check_error missing-conditional-then 'int main() { return 1 ? : 2; }' \
-	    '1:25: error: expect expr'
+  '1:25: error: expect expr'
 check_error missing-conditional-else 'int main() { return 1 ? 2 : ; }' \
-	    '1:29: error: expect expr'
+  '1:29: error: expect expr'
 check_error question-operand 'int main() { return ? 1; }' \
-	    '1:21: error: expect expr'
+  '1:21: error: expect expr'
 check_error comma-assign 'int main() { int a; (a, a) = 1; return 0; }' \
-	    '1:28: error: invalid assignment target'
+  '1:28: error: invalid assignment target'
 check_error case-comma 'int main() { switch (1) { case 1, 2: ; } }' \
-	    "1:33: error: expect ':'"
+  "1:33: error: expect ':'"
 check_error missing-break-semi 'int main() { while (1) break }' \
-	    "1:29: error: expect ';'"
+  "1:29: error: expect ';'"
 check_error goto-undefined 'int main() { goto L; }' \
-	    "1:14: error: label 'L' not defined"
+  "1:14: error: label 'L' not defined"
 check_error duplicate-label 'int main() { L: ; L: ; }' \
-	    '1:19: error: duplicate label'
+  '1:19: error: duplicate label'
 check_error duplicate-label-scope 'int main() { { L: ; } L: ; }' \
-	    '1:23: error: duplicate label'
+  '1:23: error: duplicate label'
 check_error goto-missing-name 'int main() { goto 1; }' \
-	    '1:19: error: expect label name'
+  '1:19: error: expect label name'
 check_error goto-missing-semi 'int main() { L: ; goto L }' \
-	    "1:25: error: expect ';'"
+  "1:25: error: expect ';'"
 check_error octal-invalid-eight 'int main() { return 08; }' '1:21: error: invalid digit in octal integer literal'
 check_error case-shift-negative 'int main() { switch (0) { case 1 << -1: return 1; default: return 0; } }' '1:39: error: invalid shift count in constant expression'
 check_error case-shift-32 'int main() { switch (0) { case 1 << 32: return 1; default: return 0; } }' '1:39: error: invalid shift count in constant expression'
@@ -3871,13 +3871,13 @@ check_error function-no-declaration 'int main() { return missing(); } int missin
 check_error conflicting-prototypes 'int f(int); int f(int x, int y); int main() { return 0; }' "1:17: error: conflicting declaration of function 'f'"
 check_error void-with-arg 'int f(void); int main(void) { return f(1); } int f(void) { return 42; }' "1:38: error: wrong number of arguments to function 'f'"
 check_error ptr-plus-ptr \
-	    'int main() { int a; int *p; int *q; p = &a; q = &a; return p + q; }' \
-	    '1:62: error: invalid operands to binary +'
+  'int main() { int a; int *p; int *q; p = &a; q = &a; return p + q; }' \
+  '1:62: error: invalid operands to binary +'
 check_error int-minus-ptr 'int main() { int a; int *p; p = &a; return 1 - p; }' \
-	    '1:46: error: invalid operands to binary -'
+  '1:46: error: invalid operands to binary -'
 
 # Backslash-newline splicing precedes tokenization and comment recognition.
-cat > "$WORK_DIR/splice.h" <<'SPLICE'
+cat >"$WORK_DIR/splice.h" <<'SPLICE'
 #define HEADER_VALUE 4\
 0
 SPLICE
@@ -3969,20 +3969,20 @@ int main(void) { return N; }' '2:1: error: expect type specifier'
 # #include. Quoted names search the including file's directory, then -I.
 # Angle names search only -I. The reference compiler sees the same -I flags.
 mkdir -p "$WORK_DIR/inc1" "$WORK_DIR/inc2" "$WORK_DIR/sub"
-echo 'int inc(void) { return 40; }' > "$WORK_DIR/inc.h"
-echo 'typedef int T;' > "$WORK_DIR/type.h"
-echo 'int answer(void) { return 42; }' > "$WORK_DIR/nested-b.h"
-echo '#include "nested-b.h"' > "$WORK_DIR/nested-a.h"
-echo 'int nested(void) { return 42; }' > "$WORK_DIR/sub/b.h"
-echo '#include "b.h"' > "$WORK_DIR/sub/a.h"
-echo 'int origin(void) { return 40; }' > "$WORK_DIR/origin.h"
-echo 'int origin(void) { return 2; }' > "$WORK_DIR/inc2/origin.h"
-echo 'int which(void) { return 11; }' > "$WORK_DIR/inc1/which.h"
-echo 'int which(void) { return 31; }' > "$WORK_DIR/inc2/which.h"
-echo > "$WORK_DIR/semi.h"
-echo 'int x' >> "$WORK_DIR/semi.h"
-echo '#include "recurse.h"' > "$WORK_DIR/recurse.h"
-cat > "$WORK_DIR/guard.h" <<'GUARD'
+echo 'int inc(void) { return 40; }' >"$WORK_DIR/inc.h"
+echo 'typedef int T;' >"$WORK_DIR/type.h"
+echo 'int answer(void) { return 42; }' >"$WORK_DIR/nested-b.h"
+echo '#include "nested-b.h"' >"$WORK_DIR/nested-a.h"
+echo 'int nested(void) { return 42; }' >"$WORK_DIR/sub/b.h"
+echo '#include "b.h"' >"$WORK_DIR/sub/a.h"
+echo 'int origin(void) { return 40; }' >"$WORK_DIR/origin.h"
+echo 'int origin(void) { return 2; }' >"$WORK_DIR/inc2/origin.h"
+echo 'int which(void) { return 11; }' >"$WORK_DIR/inc1/which.h"
+echo 'int which(void) { return 31; }' >"$WORK_DIR/inc2/which.h"
+echo >"$WORK_DIR/semi.h"
+echo 'int x' >>"$WORK_DIR/semi.h"
+echo '#include "recurse.h"' >"$WORK_DIR/recurse.h"
+cat >"$WORK_DIR/guard.h" <<'GUARD'
 #ifndef GUARD_H
 #define GUARD_H
 int guard_value(void) { return 42; }
@@ -4069,12 +4069,12 @@ check_error define-name-not-identifier '#define 1 2
 int main(void) { return 0; }' '1:9: error: expect macro name'
 check_error define-function-like '#define N(x) x
 int main(void) { return 0; }' \
-	    '1:10: error: function-like macros are not supported yet'
+  '1:10: error: function-like macros are not supported yet'
 check_error define-redefinition '#define N 1
 #define N 2
 int main(void) { return 0; }' "2:9: error: 'N' redefined"
 check_error define-undefined-identifier 'int main(void) { return N; }' \
-	    '1:25: error: undeclared identifier'
+  '1:25: error: undeclared identifier'
 # A body is expanded at the use site, but its tokens still carry the position
 # in the definition, so this reports where 'B' appears in the #define line.
 check_error define-forward-reference '#define A B
@@ -4360,38 +4360,38 @@ int unused;' '1:7: error: unterminated conditional directive'
 
 include_semi_name=include-diagnostic-file
 include_semi_input="$WORK_DIR/$include_semi_name.c"
-echo '#include "semi.h"' > "$include_semi_input"
-echo 'int main(void) { return 0; }' >> "$include_semi_input"
-if "$TEST_CC" "$include_semi_input" -o "$WORK_DIR/$include_semi_name.s" 2> "$WORK_DIR/$include_semi_name.err"; then
-    fail "$include_semi_name: expected a diagnostic"
+echo '#include "semi.h"' >"$include_semi_input"
+echo 'int main(void) { return 0; }' >>"$include_semi_input"
+if "$TEST_CC" "$include_semi_input" -o "$WORK_DIR/$include_semi_name.s" 2>"$WORK_DIR/$include_semi_name.err"; then
+  fail "$include_semi_name: expected a diagnostic"
 fi
-echo "$WORK_DIR/semi.h:2:6: error: expect ';'" > "$WORK_DIR/$include_semi_name.expected"
+echo "$WORK_DIR/semi.h:2:6: error: expect ';'" >"$WORK_DIR/$include_semi_name.expected"
 if ! cmp -s "$WORK_DIR/$include_semi_name.expected" "$WORK_DIR/$include_semi_name.err"; then
-    printf 'Expected diagnostic:\n' >&2
-    cat "$WORK_DIR/$include_semi_name.expected" >&2
-    printf 'Actual diagnostic:\n' >&2
-    cat "$WORK_DIR/$include_semi_name.err" >&2
-    fail "$include_semi_name: unexpected diagnostic"
+  printf 'Expected diagnostic:\n' >&2
+  cat "$WORK_DIR/$include_semi_name.expected" >&2
+  printf 'Actual diagnostic:\n' >&2
+  cat "$WORK_DIR/$include_semi_name.err" >&2
+  fail "$include_semi_name: unexpected diagnostic"
 fi
 rejected=$((rejected + 1))
 printf '[PASS] %s (rejected with expected diagnostic)\n' "$include_semi_name"
 
 include_recurse_name=include-nesting
 include_recurse_input="$WORK_DIR/$include_recurse_name.c"
-echo '#include "recurse.h"' > "$include_recurse_input"
-if "$TEST_CC" "$include_recurse_input" -o "$WORK_DIR/$include_recurse_name.s" 2> "$WORK_DIR/$include_recurse_name.err"; then
-    fail "$include_recurse_name: expected a diagnostic"
+echo '#include "recurse.h"' >"$include_recurse_input"
+if "$TEST_CC" "$include_recurse_input" -o "$WORK_DIR/$include_recurse_name.s" 2>"$WORK_DIR/$include_recurse_name.err"; then
+  fail "$include_recurse_name: expected a diagnostic"
 fi
-echo "$WORK_DIR/recurse.h:1:10: error: include nesting is too deep" > "$WORK_DIR/$include_recurse_name.expected"
+echo "$WORK_DIR/recurse.h:1:10: error: include nesting is too deep" >"$WORK_DIR/$include_recurse_name.expected"
 if ! cmp -s "$WORK_DIR/$include_recurse_name.expected" "$WORK_DIR/$include_recurse_name.err"; then
-    printf 'Expected diagnostic:\n' >&2
-    cat "$WORK_DIR/$include_recurse_name.expected" >&2
-    printf 'Actual diagnostic:\n' >&2
-    cat "$WORK_DIR/$include_recurse_name.err" >&2
-    fail "$include_recurse_name: unexpected diagnostic"
+  printf 'Expected diagnostic:\n' >&2
+  cat "$WORK_DIR/$include_recurse_name.expected" >&2
+  printf 'Actual diagnostic:\n' >&2
+  cat "$WORK_DIR/$include_recurse_name.err" >&2
+  fail "$include_recurse_name: unexpected diagnostic"
 fi
 rejected=$((rejected + 1))
 printf '[PASS] %s (rejected with expected diagnostic)\n' "$include_recurse_name"
 
 printf 'All %d tests passed (%d execution, %d rejection, %d compile-only).\n' \
-       "$((passed + rejected + compiled))" "$passed" "$rejected" "$compiled"
+  "$((passed + rejected + compiled))" "$passed" "$rejected" "$compiled"
