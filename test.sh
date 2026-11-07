@@ -2964,7 +2964,7 @@ check_error character-literal-missing-quote "int main(void) { return 'a; }" "1:2
 check_error character-literal-escape-eof "int main(void) { return '\\" "1:25: error: unterminated character literal"
 check_error character-literal-raw-newline $'int main(void) { return \'\n\'; }' "1:25: error: unterminated character literal"
 check_error character-literal-raw-crlf $'int main(void) { return \'\r\n\'; }' "1:25: error: unterminated character literal"
-check_error character-literal-escaped-newline $'int main(void) { return \'\\\n\'; }' "1:25: error: unterminated character literal"
+check_error character-literal-escaped-newline $'int main(void) { return \'\\\n\'; }' "1:25: error: empty character literal"
 
 # String literal lexer diagnostics.
 check_error string-unterminated 'int main(void) { return "hello; }' '1:25: error: unterminated string literal'
@@ -2972,7 +2972,7 @@ check_error string-missing-closing-quote 'int main(void) { return "; }' '1:25: e
 check_error string-trailing-backslash 'int main(void) { return "hello\; }' '1:25: error: unterminated string literal'
 check_error string-raw-newline $'int main(void) { return "hello\nworld"; }' '1:25: error: unterminated string literal'
 check_error string-raw-crlf $'int main(void) { return "hello\r\nworld"; }' '1:25: error: unterminated string literal'
-check_error string-escaped-newline $'int main(void) { return "hello\\\nworld"; }' '1:25: error: unterminated string literal'
+check string-escaped-newline 11 $'int main(void) { return sizeof("hello\\\nworld"); }'
 check_error string-invalid-escape 'int main(void) { return "\q"; }' '1:25: error: invalid escape sequence in string literal'
 check_error string-invalid-octal-escape 'int main(void) { return "\8"; }' '1:25: error: invalid escape sequence in string literal'
 check_error string-empty-hex-escape 'int main(void) { return "\x"; }' '1:25: error: expect hexadecimal digit in character escape'
@@ -3875,6 +3875,96 @@ check_error ptr-plus-ptr \
 	    '1:62: error: invalid operands to binary +'
 check_error int-minus-ptr 'int main() { int a; int *p; p = &a; return 1 - p; }' \
 	    '1:46: error: invalid operands to binary -'
+
+# Backslash-newline splicing precedes tokenization and comment recognition.
+cat > "$WORK_DIR/splice.h" <<'SPLICE'
+#define HEADER_VALUE 4\
+0
+SPLICE
+check splice-include 42 '#include "spli\
+ce.h"
+int main(void) { return HEADER_VALUE + 2; }'
+check splice-macro-body 42 '#define N 40 + \
+2
+int main(void) { return N; }'
+check splice-directive-and-macro-name 42 '#def\
+ine ANS\
+WER 42
+int main(void) { return ANS\
+WER; }'
+check splice-condition 42 '#if 6 * \
+7 == 42
+int main(void) { return 42; }
+#endif'
+check splice-keyword-and-number 42 'i\
+nt main(void) { ret\
+urn 4\
+2; }'
+check splice-operator 42 'int main(void) { return (1 <\
+< 5) + 10; }'
+check splice-integer-suffix 1 'int main(void) { return sizeof(1L\
+L) == 8; }'
+check splice-string 1 'int main(void) { return sizeof("ab\
+cd") == 5 && "ab\
+cd"[2] == 99; }'
+check splice-string-escape 10 'int main(void) { return "\\
+n"[0]; }'
+check splice-character 42 $'int main(void) { return \'\\\n*\'; }'
+check splice-line-comment 42 'int main(void) { // comment \
+return 1;
+return 42; }'
+check splice-comment-delimiters 42 '/\
+* comment *\
+/
+int main(void) { /\
+/ comment
+return 42; }'
+check splice-comment-not-repeated 42 '// comment \\
+
+int main(void) { return 42; }'
+check splice-leading-and-consecutive 42 '\
+\
+int main(void) { return 4\
+\
+2; }'
+check splice-before-directive 42 '\
+#define N 42
+int main(void) { return N; }'
+check splice-macro-identical-redefinition 42 '#define N 4\
+2
+#define N 42
+int main(void) { return N; }'
+check splice-macro-token-separation 42 '#define N 40+\
+2
+#define N 40+2
+int main(void) { return N; }'
+check splice-crlf 42 $'#define N 4\\\r\n2\r\nint main(void) { return N; }\r\n'
+check splice-cr 42 $'#define N 4\\\r2\rint main(void) { return N; }\r'
+check splice-at-eof 42 'int main(void) { return 42; }\
+'
+
+check_error splice-diagnostic-column 'int main(void) { return \
+  missing; }' '2:3: error: undeclared identifier'
+check_error splice-diagnostic-after-include '#include "splice.h"
+int main(void) { return \
+  missing; }' '3:3: error: undeclared identifier'
+check_error splice-diagnostic-token-start 'int main(void) { return mis\
+sing; }' '1:25: error: undeclared identifier'
+check_error splice-diagnostic-next-line 'int main(void) { int x = 4\
+2;
+return missing; }' '3:8: error: undeclared identifier'
+check_error splice-diagnostic-leading '\
+\
+int main(void) { return missing; }' '3:25: error: undeclared identifier'
+check_error splice-diagnostic-crlf $'int main(void) { return \\\r\n  missing; }' '2:3: error: undeclared identifier'
+check_error splice-diagnostic-directive-end '#if defined(LO\
+NG' "2:3: error: expect ')' after macro name in 'defined'"
+check_error splice-diagnostic-macro '#define N \
+missing
+int main(void) { return N; }' '2:1: error: undeclared identifier'
+check_error splice-no-new-directive 'int x; \
+#define N 42
+int main(void) { return N; }' '2:1: error: expect type specifier'
 
 # #include. Quoted names search the including file's directory, then -I.
 # Angle names search only -I. The reference compiler sees the same -I flags.

@@ -112,15 +112,18 @@ enum {
   INT_SUFFIX_LONG_LONG = 1 << 2,
 };
 
+typedef struct LineSplice LineSplice;
+
 /*
  * One opened source buffer. Tokens and locations refer to it by the small
  * integer id, so a token costs one int rather than a name pointer.
  */
 typedef struct SourceFile {
   const char *name;     /* Path as opened, for diagnostics. */
-  const char *contents; /* NUL-terminated file contents. */
+  const char *contents; /* NUL-terminated contents after newline splicing. */
   int length;           /* Bytes, excluding the final NUL. */
   int id;               /* One-based index in the source file table. */
+  LineSplice *splices;  /* Removed newlines, for physical source locations. */
 } SourceFile;
 
 /*
@@ -163,6 +166,7 @@ typedef struct {
   int line;           /* One-based. */
   int col;            /* One-based byte column; tabs count as one byte. */
   const char *cursor; /* Next byte to read. */
+  const LineSplice *next_splice;
   /* The preprocessor treats '#' in this position as a directive. */
   bool at_bol;
   /*

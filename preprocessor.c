@@ -284,25 +284,27 @@ static void finish_directive_line(Preprocessor *pp) {
 /*
  * Read the rest of a directive as preprocessing tokens. The lexer's directive
  * mode stops at the newline, so the caller must consume that newline. The
- * returned vector owns its storage; each token points into the source.
+ * vector owns its storage; each token points into the source. Return the end
+ * token to preserve the physical location of a continued directive's end.
  */
-static void directive_tokens(Preprocessor *pp, Vector *out) {
+static Token directive_tokens(Preprocessor *pp, Vector *out) {
   Lexer saved = pp->lexer;
+  Token tok;
   pp->lexer.in_directive = true;
   for (;;) {
-    Token tok = lexer_next_token(&pp->lexer);
+    tok = lexer_next_token(&pp->lexer);
     if (tok.kind == TOKEN_EOF)
       break;
     if (!vector_push(out, &tok))
       error_at(tok, "out of memory");
   }
   /*
-   * Directives end at the newline and are never part of an include or macro
-   * directive flag and the cursor position changed.
+   * Restore the caller's directive mode and consume the logical newline.
    */
   pp->lexer.in_directive = saved.in_directive;
   if (*pp->lexer.cursor == '\n' || *pp->lexer.cursor == '\r')
     lexer_advance(&pp->lexer);
+  return tok;
 }
 
 /*
@@ -795,18 +797,14 @@ static void pp_expand_condition(Preprocessor *pp, const Vector *in,
 
 /* Evaluate the tokens and require that all of them were consumed. */
 static bool pp_evaluate_condition(Preprocessor *pp, const Vector *tokens,
-                                  SourcePosition loc) {
+                                  SourcePosition loc, Token end) {
   PPExpression expr;
   bool value;
   if (!tokens->len)
     error_at(loc, "expect #if expression");
   expr.tokens = tokens;
   expr.index = 0;
-  expr.end = ((Token *)tokens->data)[tokens->len - 1];
-  expr.end.start += expr.end.len;
-  expr.end.col += expr.end.len;
-  expr.end.len = 0;
-  expr.end.kind = TOKEN_EOF;
+  expr.end = end;
   value = pp_expr_conditional(&expr, pp, true).bits != 0;
   if ((size_t)expr.index != tokens->len)
     error_at(((Token *)tokens->data)[expr.index], "invalid #if expression");
@@ -816,10 +814,11 @@ static bool pp_evaluate_condition(Preprocessor *pp, const Vector *tokens,
 static void if_directive(Preprocessor *pp, SourcePosition loc) {
   Vector tokens;
   Vector expanded;
+  Token end;
   bool active;
 
   vector_init(&tokens, sizeof(Token));
-  directive_tokens(pp, &tokens);
+  end = directive_tokens(pp, &tokens);
   /*
    * A skipped outer branch evaluates nothing, so a syntax error inside dead
    * code is not reported. That matches how other directives behave there.
@@ -831,7 +830,7 @@ static void if_directive(Preprocessor *pp, SourcePosition loc) {
   }
   vector_init(&expanded, sizeof(Token));
   pp_expand_condition(pp, &tokens, &expanded);
-  active = pp_evaluate_condition(pp, &expanded, loc);
+  active = pp_evaluate_condition(pp, &expanded, loc, end);
   vector_free(&expanded);
   vector_free(&tokens);
   push_conditional(pp, active, loc);

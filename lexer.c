@@ -110,6 +110,51 @@ static Vector source_files = {.data = NULL,
                               .capacity = 0,
                               .element_size = sizeof(SourceFile *)};
 
+/*
+ * A removed newline immediately precedes this position in the compacted
+ * buffer. Consecutive splices can have the same position.
+ */
+struct LineSplice {
+  const char *position;
+  LineSplice *next;
+};
+
+/*
+ * Normalize line endings and remove backslash-newline pairs before tokenizing
+ * (C11 5.1.1.2). No space is inserted: even identifiers and comment delimiters
+ * can cross a splice. Read each original byte once so removal cannot create
+ * another splice. Records live as long as the source buffer.
+ */
+static void splice_lines(SourceFile *file, char *contents) {
+  char *read = contents;
+  char *write = contents;
+  LineSplice **tail = &file->splices;
+  file->splices = NULL;
+  while (*read) {
+    if (*read == '\\' && (read[1] == '\n' || read[1] == '\r')) {
+      LineSplice *splice = calloc(1, sizeof(*splice));
+      if (!splice)
+        error_at_loc(file->name, 0, 0, "out of memory");
+      splice->position = write;
+      *tail = splice;
+      tail = &splice->next;
+      ++read;
+      if (*read == '\r' && read[1] == '\n')
+        ++read;
+      ++read;
+    } else if (*read == '\r') {
+      ++read;
+      if (*read == '\n')
+        ++read;
+      *write++ = '\n';
+    } else {
+      *write++ = *read++;
+    }
+  }
+  *write = '\0';
+  file->length = (int)(write - contents);
+}
+
 SourceFile *new_source_file(const char *filename) {
   FILE *stream;
   SourceFile *file;
@@ -156,8 +201,8 @@ SourceFile *new_source_file(const char *filename) {
   }
   file->name = filename;
   file->contents = contents;
-  file->length = (int)bytes_read;
   file->id = (int)source_files.len + 1;
+  splice_lines(file, contents);
 
   if (!vector_push(&source_files, &file)) {
     error_at_loc(filename, 0, 0, "out of memory");
@@ -172,13 +217,27 @@ const char *file_name(int file) {
   return ((SourceFile **)source_files.data)[file - 1]->name;
 }
 
+/*
+ * Crossing a splice changes the physical location, but not whether we are
+ * at the beginning of a logical line.
+ */
+static void advance_splices(Lexer *l) {
+  while (l->next_splice && l->cursor == l->next_splice->position) {
+    l->line++;
+    l->col = 1;
+    l->next_splice = l->next_splice->next;
+  }
+}
+
 void lexer_init(Lexer *l, const SourceFile *file) {
   l->file = file->id;
   l->cursor = file->contents;
+  l->next_splice = file->splices;
   l->line = 1;
   l->col = 1;
   l->at_bol = true;
   l->in_directive = false;
+  advance_splices(l);
 }
 
 SourcePosition lexer_position(const Lexer *l) {
@@ -209,6 +268,7 @@ void lexer_advance(Lexer *l) {
   } else {
     l->col++;
   }
+  advance_splices(l);
 }
 
 /*
