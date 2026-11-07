@@ -19,6 +19,7 @@
 #ifndef _PREPROCESSOR_H_
 #define _PREPROCESSOR_H_
 
+#include "hashtable.h"
 #include "lexer.h"
 #include "vector.h"
 
@@ -38,7 +39,7 @@ typedef struct {
   IncludeFrame *include_frames; /* Innermost first; NULL at the top level. */
   const Vector *include_paths;  /* char * directory names, in search order. */
   int include_depth;
-  Macro *macros;       /* Defined macros, most recent first. */
+  HashTable macros;    /* Macro name -> Macro *. */
   MacroToken *pending; /* Tokens awaiting macro expansion. */
   Vector conditionals; /* ConditionalFrame, innermost last. */
 } Preprocessor;

@@ -20,6 +20,7 @@
 #define _PARSER_H_
 
 #include "error.h"
+#include "hashtable.h"
 #include "preprocessor.h"
 #include "type.h"
 
@@ -80,9 +81,7 @@ struct Initializer {
 typedef struct Tag {
   Token name;
   Type *type;
-  int scope_depth;
   bool is_defining;
-  struct Tag *next;
 } Tag;
 
 typedef struct Variable {
@@ -108,7 +107,6 @@ typedef struct Enum {
  */
 typedef struct Label {
   Token name;
-  struct Label *next;
 } Label;
 
 /*
@@ -149,7 +147,6 @@ typedef enum {
 typedef struct Symbol {
   Token name;
   SymbolKind kind;
-  int scope_depth;
   union {
     Variable *variable;
     Function *function;
@@ -158,6 +155,16 @@ typedef struct Symbol {
   } d;
   struct Symbol *next;
 } Symbol;
+
+/*
+ * Each scope has separate tables for ordinary identifiers and tags. Keep
+ * declarations in a list for checks that visit every symbol in a scope.
+ */
+typedef struct {
+  HashTable symbols;
+  HashTable tags;
+  Symbol *declarations;
+} Scope;
 
 /*
  * A function call whose argument count is checked against a visible
@@ -186,9 +193,8 @@ typedef struct {
   Token current;
   Token lookahead;
 
-  Symbol *symbols;
-  Tag *tags;
-  Label *labels;
+  Vector scopes; /* Scope elements, indexed by scope_depth; file scope is 0. */
+  HashTable labels; /* Label name -> Label *, for the current function. */
   GotoRef *goto_refs;
   Function *current_function;
   Variable *last_parameter; /* Last fixed parameter of the current function. */

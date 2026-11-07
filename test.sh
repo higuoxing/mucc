@@ -175,6 +175,181 @@ function check_error() {
   printf '[PASS] %s (rejected with expected diagnostic)\n' "$name"
 }
 
+# Name lookup survives table growth, scope exit, and colliding macro removal.
+check lookup-macro-collision-removal 42 '#define a 10
+#define i 20
+#define q 32
+#undef i
+#ifdef i
+invalid tokens
+#endif
+int main(void) { return a + q; }'
+check lookup-macro-collision-reinsert 42 '#define a 1
+#define i 20
+#define q 21
+#undef a
+#define a 22
+#undef i
+#define i 20
+#undef q
+int main(void) { return a + i; }'
+check lookup-macro-growth 42 '#define M00 0
+#define M01 1
+#define M02 2
+#define M03 3
+#define M04 4
+#define M05 5
+#define M06 6
+#define M07 7
+#define M08 8
+#define M09 9
+#define M10 10
+#define M11 11
+#define M12 12
+#define M13 13
+#define M14 14
+#define M15 15
+#define M16 16
+#define M17 17
+#define M18 18
+#define M19 19
+#undef M09
+#define M09 23
+int main(void) { return M00 + M09 + M19; }'
+check lookup-symbol-growth 42 'int a0, a1, a2, a3, a4, a5, a6, a7, a8, a9;
+int a10, a11, a12, a13, a14, a15, a16, a17, a18, a19;
+int main(void) {
+  int b0, b1, b2, b3, b4, b5, b6, b7, b8, b9;
+  int b10, b11, b12, b13, b14, b15, b16, b17, b18, b19;
+  a0 = 10; a19 = 11; b0 = 12; b19 = 9;
+  return a0 + a19 + b0 + b19;
+}'
+check lookup-deep-scope-restoration 42 'int main(void) {
+  int x = 42;
+  {
+    int x = 1;
+    {
+      int x = 2;
+      {
+        int x = 3;
+        {
+          int x = 4;
+          {
+            int x = 5;
+            {
+              int x = 6;
+              {
+                int x = 7;
+                {
+                  int x = 8;
+                  {
+                    int x = 9;
+                    {
+                      int x = 10;
+                      { int x = 11; if (x != 11) return 1; }
+                      if (x != 10) return 1;
+                    }
+                    if (x != 9) return 1;
+                  }
+                  if (x != 8) return 1;
+                }
+                if (x != 7) return 1;
+              }
+              if (x != 6) return 1;
+            }
+            if (x != 5) return 1;
+          }
+          if (x != 4) return 1;
+        }
+        if (x != 3) return 1;
+      }
+      if (x != 2) return 1;
+    }
+    if (x != 1) return 1;
+  }
+  return x;
+}'
+check lookup-symbol-kinds-and-tags 42 'typedef int T;
+struct T { int x; };
+int main(void) {
+  T x = 20;
+  struct T obj = {22};
+  { enum { T = 7 }; if (T != 7) return 1;
+    { int T = 8; if (T != 8) return 1; }
+    if (T != 7) return 1;
+  }
+  T y = obj.x;
+  return x + y;
+}'
+check lookup-global-function-with-shadowing-parameter 42 'int f(int f) { return f; }
+int main(void) { return f(42); }'
+check lookup-tag-growth-and-restoration 42 'struct T { int x; };
+int main(void) {
+  struct T obj = {42};
+  {
+    struct T { long y; };
+    struct A; struct B; struct C; struct D; struct E;
+    struct F; struct G; struct H; struct I; struct J;
+    struct K; struct L; struct M; struct N; struct O;
+    struct P; struct Q; struct R; struct S; struct U;
+    struct A { int x; }; struct U { int x; };
+    struct T inner = {20};
+    struct A first = {10}; struct U last = {12};
+    if (inner.y + first.x + last.x != 42) return 1;
+  }
+  struct T *p = &obj;
+  return p->x;
+}'
+check lookup-label-growth-and-function-scope 42 'int f(void) {
+  goto L19;
+  L00: return 1; L01: return 1; L02: return 1; L03: return 1;
+  L04: return 1; L05: return 1; L06: return 1; L07: return 1;
+  L08: return 1; L09: return 1; L10: return 1; L11: return 1;
+  L12: return 1; L13: return 1; L14: return 1; L15: return 1;
+  L16: return 1; L17: return 1; L18: return 1;
+  { L19: return 20; }
+}
+int main(void) { goto L19; L19: return f() + 22; }'
+check lookup-member-growth-and-anonymous-path 42 'struct S;
+typedef const struct S CS;
+struct S {
+  int a0, a1, a2, a3, a4, a5, a6, a7, a8, a9;
+  int a10, a11, a12, a13, a14, a15, a16, a17, a18, a19;
+  union { int x; struct { int y; }; };
+};
+int main(void) {
+  struct S s = {.a0 = 10, .a19 = 12, .y = 20};
+  CS *p = &s;
+  return p->a0 + p->a19 + p->y;
+}'
+check lookup-builtin-va-list-members 42 'int main(void) {
+  __builtin_va_list ap;
+  ap[0].gp_offset = 20;
+  ap[0].fp_offset = 22;
+  return ap[0].gp_offset + ap[0].fp_offset;
+}'
+
+check_error lookup-symbol-duplicate-after-growth 'int main(void) {
+  int a0, a1, a2, a3, a4, a5, a6, a7, a8, a9;
+  int a0;
+}' '3:7: error: duplicate local variable'
+check_error lookup-tag-duplicate-after-growth 'int main(void) {
+  struct T { int x; }; struct A; struct B; struct C; struct D; struct E;
+  struct T { int y; };
+}' "3:10: error: redefinition of struct 'T'"
+check_error lookup-label-duplicate-after-growth 'int main(void) {
+  L00: ; L01: ; L02: ; L03: ; L04: ; L05: ; L06: ; L07: ; L08: ; L09: ;
+  L00: return 0;
+}' '3:3: error: duplicate label'
+check_error lookup-label-not-visible-in-next-function 'int f(void) { L: return 0; }
+int main(void) {
+  goto L;
+}' "3:3: error: label 'L' not defined"
+check_error lookup-anonymous-member-duplicate-after-growth 'struct S {
+  int a0, a1, a2, a3, a4, a5, a6, a7, a8, a9;
+  union { int a0; };
+};' '3:15: error: duplicate struct member'
+
 # Variadic builtins read and copy register and stack argument cursors.
 check va-list-size 1 'int main(void) { return sizeof(__builtin_va_list) == 24 && sizeof((__builtin_va_list){0}) == 24; }'
 check va-arg-int 42 'int f(int n, ...) { __builtin_va_list ap; __builtin_va_start(ap, n); int x = __builtin_va_arg(ap, int); __builtin_va_end(ap); return x; } int main(void) { return f(1, 42); }'

@@ -113,35 +113,38 @@ static void parser_advance(Parser *p) {
   p->lookahead = pp_next_token(&p->pp);
 }
 
-static void enter_scope(Parser *p) { ++p->scope_depth; }
+static void enter_scope(Parser *p) {
+  Scope scope = {0};
+  if (!vector_push(&p->scopes, &scope))
+    error_at(p->current, "out of memory");
+  p->scope_depth = (int)p->scopes.len - 1;
+}
 
 /*
- * Scope exit restores the outer bindings. File-scope function symbols remain
- * visible even when they were added while parsing parameters at depth 1.
+ * Discard the current scope's lookup tables. Declarations remain alive for
+ * the checked AST; outer scopes and file-scope function bindings are intact.
  */
 static void leave_scope(Parser *p) {
-  while (p->symbols && p->symbols->scope_depth == p->scope_depth)
-    p->symbols = p->symbols->next;
-  while (p->tags && p->tags->scope_depth == p->scope_depth)
-    p->tags = p->tags->next;
+  Scope *scope = &((Scope *)p->scopes.data)[p->scope_depth];
+  hashtable_free(&scope->symbols);
+  hashtable_free(&scope->tags);
+  --p->scopes.len;
   --p->scope_depth;
 }
 
 static void reset_function_state(Parser *p) {
-  p->labels = NULL;
+  hashtable_free(&p->labels);
   p->goto_refs = NULL;
   p->current_switch = NULL;
   p->current_function = NULL;
   p->last_parameter = NULL;
-  p->scope_depth = 0;
   p->loop_depth = 0;
 }
 
 static void parser_init(Parser *p, const SourceFile *file,
                         const Vector *include_paths) {
-  p->tags = NULL;
-  p->symbols = NULL;
-  p->labels = NULL;
+  vector_init(&p->scopes, sizeof(Scope));
+  hashtable_init(&p->labels);
   p->goto_refs = NULL;
   p->call_refs = NULL;
   p->current_switch = NULL;
@@ -153,6 +156,7 @@ static void parser_init(Parser *p, const SourceFile *file,
   p->previous = (Token){0};
   p->current = pp_next_token(&p->pp);
   p->lookahead = pp_next_token(&p->pp);
+  enter_scope(p);
   declare_builtins(p);
 }
 
@@ -510,25 +514,27 @@ static AstNode *parse_primary(Parser *p) {
 }
 
 static Tag *find_tag(Parser *p, Token name, bool current_scope) {
-  Tag *tag;
-  for (tag = p->tags; tag; tag = tag->next) {
-    if (same_identifier(tag->name, name)) {
-      if (!current_scope || tag->scope_depth == p->scope_depth)
-        return tag;
-    }
+  int depth;
+  for (depth = p->scope_depth; depth >= 0; --depth) {
+    Scope *scope = &((Scope *)p->scopes.data)[depth];
+    Tag *tag = hashtable_get(&scope->tags, name.start, (size_t)name.len);
+    if (tag)
+      return tag;
+    if (current_scope)
+      break;
   }
   return NULL;
 }
 
 static Tag *declare_tag(Parser *p, Token name, Type *type) {
+  Scope *scope = &((Scope *)p->scopes.data)[p->scope_depth];
   Tag *tag = calloc(1, sizeof(Tag));
   if (!tag)
     error_at(name, "out of memory");
   tag->name = name;
   tag->type = type;
-  tag->scope_depth = p->scope_depth;
-  tag->next = p->tags;
-  p->tags = tag;
+  if (!hashtable_put(&scope->tags, name.start, (size_t)name.len, tag))
+    error_at(name, "out of memory");
   return tag;
 }
 
@@ -603,18 +609,25 @@ static Type *parse_enum_specifier(Parser *p) {
 }
 
 /*
- * Check names promoted from anonymous members as well as ordinary members.
+ * Index names promoted from anonymous members as well as ordinary members.
+ * Each name maps to its immediate containing member, preserving the path
+ * used by member access and designated initializers.
  */
-static void check_member_names(Parser *p, Type *type, Member *member) {
+static void declare_member_names(Type *type, Member *member,
+                                 Member *container) {
   if (member->name.kind == TOKEN_IDENTIFIER) {
-    if (find_member(type, member->name))
-      error_at(member->name, "duplicate %s member",
+    Token name = member->name;
+    if (find_member(type, name))
+      error_at(name, "duplicate %s member",
                type->kind == TYPE_STRUCT ? "struct" : "union");
+    if (!hashtable_put(&type->member_names, name.start, (size_t)name.len,
+                       container))
+      error_at(name, "out of memory");
   } else {
     Member *inner;
     for (inner = unqualified_type(member->type)->members; inner;
          inner = inner->next)
-      check_member_names(p, type, inner);
+      declare_member_names(type, inner, container);
   }
 }
 
@@ -648,7 +661,7 @@ static Member *parse_record_member(Parser *p, Type *type, Type *base, int *size,
     error_at(name, "out of memory");
   member->name = name;
   member->type = member_type;
-  check_member_names(p, type, member);
+  declare_member_names(type, member, member);
   if (type->kind == TYPE_STRUCT) {
     member->offset = *size + padding;
     *size = member->offset + type_size(member_type);
@@ -2036,9 +2049,8 @@ static AstNode *parse_label_stmt(Parser *p) {
    * The duplicate check runs while 'current' is still the label itself,
    * so the error lands on it.
    */
-  for (label = p->labels; label; label = label->next)
-    if (same_identifier(label->name, name))
-      error_at(p->current, "duplicate label");
+  if (hashtable_contains(&p->labels, name.start, (size_t)name.len))
+    error_at(p->current, "duplicate label");
 
   /* Consume the identifier and ':'. */
   parser_advance(p);
@@ -2048,8 +2060,8 @@ static AstNode *parse_label_stmt(Parser *p) {
   if (!label)
     error_at(p->current, "out of memory");
   label->name = name;
-  label->next = p->labels;
-  p->labels = label;
+  if (!hashtable_put(&p->labels, name.start, (size_t)name.len, label))
+    error_at(name, "out of memory");
 
   label_node = new_ast_node(p, AST_LABEL);
   label_node->d.label_stmt.name = name;
@@ -2258,5 +2270,9 @@ AstNode *parse_translation_unit(const SourceFile *file,
   pp_check_end(&p.pp);
   sema_check_global_variables(&p);
   check_calls(&p);
+  hashtable_free(&p.labels);
+  leave_scope(&p);
+  vector_free(&p.scopes);
+  hashtable_free(&p.pp.macros);
   return head;
 }

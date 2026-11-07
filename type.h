@@ -21,6 +21,7 @@
 
 #include <stdbool.h>
 
+#include "hashtable.h"
 #include "lexer.h"
 
 typedef struct Member Member;
@@ -50,6 +51,7 @@ typedef struct Type {
       *base; /* Array element, pointee, or enum's compatible integer type. */
   int array_len;   /* Element count for TYPE_ARRAY; -1 for an unknown bound. */
   Member *members; /* Declaration order for structs and unions. */
+  HashTable member_names; /* Name -> immediate containing Member *. */
   int alignment;   /* Required alignment for structs and unions. */
 } Type;
 

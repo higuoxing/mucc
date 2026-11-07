@@ -74,18 +74,9 @@ bool contains_const(const Type *type) {
  * union, callers follow this member and repeat lookup in its type.
  */
 Member *find_member(const Type *type, Token name) {
-  Member *member;
   if (type->unqualified)
     type = type->unqualified;
-  for (member = type->members; member; member = member->next) {
-    if (member->name.kind == TOKEN_IDENTIFIER) {
-      if (same_identifier(member->name, name))
-        return member;
-    } else if (find_member(member->type, name)) {
-      return member;
-    }
-  }
-  return NULL;
+  return hashtable_get(&type->member_names, name.start, (size_t)name.len);
 }
 
 /*
@@ -208,6 +199,7 @@ Type *record_type(TypeKind kind) {
   type->kind = kind;
   type->size = -1; /* Incomplete until the definition is finished. */
   type->alignment = 1;
+  hashtable_init(&type->member_names);
   return type;
 }
 

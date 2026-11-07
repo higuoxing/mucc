@@ -3,7 +3,7 @@ OPT := -O2
 CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Werror $(OPT)
 TARGET := mucc
 
-SRCS := main.c lexer.c preprocessor.c error.c type.c builtins.c parser.c sema.c layout.c codegen.c vector.c hashset.c
+SRCS := main.c lexer.c preprocessor.c error.c type.c builtins.c parser.c sema.c layout.c codegen.c vector.c hashset.c hashtable.c
 OBJS := $(SRCS:.c=.o)
 DEPS := $(OBJS:.o=.d)
 

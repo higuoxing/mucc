@@ -73,6 +73,11 @@ AstKind builtin_kind(Token name) {
 }
 
 void declare_builtins(Parser *p) {
+  Member *member;
+  for (member = va_list_record.members; member; member = member->next)
+    if (!hashtable_put(&va_list_record.member_names, member->name.start,
+                       (size_t)member->name.len, member))
+      error_at(member->name, "out of memory");
   Token va_list_name = {.kind = TOKEN_IDENTIFIER,
                         .start = "__builtin_va_list",
                         .len = sizeof("__builtin_va_list") - 1};

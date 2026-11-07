@@ -55,7 +55,6 @@ struct Macro {
   bool function_like;
   Vector params; /* Token elements; empty for object-like macros. */
   Vector tokens; /* The replacement list, in source order. */
-  struct Macro *next;
 };
 
 /*
@@ -119,17 +118,13 @@ void pp_init(Preprocessor *pp, const SourceFile *file,
   pp->include_frames = NULL;
   pp->include_paths = include_paths;
   pp->include_depth = 0;
-  pp->macros = NULL;
+  hashtable_init(&pp->macros);
   pp->pending = NULL;
   vector_init(&pp->conditionals, sizeof(ConditionalFrame));
 }
 
 static Macro *find_macro(const Preprocessor *pp, Token name) {
-  Macro *macro;
-  for (macro = pp->macros; macro; macro = macro->next)
-    if (same_identifier(macro->name, name))
-      return macro;
-  return NULL;
+  return hashtable_get(&pp->macros, name.start, (size_t)name.len);
 }
 
 static char *copy_text(const char *text, size_t len) {
@@ -451,25 +446,23 @@ static void define_macro(Preprocessor *pp) {
   macro->function_like = function_like;
   macro->params = params;
   macro->tokens = tokens;
-  macro->next = pp->macros;
-  pp->macros = macro;
+  if (!hashtable_put(&pp->macros, name.start, (size_t)name.len, macro))
+    error_at(name, "out of memory");
 }
 
 static void undef_macro(Preprocessor *pp) {
   Lexer *l = &pp->lexer;
   Token name;
-  Macro **link;
 
   lexer_skip_horizontal(l);
   if (!(isalpha((unsigned char)*l->cursor) || *l->cursor == '_'))
     error_at(lexer_position(l), "expect macro name");
   name = lexer_next_token(l);
   /* Undefining a name that is not defined is not an error (C11 6.10.3.5). */
-  for (link = &pp->macros; *link; link = &(*link)->next)
-    if (same_identifier((*link)->name, name)) {
-      *link = (*link)->next;
-      break;
-    }
+  /*
+   * Hide sets may still refer to this macro, so remove only its name binding.
+   */
+  hashtable_remove(&pp->macros, name.start, (size_t)name.len);
   lexer_skip_horizontal(l);
   if (*l->cursor != '\0' && *l->cursor != '\n' && *l->cursor != '\r')
     error_at(lexer_position(l), "extra tokens at end of #undef directive");

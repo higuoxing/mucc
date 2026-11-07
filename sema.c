@@ -24,39 +24,33 @@
 #include "vector.h"
 
 Symbol *find_symbol(Parser *p, Token name) {
-  Symbol *sym;
-  for (sym = p->symbols; sym; sym = sym->next)
-    if (same_identifier(sym->name, name))
-      return sym;
-  return NULL;
-}
-
-Symbol *find_symbol_in_scope(Parser *p, Token name, int scope_depth) {
-  Symbol *sym;
-  for (sym = p->symbols; sym; sym = sym->next) {
-    if (sym->scope_depth < scope_depth)
-      break;
-    if (sym->scope_depth == scope_depth && same_identifier(sym->name, name))
+  int depth;
+  for (depth = p->scope_depth; depth >= 0; --depth) {
+    Symbol *sym = find_symbol_in_scope(p, name, depth);
+    if (sym)
       return sym;
   }
   return NULL;
 }
 
+Symbol *find_symbol_in_scope(Parser *p, Token name, int scope_depth) {
+  Scope *scope = &((Scope *)p->scopes.data)[scope_depth];
+  return hashtable_get(&scope->symbols, name.start, (size_t)name.len);
+}
+
 /*
- * Callers check redeclarations before binding a new name. A function is bound
- * at file scope even while its parameters occupy an inner scope. Inserting by
- * depth keeps lookup and scope exit valid in that case.
- * The declaration pointer refers to the object selected by kind.
+ * Callers check redeclarations before binding a new name. Select the requested
+ * scope directly: a function is bound at file scope even while its parameters
+ * occupy an inner scope. The declaration pointer refers to the kind's object.
  */
 Symbol *add_symbol(Parser *p, Token name, SymbolKind kind, void *declaration,
                    int scope_depth) {
-  Symbol **link = &p->symbols;
+  Scope *scope = &((Scope *)p->scopes.data)[scope_depth];
   Symbol *sym = calloc(1, sizeof(Symbol));
   if (!sym)
     error_at(name, "out of memory");
   sym->name = name;
   sym->kind = kind;
-  sym->scope_depth = scope_depth;
   switch (kind) {
   case SYMBOL_VARIABLE:
     sym->d.variable = declaration;
@@ -71,10 +65,10 @@ Symbol *add_symbol(Parser *p, Token name, SymbolKind kind, void *declaration,
     sym->d.enumerator = declaration;
     break;
   }
-  while (*link && (*link)->scope_depth > scope_depth)
-    link = &(*link)->next;
-  sym->next = *link;
-  *link = sym;
+  if (!hashtable_put(&scope->symbols, name.start, (size_t)name.len, sym))
+    error_at(name, "out of memory");
+  sym->next = scope->declarations;
+  scope->declarations = sym;
   return sym;
 }
 
@@ -524,7 +518,7 @@ AstNode *sema_compound_literal(Parser *p, Type *type,
 
 void sema_check_global_variables(Parser *p) {
   Symbol *sym;
-  for (sym = p->symbols; sym; sym = sym->next) {
+  for (sym = ((Scope *)p->scopes.data)[0].declarations; sym; sym = sym->next) {
     Variable *var;
     if (sym->kind != SYMBOL_VARIABLE)
       continue;
@@ -1800,12 +1794,8 @@ void check_gotos(Parser *p) {
   GotoRef *ref;
 
   for (ref = p->goto_refs; ref; ref = ref->next) {
-    Label *label;
-
-    for (label = p->labels; label; label = label->next)
-      if (same_identifier(label->name, ref->name))
-        break;
-    if (!label) {
+    if (!hashtable_contains(&p->labels, ref->name.start,
+                            (size_t)ref->name.len)) {
       error_at(ref->loc, "label '%.*s' not defined", ref->name.len,
                ref->name.start);
     }
