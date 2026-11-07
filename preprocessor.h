@@ -22,39 +22,13 @@
 #include "lexer.h"
 #include "vector.h"
 
-/* One saved scanner state per open include; `outer` links to the enclosing
- * file. */
-typedef struct IncludeFrame {
-  Lexer lexer;
-  struct IncludeFrame *outer;
-  /*
-   * Conditionals cannot span a file boundary, so the depth at entry is
-   * recorded and checked when the file ends.
-   */
-  int conditional_depth;
-} IncludeFrame;
-
-/* One conditional-compilation level, from #if to its #endif. */
-typedef struct {
-  bool active;        /* This branch is being compiled. */
-  SourcePosition loc; /* The opening directive, for diagnostics. */
-} ConditionalFrame;
-
-/* One active object-like macro: a replacement list of already-lexed tokens. */
-typedef struct Macro {
-  const char *name;
-  int len;
-  Vector tokens; /* The replacement list, in source order. */
-  /* Set while this macro is being expanded, which stops direct recursion. */
-  bool expanding;
-  struct Macro *next;
-} Macro;
-
-/* A cursor into one macro's replacement list, innermost last. */
-typedef struct {
-  Macro *macro; /* Not const: popping the frame clears macro->expanding. */
-  int index;    /* Next token of macro->tokens to replay. */
-} MacroFrame;
+/*
+ * The preprocessor owns two stacks of internal records: one saved scanner
+ * state per open include, and one conditional per #if. Only pointers to them
+ * cross this boundary, so their layouts stay in preprocessor.c.
+ */
+typedef struct IncludeFrame IncludeFrame;
+typedef struct Macro Macro;
 
 /*
  * The parser asks for tokens here, never from the lexer. Directives are

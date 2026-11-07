@@ -3940,8 +3940,8 @@ int main(void) { return 0; }' '1:10: error: empty include file name'
 check_error include-unterminated '#include "abc' '1:10: error: unterminated header name'
 check_error include-extra '#include "nope.h" extra
 int main(void) { return 0; }' '1:19: error: extra tokens at end of #include directive'
-check_error include-directive-unsupported '#if 1
-int main(void) { return 0; }' "1:2: error: preprocessor directive 'if' is not supported yet"
+check_error include-directive-unsupported '#line 1
+int main(void) { return 0; }' "1:2: error: preprocessor directive 'line' is not supported yet"
 check_error include-directive-junk '# 123
 int main(void) { return 0; }' '1:3: error: expect preprocessor directive'
 
@@ -4048,6 +4048,225 @@ check_error endif-without-if '#endif
 int main(void) { return 0; }' '1:7: error: #endif without #if'
 check_error ifndef-unterminated '#ifndef FOO
 int main(void) { return 0; }' '1:8: error: unterminated conditional directive'
+
+# #if evaluates a constant expression. defined() is resolved before expansion,
+# so its operand is a name even when a macro of that name exists.
+check if-defined-true 42 '#define FOO
+#if defined(FOO)
+int main(void) { return 42; }
+#endif'
+check if-defined-false 42 '#if !defined(FOO)
+int main(void) { return 42; }
+#endif'
+check if-defined-form 42 '#define FOO
+#if defined FOO
+int main(void) { return 42; }
+#endif'
+check if-defined-both 42 '#if !defined(A) && !defined(B)
+int main(void) { return 42; }
+#endif'
+check if-defined-name-not-expanded 42 '#define FOO 1
+#if defined(FOO) && FOO
+int main(void) { return 42; }
+#endif'
+check if-arithmetic 42 '#if 1 + 2 * 3 == 7
+int main(void) { return 42; }
+#endif'
+check if-precedence 42 '#if 2 + 3 * 4 == 14 && (1 || 0)
+int main(void) { return 42; }
+#endif'
+check if-binary-associativity 42 '#if (20 - 5 - 3) == 12 && (24 / 4 / 2) == 3 && (16 >> 1 >> 2) == 2 && (3 < 2 < 1) == 1
+int main(void) { return 42; }
+#endif'
+check if-binary-precedence-levels 42 '#if (1 || 0 && 0) == 1 && (2 && 1 | 2) == 1 && (1 | 3 ^ 1) == 3 && (1 ^ 3 & 1) == 0 && (2 & 1 == 0) == 0 && (2 == 3 < 4) == 0 && (1 < 1 << 2) == 1 && (1 << 1 + 1) == 4 && (1 + 2 * 3) == 7
+int main(void) { return 42; }
+#endif'
+check if-short-circuit-resumes-evaluation 42 '#if 0 && (1 / 0) || 1
+int main(void) { return 42; }
+#endif'
+check if-short-circuit-tighter-rhs 42 '#if 1 || 0 && (1 / 0)
+int main(void) { return 42; }
+#endif'
+check if-conditional-after-logical 42 '#if (0 && 1 ? 1 / 0 : 42) == 42
+int main(void) { return 42; }
+#endif'
+check if-nested-conditional-associativity 42 '#if (1 ? 0 ? 1 / 0 : 42 : 1 / 0) == 42 && (0 ? 1 / 0 : 0 ? 1 / 0 : 42) == 42
+int main(void) { return 42; }
+#endif'
+check if-signed-comparison 42 '#if -1 < 0
+int main(void) { return 42; }
+#endif'
+check if-bitwise 42 '#if (6 & 3) == 2 && (6 | 1) == 7 && (6 ^ 3) == 5
+int main(void) { return 42; }
+#endif'
+check if-shift 42 '#if (1 << 4) == 16 && (16 >> 2) == 4
+int main(void) { return 42; }
+#endif'
+check if-modulo 42 '#if 7 % 4 == 3
+int main(void) { return 42; }
+#endif'
+check if-conditional-operator 42 '#if (1 ? 2 : 3) == 2
+int main(void) { return 42; }
+#endif'
+check if-macro-in-condition 42 '#define WIDTH 8
+#if WIDTH > 4
+int main(void) { return 42; }
+#endif'
+check if-nested-macro 42 '#define A 1
+#define B A
+#if B
+int main(void) { return 42; }
+#endif'
+check if-undefined-is-zero 42 '#if UNDEFINED_THING
+int main(void) { return 1; }
+#endif
+int main(void) { return 42; }'
+check if-zero-skips 42 '#if 0
+int unused = 1;
+#endif
+int main(void) { return 42; }'
+check if-nested-in-skipped 42 '#if 0
+#if 1
+int unused = 1;
+#endif
+#endif
+int main(void) { return 42; }'
+check if-skips-unknown-directive 42 '#if 0
+#error not reached
+#include "missing.h"
+#endif
+int main(void) { return 42; }'
+check if-guard-pattern 42 '#if !defined(GUARD_H)
+#define GUARD_H
+#define VALUE 42
+#endif
+#if !defined(GUARD_H)
+#define VALUE 0
+#endif
+int main(void) { return VALUE; }'
+
+check_error if-empty '#if
+int main(void) { return 0; }' '1:2: error: expect #if expression'
+check_error if-unterminated '#if 1
+int main(void) { return 0; }' '1:2: error: unterminated conditional directive'
+
+# Macro replay owns each expanded string independently of the replacement list.
+check define-string-repeated 240 '#define S "x"
+int main(void) { return S[0] + S[0]; }'
+check define-string-concatenated 1 '#define S "x"
+#define T S S
+int main(void) { return sizeof(T) == 3 && T[1] == 120 && S[0] == 120; }'
+check define-identical-redefinition 42 '#define N 42
+#define N 42
+int main(void) { return N; }'
+check define-identical-string-redefinition 120 '#define S "x"
+#define S "x"
+int main(void) { return S[0]; }'
+check define-identical-empty-redefinition 42 '#define E
+#define E
+int main(void) { return 42 E; }'
+check define-equivalent-whitespace 42 '#define N ( 6 + 7 )
+#define N    ( /* gap */ 6  +   7 )
+int main(void) { return N + 29; }'
+check define-keyword-name 8 '#define int long
+int object;
+#undef int
+int main(void) { return sizeof(object); }'
+
+check_error define-different-whitespace '#define N 1+2
+#define N 1 +2' "2:9: error: 'N' redefined"
+check_error define-different-spelling '#define N 1
+#define N 01' "2:9: error: 'N' redefined"
+
+# Short-circuiting skips evaluation, while still checking operand syntax/types.
+check if-short-circuit-or 42 '#if 1 || ((-9223372036854775807L - 1) / -1)
+int main(void) { return 42; }
+#endif'
+check if-short-circuit-and 42 '#if 0 && (1 / 0)
+int unused;
+#endif
+int main(void) { return 42; }'
+check if-short-circuit-conditional-true 42 '#if (1 ? 42 : ((-9223372036854775807L - 1) % -1)) == 42
+int main(void) { return 42; }
+#endif'
+check if-short-circuit-conditional-false 42 '#if (0 ? (1 / 0) : 42) == 42
+int main(void) { return 42; }
+#endif'
+check if-short-circuit-overflow 42 '#if 1 || (9223372036854775807L + 1) || (1 << 64)
+int main(void) { return 42; }
+#endif'
+check if-recursive-unary-plus 42 '#if + -1 == -1 && + +1 == 1 && + ~0 == -1 && + !0 == 1
+int main(void) { return 42; }
+#endif'
+check if-defined-followed-by-operator 42 '#define X 1
+#if defined X && X && !defined Y && defined(X)
+int main(void) { return 42; }
+#endif'
+check if-keyword-defined 42 '#define int 1
+#if defined int && defined(int) && int
+#undef int
+int main(void) { return 42; }
+#endif'
+check if-keyword-is-zero 42 '#if int || long || return
+int unused;
+#endif
+int main(void) { return 42; }'
+
+# #if arithmetic uses intmax_t/uintmax_t, including the unselected ?: arm.
+check if-unsigned-comparison 42 '#if 18446744073709551615U > 0 && -1 > 0U && -1 == 18446744073709551615U
+int main(void) { return 42; }
+#endif'
+check if-unsigned-arithmetic 42 '#if (18446744073709551615U + 1) == 0 && (0U - 1) > 0 && (18446744073709551615U * 2) == 18446744073709551614U
+int main(void) { return 42; }
+#endif'
+check if-unsigned-division 42 '#if (18446744073709551615U / 2) == 9223372036854775807L && (18446744073709551615U % 2) == 1
+int main(void) { return 42; }
+#endif'
+check if-shift-signedness 42 '#if (-2 >> 1U) == -1 && (18446744073709551615U >> 63) == 1 && (1U << 63) > 0
+int main(void) { return 42; }
+#endif'
+check if-conditional-signedness 42 '#if (1 ? -1 : 0U) > 0 && (0 ? 0U : -1) > 0 && (1 ? -1 : 1U / 0) > 0
+int main(void) { return 42; }
+#endif'
+check if-comparison-result-signed 42 '#if -(1U < 2U) < 0 && -!0U < 0 && -(1U && 2U) < 0
+int main(void) { return 42; }
+#endif'
+check if-intmax-width 42 '#if (1U << 32) == 4294967296L && 2147483647 + 1 == 2147483648L
+int main(void) { return 42; }
+#endif'
+check if-signed-multiply-boundary 42 '#if (-4611686018427387904L * 2) == (-9223372036854775807L - 1)
+int main(void) { return 42; }
+#endif'
+
+check_error if-live-division-by-zero '#if 1 / 0
+#endif' '1:7: error: division by zero in #if expression'
+check_error if-live-conditional-after-short-circuit '#if 0 && 1 ? 4 : 1 / 0
+#endif' '1:20: error: division by zero in #if expression'
+check_error if-live-remainder-by-zero '#if 1 % 0
+#endif' '1:7: error: division by zero in #if expression'
+check_error if-live-add-overflow '#if 9223372036854775807L + 1
+#endif' '1:26: error: integer overflow in #if expression'
+check_error if-live-multiply-overflow '#if 4611686018427387904L * 2
+#endif' '1:26: error: integer overflow in #if expression'
+check_error if-live-divide-overflow '#if (-9223372036854775807L - 1) / -1
+#endif' '1:33: error: integer overflow in #if expression'
+check_error if-live-remainder-overflow '#if (-9223372036854775807L - 1) % -1
+#endif' '1:33: error: integer overflow in #if expression'
+check_error if-live-shift-count '#if 1 << 64
+#endif' '1:7: error: invalid shift count in #if expression'
+check_error if-live-negative-shift '#if 1 >> -1
+#endif' '1:7: error: invalid shift count in #if expression'
+check_error if-dead-operand-syntax '#if 1 || (1 + )
+#endif' '1:15: error: invalid #if expression'
+check_error if-defined-missing-close '#if defined(X
+#endif' "1:14: error: expect ')' after macro name in 'defined'"
+check_error if-inactive-unterminated '#if 0
+int unused;' '1:2: error: unterminated conditional directive'
+check_error if-inactive-nested-unterminated '#if 1
+#if 0
+int unused;' '2:2: error: unterminated conditional directive'
+check_error ifdef-inactive-unterminated '#ifdef UNDEFINED
+int unused;' '1:7: error: unterminated conditional directive'
 
 include_semi_name=include-diagnostic-file
 include_semi_input="$WORK_DIR/$include_semi_name.c"

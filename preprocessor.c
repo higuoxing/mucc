@@ -26,6 +26,68 @@
 /* Match GCC and Clang's default limit */
 #define MAX_INCLUDE_DEPTH 200
 
+/*
+ * One saved scanner state per open include; `outer` links to the enclosing
+ * file.
+ */
+struct IncludeFrame {
+  Lexer lexer;
+  struct IncludeFrame *outer;
+  /*
+   * Conditionals cannot span a file boundary, so the depth at entry is
+   * recorded and checked when the file ends.
+   */
+  int conditional_depth;
+};
+
+/* One conditional-compilation level, from #if to its #endif. */
+typedef struct {
+  bool active;        /* This branch is being compiled. */
+  SourcePosition loc; /* The opening directive, for diagnostics. */
+} ConditionalFrame;
+
+/* One active object-like macro: a replacement list of already-lexed tokens. */
+struct Macro {
+  Token name;
+  Vector tokens; /* The replacement list, in source order. */
+  /* Set while this macro is being expanded, which stops direct recursion. */
+  bool expanding;
+  struct Macro *next;
+};
+
+/* A cursor into one macro's replacement list, innermost last. */
+typedef struct {
+  Macro *macro; /* Not const: popping the frame clears macro->expanding. */
+  int index;    /* Next token of macro->tokens to replay. */
+} MacroFrame;
+
+/*
+ * State for evaluating a controlling constant expression (C11 6.10.1p4), used
+ * by #if. The tokens are already lexed, so this is a cursor over them.
+ */
+typedef struct {
+  const Vector *tokens; /* Token elements; not owned. */
+  int index;            /* Next token to read. */
+  Token end;            /* Location just past the last token. */
+} PPExpression;
+
+/*
+ * Preprocessing identifiers include C keywords. Keyword classification is
+ * relevant to the parser, but must not prevent macro lookup or defined().
+ */
+static bool is_pp_identifier(Token tok) {
+  return tok.len > 0 &&
+         (isalpha((unsigned char)tok.start[0]) || tok.start[0] == '_');
+}
+
+/*
+ * Values use target-width bits, with signedness retained through conversions.
+ */
+typedef struct {
+  uint64_t bits;
+  bool is_unsigned;
+} PPValue;
+
 void pp_init(Preprocessor *pp, const SourceFile *file,
              const Vector *include_paths) {
   lexer_init(&pp->lexer, file);
@@ -40,8 +102,7 @@ void pp_init(Preprocessor *pp, const SourceFile *file,
 static Macro *find_macro(const Preprocessor *pp, Token name) {
   Macro *macro;
   for (macro = pp->macros; macro; macro = macro->next)
-    if (macro->len == name.len &&
-        memcmp(macro->name, name.start, (size_t)name.len) == 0)
+    if (same_identifier(macro->name, name))
       return macro;
   return NULL;
 }
@@ -244,6 +305,33 @@ static void directive_tokens(Preprocessor *pp, Vector *out) {
     lexer_advance(&pp->lexer);
 }
 
+/*
+ * Redefinitions compare spelling and whitespace between tokens, not locations,
+ * decoded payload pointers, or padding bytes in the Token representation.
+ * Leading and trailing whitespace and the amount of separating space do not
+ * matter. Definition tokens still point into their original source buffer.
+ */
+static bool is_same_replacement(const Vector *a, const Vector *b) {
+  const Token *left = a->data;
+  const Token *right = b->data;
+  size_t i;
+  if (a->len != b->len)
+    return false;
+  for (i = 0; i < a->len; ++i) {
+    if (left[i].kind != right[i].kind || left[i].len != right[i].len ||
+        memcmp(left[i].start, right[i].start, (size_t)left[i].len) != 0)
+      return false;
+    if (i > 0) {
+      bool left_space = left[i].start != left[i - 1].start + left[i - 1].len;
+      bool right_space =
+          right[i].start != right[i - 1].start + right[i - 1].len;
+      if (left_space != right_space)
+        return false;
+    }
+  }
+  return true;
+}
+
 static void define_macro(Preprocessor *pp) {
   Lexer *l = &pp->lexer;
   SourcePosition name_loc;
@@ -275,9 +363,7 @@ static void define_macro(Preprocessor *pp) {
   macro = find_macro(pp, name);
   if (macro) {
     /* Redefining is allowed only when the replacement list is identical. */
-    if (macro->tokens.len != tokens.len ||
-        (tokens.len && memcmp(macro->tokens.data, tokens.data,
-                              tokens.len * sizeof(Token)) != 0))
+    if (!is_same_replacement(&macro->tokens, &tokens))
       error_at(name, "'%.*s' redefined", name.len, name.start);
     vector_free(&tokens);
     return;
@@ -286,8 +372,7 @@ static void define_macro(Preprocessor *pp) {
   macro = calloc(1, sizeof(*macro));
   if (!macro)
     error_at(name, "out of memory");
-  macro->name = name.start;
-  macro->len = name.len;
+  macro->name = name;
   macro->tokens = tokens;
   macro->next = pp->macros;
   pp->macros = macro;
@@ -304,8 +389,7 @@ static void undef_macro(Preprocessor *pp) {
   name = lexer_next_token(l);
   /* Undefining a name that is not defined is not an error (C11 6.10.3.5). */
   for (link = &pp->macros; *link; link = &(*link)->next)
-    if ((*link)->len == name.len &&
-        memcmp((*link)->name, name.start, (size_t)name.len) == 0) {
+    if (same_identifier((*link)->name, name)) {
       *link = (*link)->next;
       break;
     }
@@ -369,10 +453,396 @@ static void endif_directive(Preprocessor *pp) {
   pop_conditional(pp, loc);
 }
 
+/*
+ * #if takes a controlling constant expression (C11 6.10.1p4). `defined` is
+ * resolved here, and any identifier that survives expansion evaluates to 0.
+ * Precedence follows the C operators; the operands are intmax_t and uintmax_t
+ * values, which for our target are the 64-bit long types.
+ */
+
+static Token pp_expr_peek(const PPExpression *expr) {
+  if ((size_t)expr->index >= expr->tokens->len)
+    return expr->end;
+  return ((Token *)expr->tokens->data)[expr->index];
+}
+
+static Token pp_expr_advance(PPExpression *expr) {
+  Token tok = pp_expr_peek(expr);
+  if ((size_t)expr->index < expr->tokens->len)
+    expr->index++;
+  return tok;
+}
+
+static bool pp_is_keyword(Token tok, const char *word) {
+  size_t len = strlen(word);
+  return is_pp_identifier(tok) && (size_t)tok.len == len &&
+         memcmp(tok.start, word, len) == 0;
+}
+
+/* defined X or defined(X). The operand is a name, never macro-expanded. */
+static bool pp_parse_defined(PPExpression *expr, Preprocessor *pp) {
+  bool parenthesized = false;
+  Token tok;
+
+  if (pp_expr_peek(expr).kind == TOKEN_LPAREN) {
+    pp_expr_advance(expr);
+    parenthesized = true;
+  }
+  tok = pp_expr_advance(expr);
+  if (!is_pp_identifier(tok))
+    error_at(tok, "expect macro name in 'defined'");
+  if (parenthesized) {
+    Token close = pp_expr_advance(expr);
+    if (close.kind != TOKEN_RPAREN)
+      error_at(close, "expect ')' after macro name in 'defined'");
+  }
+  return find_macro(pp, tok) != NULL;
+}
+
+static PPValue pp_expr_conditional(PPExpression *expr, Preprocessor *pp,
+                                   bool evaluate);
+
+static PPValue pp_expr_primary(PPExpression *expr, Preprocessor *pp,
+                               bool evaluate) {
+  Token tok = pp_expr_advance(expr);
+  PPValue value = {0};
+  if (pp_is_keyword(tok, "defined")) {
+    value.bits = pp_parse_defined(expr, pp);
+    return value;
+  }
+  if (tok.kind == TOKEN_INT_LITERAL) {
+    value.bits = tok.d.int_literal.val;
+    value.is_unsigned = (tok.d.int_literal.suffix & INT_SUFFIX_UNSIGNED) != 0 ||
+                        (tok.start[0] != '\'' && value.bits > INT64_MAX);
+    return value;
+  }
+  /*
+   * Any remaining preprocessing identifier, including a C keyword, is zero.
+   */
+  if (is_pp_identifier(tok))
+    return value;
+  if (tok.kind == TOKEN_LPAREN) {
+    Token close;
+    value = pp_expr_conditional(expr, pp, evaluate);
+    close = pp_expr_advance(expr);
+    if (close.kind != TOKEN_RPAREN)
+      error_at(close, "expect ')' in #if expression");
+    return value;
+  }
+  error_at(tok, "invalid #if expression");
+}
+
+static PPValue pp_expr_unary(PPExpression *expr, Preprocessor *pp,
+                             bool evaluate) {
+  Token op = pp_expr_peek(expr);
+  PPValue value;
+  if (op.kind != TOKEN_PLUS && op.kind != TOKEN_MINUS &&
+      op.kind != TOKEN_BANG && op.kind != TOKEN_TILDE)
+    return pp_expr_primary(expr, pp, evaluate);
+  pp_expr_advance(expr);
+  value = pp_expr_unary(expr, pp, evaluate);
+  if (op.kind == TOKEN_BANG) {
+    value.bits = !value.bits;
+    value.is_unsigned = false;
+  } else if (evaluate && op.kind == TOKEN_MINUS) {
+    if (!value.is_unsigned && value.bits == (uint64_t)INT64_MAX + 1)
+      error_at(op, "integer overflow in #if expression");
+    value.bits = 0 - value.bits;
+  } else if (evaluate && op.kind == TOKEN_TILDE) {
+    value.bits = ~value.bits;
+  }
+  return value;
+}
+
+/*
+ * Arithmetic uses unsigned bits to avoid overflowing the compiler's own C
+ * operations. Signed overflow is checked before a value is used. Dead operands
+ * are still parsed and retain their type, but do not perform arithmetic.
+ */
+static PPValue pp_apply_binary(Token op, PPValue lhs, PPValue rhs,
+                               bool evaluate) {
+  PPValue result = {0};
+  bool comparison = op.kind == TOKEN_LESS || op.kind == TOKEN_LESS_EQ ||
+                    op.kind == TOKEN_GREATER || op.kind == TOKEN_GREATER_EQ ||
+                    op.kind == TOKEN_EQ_EQ || op.kind == TOKEN_NOT_EQ;
+  bool logical = op.kind == TOKEN_AND_AND || op.kind == TOKEN_OR_OR;
+  bool shift = op.kind == TOKEN_LSHIFT || op.kind == TOKEN_RSHIFT;
+  bool is_unsigned = lhs.is_unsigned || rhs.is_unsigned;
+  uint64_t a = lhs.bits;
+  uint64_t b = rhs.bits;
+  bool overflow = false;
+  result.is_unsigned =
+      !comparison && !logical && (shift ? lhs.is_unsigned : is_unsigned);
+  if (!evaluate)
+    return result;
+  switch (op.kind) {
+  case TOKEN_PLUS:
+    result.bits = a + b;
+    overflow = ((a ^ result.bits) & (b ^ result.bits)) >> 63;
+    break;
+  case TOKEN_MINUS:
+    result.bits = a - b;
+    overflow = ((a ^ b) & (a ^ result.bits)) >> 63;
+    break;
+  case TOKEN_STAR: {
+    uint64_t abs_a = (int64_t)a < 0 ? 0 - a : a;
+    uint64_t abs_b = (int64_t)b < 0 ? 0 - b : b;
+    uint64_t limit = (uint64_t)INT64_MAX + ((a ^ b) >> 63);
+    result.bits = a * b;
+    overflow = abs_b && abs_a > limit / abs_b;
+    break;
+  }
+  case TOKEN_SLASH:
+  case TOKEN_PERCENT:
+    if (!b)
+      error_at(op, "division by zero in #if expression");
+    if (!is_unsigned && a == (uint64_t)INT64_MAX + 1 && b == UINT64_MAX)
+      error_at(op, "integer overflow in #if expression");
+    if (op.kind == TOKEN_SLASH)
+      result.bits = is_unsigned ? a / b : (uint64_t)((int64_t)a / (int64_t)b);
+    else
+      result.bits = is_unsigned ? a % b : (uint64_t)((int64_t)a % (int64_t)b);
+    break;
+  case TOKEN_LSHIFT:
+  case TOKEN_RSHIFT:
+    if (b >= 64)
+      error_at(op, "invalid shift count in #if expression");
+    if (op.kind == TOKEN_LSHIFT) {
+      if (!lhs.is_unsigned &&
+          ((int64_t)a < 0 || a > ((uint64_t)INT64_MAX >> b)))
+        error_at(op, "integer overflow in #if expression");
+      result.bits = a << b;
+    } else {
+      result.bits = lhs.is_unsigned ? a >> b : (uint64_t)((int64_t)a >> b);
+    }
+    break;
+  case TOKEN_LESS:
+    result.bits = is_unsigned ? a < b : (int64_t)a < (int64_t)b;
+    break;
+  case TOKEN_GREATER:
+    result.bits = is_unsigned ? a > b : (int64_t)a > (int64_t)b;
+    break;
+  case TOKEN_LESS_EQ:
+    result.bits = is_unsigned ? a <= b : (int64_t)a <= (int64_t)b;
+    break;
+  case TOKEN_GREATER_EQ:
+    result.bits = is_unsigned ? a >= b : (int64_t)a >= (int64_t)b;
+    break;
+  case TOKEN_EQ_EQ:
+    result.bits = a == b;
+    break;
+  case TOKEN_NOT_EQ:
+    result.bits = a != b;
+    break;
+  case TOKEN_BIT_AND:
+    result.bits = a & b;
+    break;
+  case TOKEN_BIT_XOR:
+    result.bits = a ^ b;
+    break;
+  case TOKEN_BIT_OR:
+    result.bits = a | b;
+    break;
+  case TOKEN_AND_AND:
+    result.bits = a && b;
+    break;
+  case TOKEN_OR_OR:
+    result.bits = a || b;
+    break;
+  default:
+    error_at(op, "invalid #if expression");
+  }
+  if (!is_unsigned && overflow)
+    error_at(op, "integer overflow in #if expression");
+  return result;
+}
+
+/*
+ * Higher values bind more tightly; zero ends a binary expression.
+ */
+static int pp_binary_precedence(TokenKind kind) {
+  switch (kind) {
+  case TOKEN_OR_OR:
+    return 1;
+  case TOKEN_AND_AND:
+    return 2;
+  case TOKEN_BIT_OR:
+    return 3;
+  case TOKEN_BIT_XOR:
+    return 4;
+  case TOKEN_BIT_AND:
+    return 5;
+  case TOKEN_EQ_EQ:
+  case TOKEN_NOT_EQ:
+    return 6;
+  case TOKEN_LESS:
+  case TOKEN_LESS_EQ:
+  case TOKEN_GREATER:
+  case TOKEN_GREATER_EQ:
+    return 7;
+  case TOKEN_LSHIFT:
+  case TOKEN_RSHIFT:
+    return 8;
+  case TOKEN_PLUS:
+  case TOKEN_MINUS:
+    return 9;
+  case TOKEN_STAR:
+  case TOKEN_SLASH:
+  case TOKEN_PERCENT:
+    return 10;
+  default:
+    return 0;
+  }
+}
+
+/*
+ * Precedence climbing: consume operators at or above min_precedence. Parsing
+ * the RHS at precedence + 1 groups tighter operators first and leaves equal
+ * precedence operators for this loop, making binary operators left-associative.
+ */
+static PPValue pp_expr_binary(PPExpression *expr, Preprocessor *pp,
+                              int min_precedence, bool evaluate) {
+  PPValue lhs = pp_expr_unary(expr, pp, evaluate);
+  for (;;) {
+    Token op = pp_expr_peek(expr);
+    int precedence = pp_binary_precedence(op.kind);
+    bool evaluate_rhs = evaluate;
+    PPValue rhs;
+    if (precedence < min_precedence)
+      return lhs;
+    pp_expr_advance(expr);
+    if ((op.kind == TOKEN_AND_AND && lhs.bits == 0) ||
+        (op.kind == TOKEN_OR_OR && lhs.bits != 0))
+      evaluate_rhs = false;
+    rhs = pp_expr_binary(expr, pp, precedence + 1, evaluate_rhs);
+    lhs = pp_apply_binary(op, lhs, rhs, evaluate);
+  }
+}
+
+static PPValue pp_expr_conditional(PPExpression *expr, Preprocessor *pp,
+                                   bool evaluate) {
+  PPValue cond = pp_expr_binary(expr, pp, 1, evaluate);
+  if (pp_expr_peek(expr).kind == TOKEN_QUESTION) {
+    PPValue then_value;
+    PPValue else_value;
+    PPValue result;
+    Token colon;
+    pp_expr_advance(expr);
+    then_value = pp_expr_conditional(expr, pp, evaluate && cond.bits != 0);
+    colon = pp_expr_advance(expr);
+    if (colon.kind != TOKEN_COLON)
+      error_at(colon, "expect ':' in #if expression");
+    else_value = pp_expr_conditional(expr, pp, evaluate && cond.bits == 0);
+    result = cond.bits ? then_value : else_value;
+    result.is_unsigned = then_value.is_unsigned || else_value.is_unsigned;
+    return result;
+  }
+  return cond;
+}
+
+/*
+ * Expand macros in a controlling expression before evaluating it (C11
+ * 6.10.1p4). The operand of `defined` is never expanded, since that operator
+ * asks about the name itself. A recursive macro stops expanding, so
+ * `#define A A` terminates. Names left over are undefined and evaluate to 0.
+ */
+static void pp_expand_condition(Preprocessor *pp, const Vector *in,
+                                Vector *out) {
+  const Token *tokens = in->data;
+  int count = (int)in->len;
+  int i;
+  for (i = 0; i < count; ++i) {
+    Token tok = tokens[i];
+    Macro *macro;
+    if (pp_is_keyword(tok, "defined")) {
+      int j = i + 1;
+      bool parenthesized = false;
+      if (!vector_push(out, &tok))
+        error_at(tok, "out of memory");
+      /* Copy the operand verbatim, so a macro name here stays a name. */
+      if (j < count && tokens[j].kind == TOKEN_LPAREN) {
+        parenthesized = true;
+        if (!vector_push(out, &tokens[j++]))
+          error_at(tok, "out of memory");
+      }
+      if (j < count) {
+        if (!vector_push(out, &tokens[j++]))
+          error_at(tok, "out of memory");
+      }
+      if (parenthesized && j < count) {
+        if (!vector_push(out, &tokens[j++]))
+          error_at(tok, "out of memory");
+      }
+      i = j - 1;
+      continue;
+    }
+    if (!is_pp_identifier(tok)) {
+      if (!vector_push(out, &tok))
+        error_at(tok, "out of memory");
+      continue;
+    }
+    macro = find_macro(pp, tok);
+    if (!macro || macro->expanding) {
+      if (!vector_push(out, &tok))
+        error_at(tok, "out of memory");
+      continue;
+    }
+    macro->expanding = true;
+    pp_expand_condition(pp, &macro->tokens, out);
+    macro->expanding = false;
+  }
+}
+
+/* Evaluate the tokens and require that all of them were consumed. */
+static bool pp_evaluate_condition(Preprocessor *pp, const Vector *tokens,
+                                  SourcePosition loc) {
+  PPExpression expr;
+  bool value;
+  if (!tokens->len)
+    error_at(loc, "expect #if expression");
+  expr.tokens = tokens;
+  expr.index = 0;
+  expr.end = ((Token *)tokens->data)[tokens->len - 1];
+  expr.end.start += expr.end.len;
+  expr.end.col += expr.end.len;
+  expr.end.len = 0;
+  expr.end.kind = TOKEN_EOF;
+  value = pp_expr_conditional(&expr, pp, true).bits != 0;
+  if ((size_t)expr.index != tokens->len)
+    error_at(((Token *)tokens->data)[expr.index], "invalid #if expression");
+  return value;
+}
+
+static void if_directive(Preprocessor *pp, SourcePosition loc) {
+  Vector tokens;
+  Vector expanded;
+  bool active;
+
+  vector_init(&tokens, sizeof(Token));
+  directive_tokens(pp, &tokens);
+  /*
+   * A skipped outer branch evaluates nothing, so a syntax error inside dead
+   * code is not reported. That matches how other directives behave there.
+   */
+  if (!conditionals_active(pp)) {
+    vector_free(&tokens);
+    push_conditional(pp, false, loc);
+    return;
+  }
+  vector_init(&expanded, sizeof(Token));
+  pp_expand_condition(pp, &tokens, &expanded);
+  active = pp_evaluate_condition(pp, &expanded, loc);
+  vector_free(&expanded);
+  vector_free(&tokens);
+  push_conditional(pp, active, loc);
+}
+
 /* The directives this preprocessor understands. */
 typedef enum {
+  DIRECTIVE_UNKNOWN, /* Not in the table; an unimplemented directive. */
   DIRECTIVE_DEFINE,
   DIRECTIVE_ENDIF,
+  DIRECTIVE_IF,
   DIRECTIVE_IFDEF,
   DIRECTIVE_IFNDEF,
   DIRECTIVE_INCLUDE,
@@ -392,9 +862,10 @@ typedef struct {
 #define DIR(name, kind) {name, sizeof(name) - 1, kind}
 
 static const Directive directives[] = {
-    DIR("define", DIRECTIVE_DEFINE),   DIR("endif", DIRECTIVE_ENDIF),
-    DIR("ifdef", DIRECTIVE_IFDEF),     DIR("ifndef", DIRECTIVE_IFNDEF),
-    DIR("include", DIRECTIVE_INCLUDE), DIR("undef", DIRECTIVE_UNDEF),
+    DIR("define", DIRECTIVE_DEFINE), DIR("endif", DIRECTIVE_ENDIF),
+    DIR("if", DIRECTIVE_IF),         DIR("ifdef", DIRECTIVE_IFDEF),
+    DIR("ifndef", DIRECTIVE_IFNDEF), DIR("include", DIRECTIVE_INCLUDE),
+    DIR("undef", DIRECTIVE_UNDEF),
 };
 
 #undef DIR
@@ -434,18 +905,41 @@ static void pp_directive(Preprocessor *pp) {
   while (isalnum((unsigned char)*l->cursor) || *l->cursor == '_')
     lexer_advance(l);
   len = (int)(l->cursor - name);
-
   directive = find_directive(name, len);
+
+  /*
+   * In a skipped branch only the conditionals matter, since they track the
+   * nesting. Any other directive, known or not, is discarded without being
+   * interpreted, which is how dead code can hold arbitrary text.
+   */
+  if (!conditionals_active(pp)) {
+    switch (directive ? directive->kind : DIRECTIVE_UNKNOWN) {
+    case DIRECTIVE_IF:
+      if_directive(pp, name_loc);
+      return;
+    case DIRECTIVE_IFDEF:
+      ifdef_directive(pp, true);
+      return;
+    case DIRECTIVE_IFNDEF:
+      ifdef_directive(pp, false);
+      return;
+    case DIRECTIVE_ENDIF:
+      endif_directive(pp);
+      return;
+    default:
+      skip_directive_line(pp);
+      return;
+    }
+  }
+
   if (!directive)
     error_at(name_loc, "preprocessor directive '%.*s' is not supported yet",
              len, name);
 
-  /*
-   * Conditional directives are handled even inside a skipped branch, since they
-   * are what tracks the nesting. Anything else in a skipped branch is ignored,
-   * including #include and #define.
-   */
   switch (directive->kind) {
+  case DIRECTIVE_IF:
+    if_directive(pp, name_loc);
+    return;
   case DIRECTIVE_IFDEF:
     ifdef_directive(pp, true);
     return;
@@ -455,28 +949,17 @@ static void pp_directive(Preprocessor *pp) {
   case DIRECTIVE_ENDIF:
     endif_directive(pp);
     return;
-  default:
-    break;
-  }
-  if (!conditionals_active(pp)) {
-    skip_directive_line(pp);
-    return;
-  }
-
-  switch (directive->kind) {
   case DIRECTIVE_DEFINE:
     define_macro(pp);
-    break;
+    return;
   case DIRECTIVE_INCLUDE:
     include_directive(pp);
-    break;
+    return;
   case DIRECTIVE_UNDEF:
     undef_macro(pp);
-    break;
-  case DIRECTIVE_ENDIF:
-  case DIRECTIVE_IFDEF:
-  case DIRECTIVE_IFNDEF:
-    break; /* Handled above, before the skipped-branch test. */
+    return;
+  case DIRECTIVE_UNKNOWN:
+    break; /* Not stored in the table. */
   }
 }
 
@@ -510,6 +993,7 @@ static bool pop_frame(Preprocessor *pp) {
 static Token next_raw_token(Preprocessor *pp) {
   MacroFrame *frame = top_frame(pp);
   const Token *tokens;
+  Token tok;
   if (!frame)
     return lexer_next_token(&pp->lexer);
   if (frame->index >= (int)frame->macro->tokens.len) {
@@ -518,7 +1002,19 @@ static Token next_raw_token(Preprocessor *pp) {
     return next_raw_token(pp);
   }
   tokens = frame->macro->tokens.data;
-  return tokens[frame->index++];
+  tok = tokens[frame->index++];
+  /*
+   * The parser consumes and frees decoded string bytes. Keep the macro's
+   * replacement payload intact for later expansions.
+   */
+  if (tok.kind == TOKEN_STRING_LITERAL) {
+    unsigned char *bytes = malloc((size_t)tok.d.string_literal.len);
+    if (!bytes)
+      error_at(tok, "out of memory");
+    memcpy(bytes, tok.d.string_literal.val, (size_t)tok.d.string_literal.len);
+    tok.d.string_literal.val = bytes;
+  }
+  return tok;
 }
 
 /*
@@ -551,12 +1047,16 @@ Token pp_next_token(Preprocessor *pp) {
       continue;
     }
     /* End of an included file: resume the file that included it. */
-    if (tok.kind == TOKEN_EOF && pop_include(pp))
-      continue;
+    if (tok.kind == TOKEN_EOF) {
+      if (pop_include(pp))
+        continue;
+      pp_check_end(pp);
+      return tok;
+    }
     /* Tokens in a skipped branch never reach the parser. */
     if (!conditionals_active(pp))
       continue;
-    if (tok.kind == TOKEN_IDENTIFIER) {
+    if (is_pp_identifier(tok)) {
       Macro *macro = find_macro(pp, tok);
       if (macro && !macro->expanding) {
         /* The name is replaced, possibly by nothing (C11 6.10.3p4). */
